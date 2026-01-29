@@ -27,6 +27,7 @@ source "$LIB_DIR/keycloak_discovery.sh"
 source "$LIB_DIR/distribution_handler.sh"
 source "$LIB_DIR/audit_logger.sh"
 source "$LIB_DIR/prometheus_exporter.sh"
+source "$LIB_DIR/multi_tenant.sh"
 
 # ============================================================================
 # CONFIGURATION DEFAULTS
@@ -1579,6 +1580,83 @@ cmd_plan() {
 }
 
 # ============================================================================
+# MULTI-INSTANCE MIGRATION HANDLERS
+# ============================================================================
+
+mt_execute_multi_tenant() {
+    # Execute multi-tenant migration from profile
+    log_info "Processing multi-tenant migration profile..."
+
+    # Parse rollout strategy
+    local rollout_type="${PROFILE_ROLLOUT_TYPE:-parallel}"
+    local max_concurrent="${PROFILE_ROLLOUT_MAX_CONCURRENT:-3}"
+
+    # Count tenants
+    local tenant_count
+    tenant_count=$(yq eval '.tenants | length' "$PROFILE_FILE" 2>/dev/null || echo "0")
+
+    if [[ "$tenant_count" -eq 0 ]]; then
+        log_error "No tenants defined in profile"
+        return 1
+    fi
+
+    log_info "Found $tenant_count tenants, rollout: $rollout_type"
+
+    # Execute based on rollout type
+    if [[ "$rollout_type" == "parallel" ]]; then
+        mt_execute_parallel "tenant" "$tenant_count" "$PROFILE_FILE"
+    elif [[ "$rollout_type" == "sequential" ]]; then
+        mt_execute_sequential "tenant" "$tenant_count" "$PROFILE_FILE"
+    else
+        log_error "Unknown rollout type: $rollout_type"
+        return 1
+    fi
+}
+
+mt_execute_clustered() {
+    # Execute clustered deployment migration from profile
+    log_info "Processing clustered deployment migration profile..."
+
+    # Parse rollout strategy
+    local rollout_type="${PROFILE_ROLLOUT_TYPE:-sequential}"  # Default: rolling update
+
+    # Count nodes
+    local node_count
+    node_count=$(yq eval '.cluster.nodes | length' "$PROFILE_FILE" 2>/dev/null || echo "0")
+
+    if [[ "$node_count" -eq 0 ]]; then
+        log_error "No cluster nodes defined in profile"
+        return 1
+    fi
+
+    log_info "Found $node_count cluster nodes, rollout: $rollout_type"
+
+    # Load balancer integration (drain/enable)
+    local lb_type="${PROFILE_LB_TYPE:-}"
+    if [[ -n "$lb_type" ]]; then
+        log_info "Load balancer integration: $lb_type"
+        export CLUSTER_LB_TYPE="$lb_type"
+        export CLUSTER_LB_HOST="${PROFILE_LB_HOST:-}"
+        export CLUSTER_LB_ADMIN_SOCKET="${PROFILE_LB_ADMIN_SOCKET:-}"
+        export CLUSTER_LB_BACKEND="${PROFILE_LB_BACKEND:-keycloak_backend}"
+    fi
+
+    # Execute based on rollout type
+    if [[ "$rollout_type" == "parallel" ]]; then
+        log_warn "Parallel rollout for clustered deployment may cause downtime"
+        read -r -p "Continue with parallel migration? [y/N]: " confirm
+        if [[ ! "$confirm" =~ ^[Yy]$ ]]; then
+            log_info "Migration cancelled"
+            return 1
+        fi
+        mt_execute_parallel "node" "$node_count" "$PROFILE_FILE"
+    else
+        # Sequential (rolling update) - recommended
+        mt_execute_sequential "node" "$node_count" "$PROFILE_FILE"
+    fi
+}
+
+# ============================================================================
 # COMMAND: MIGRATE
 # ============================================================================
 
@@ -1601,6 +1679,20 @@ cmd_migrate() {
         load_profile_or_discover "$profile"
     fi
 
+    # Detect migration mode (standard, multi-tenant, clustered)
+    local migration_mode="${PROFILE_MODE:-standard}"
+
+    if [[ "$migration_mode" == "multi-tenant" ]]; then
+        log_section "Multi-Tenant Migration Mode"
+        mt_execute_multi_tenant
+        return $?
+    elif [[ "$migration_mode" == "clustered" ]]; then
+        log_section "Clustered Deployment Migration Mode"
+        mt_execute_clustered
+        return $?
+    fi
+
+    # Standard single-instance migration
     # Pre-flight checks (skip with --skip-preflight)
     if [[ "${SKIP_PREFLIGHT:-false}" != "true" ]]; then
         run_preflight_checks || exit 1

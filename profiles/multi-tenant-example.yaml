@@ -1,0 +1,90 @@
+# Multi-Tenant Migration Profile
+# Multiple isolated Keycloak instances with separate databases
+
+profile:
+  name: multi-tenant-saas
+  description: "SaaS platform with 3 isolated Keycloak tenants"
+  mode: multi-tenant  # Special mode for multi-tenant migration
+
+# Global migration settings (apply to all tenants)
+migration:
+  current_version: "16.1.1"
+  target_version: "26.0.7"
+  strategy: rolling_update
+  parallel: true  # Migrate all tenants simultaneously
+  auto_rollback: true
+  backup: true
+
+# Distribution settings (shared)
+distribution:
+  mode: download
+  download_base_url: "https://github.com/keycloak/keycloak/releases/download"
+  validate_checksums: true
+
+# Monitoring (shared)
+monitoring:
+  enabled: true
+  prometheus_port: 9090
+
+# Tenant definitions
+tenants:
+  # Tenant 1: Enterprise customer
+  - name: enterprise-corp
+    database:
+      type: postgresql
+      host: db1.example.com
+      port: 5432
+      name: keycloak_enterprise
+      user: keycloak_admin
+      password: ${TENANT1_DB_PASSWORD}  # From environment
+      admin_user: postgres
+      admin_password: ${TENANT1_DB_ADMIN_PASSWORD}
+
+    deployment:
+      mode: kubernetes
+      namespace: keycloak-enterprise
+      deployment: keycloak
+      replicas: 3
+
+  # Tenant 2: SMB customer
+  - name: smb-startup
+    database:
+      type: postgresql
+      host: db2.example.com
+      port: 5432
+      name: keycloak_smb
+      user: keycloak_admin
+      password: ${TENANT2_DB_PASSWORD}
+      admin_user: postgres
+      admin_password: ${TENANT2_DB_ADMIN_PASSWORD}
+
+    deployment:
+      mode: kubernetes
+      namespace: keycloak-smb
+      deployment: keycloak
+      replicas: 2
+
+  # Tenant 3: Trial customer
+  - name: trial-demo
+    database:
+      type: postgresql
+      host: db3.example.com
+      port: 5432
+      name: keycloak_trial
+      user: keycloak_admin
+      password: ${TENANT3_DB_PASSWORD}
+      admin_user: postgres
+      admin_password: ${TENANT3_DB_ADMIN_PASSWORD}
+
+    deployment:
+      mode: kubernetes
+      namespace: keycloak-trial
+      deployment: keycloak
+      replicas: 1
+
+# Rollout strategy for parallel execution
+rollout:
+  type: parallel  # Options: parallel, sequential, canary
+  max_concurrent: 3  # Maximum number of tenants to migrate simultaneously
+  canary_percentage: 10  # If canary rollout, migrate 10% first
+  validation_delay: 300  # Seconds to wait before proceeding to next batch

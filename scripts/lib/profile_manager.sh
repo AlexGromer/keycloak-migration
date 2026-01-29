@@ -67,6 +67,9 @@ profile_load() {
         return 1
     fi
 
+    # Export profile file path for multi-instance handlers
+    export PROFILE_FILE="$profile_file"
+
     # Parse YAML using simple grep/sed (no external dependencies)
     # Export variables with PROFILE_ prefix
     # Strip comments (everything after #) before parsing
@@ -111,6 +114,21 @@ profile_load() {
     export PROFILE_MIGRATION_TIMEOUT=$(parse_yaml_value "timeout_per_version" "$profile_file")
     export PROFILE_MIGRATION_RUN_TESTS=$(parse_yaml_value "run_smoke_tests" "$profile_file")
     export PROFILE_MIGRATION_BACKUP=$(parse_yaml_value "backup_before_step" "$profile_file")
+
+    # Multi-instance settings (v3.2)
+    export PROFILE_MODE=$(parse_yaml_section_value "profile" "mode" "$profile_file")
+
+    # Rollout settings
+    export PROFILE_ROLLOUT_TYPE=$(parse_yaml_section_value "rollout" "type" "$profile_file")
+    export PROFILE_ROLLOUT_MAX_CONCURRENT=$(parse_yaml_section_value "rollout" "max_concurrent" "$profile_file")
+    export PROFILE_ROLLOUT_NODES_AT_ONCE=$(parse_yaml_section_value "rollout" "nodes_at_once" "$profile_file")
+    export PROFILE_ROLLOUT_DRAIN_TIMEOUT=$(parse_yaml_section_value "rollout" "drain_timeout" "$profile_file")
+
+    # Cluster load balancer settings
+    export PROFILE_LB_TYPE=$(parse_yaml_section_value "cluster.load_balancer" "type" "$profile_file")
+    export PROFILE_LB_HOST=$(parse_yaml_section_value "cluster.load_balancer" "host" "$profile_file")
+    export PROFILE_LB_ADMIN_SOCKET=$(parse_yaml_section_value "cluster.load_balancer" "admin_socket" "$profile_file")
+    export PROFILE_LB_BACKEND=$(parse_yaml_section_value "cluster.load_balancer" "backend_name" "$profile_file")
 
     echo "Profile loaded: $profile_name"
 }

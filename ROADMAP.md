@@ -22,26 +22,28 @@ The following features are **optional** and will be considered based on communit
 
 ### 1. Monitoring & Observability (v3.1)
 
-**Status:** 🟡 Planned
+**Status:** ✅ Completed (2026-01-29)
 **Priority:** Medium
 **Effort:** 2-3 weeks
 
 #### Features
 
-- **Prometheus Exporter**
+- **Prometheus Exporter** ✅
   - Real-time metrics during migration
-  - Metrics: migration progress (%), checkpoint status, duration, errors
+  - Metrics: migration progress (%), checkpoint status, duration, errors, DB size, Java heap
   - Endpoint: `http://localhost:9090/metrics`
+  - Implementation: `scripts/lib/prometheus_exporter.sh`
 
-- **Grafana Dashboard**
+- **Grafana Dashboard** ✅
   - Pre-built dashboard for migration monitoring
-  - Panels: progress bar, checkpoint timeline, database growth, Java heap usage
-  - Alert rules for failures
+  - 7 panels: progress gauge, duration, checkpoints, errors, DB size, heap, success timestamp
+  - Alert rules for failures (11 rules across 4 severity levels)
+  - Implementation: `examples/monitoring/grafana-dashboard.json`, `prometheus-alerts.yml`
 
-- **Structured Logging**
-  - OpenTelemetry integration (already have JSON logs)
-  - Trace ID propagation across steps
-  - Export to Loki, Elasticsearch, Splunk
+- **Docker Compose Stack** ✅
+  - One-command monitoring deployment
+  - Prometheus + Grafana + Alertmanager
+  - Implementation: `examples/monitoring/docker-compose.yml`
 
 #### Implementation
 
@@ -64,47 +66,58 @@ keycloak_migration_progress{profile="prod",from="16.1.1",to="26.0.7"} 0.67
 
 ---
 
-### 2. Multi-Tenant Support (v3.2)
+### 2. Multi-Tenant & Clustered Support (v3.2)
 
-**Status:** 🟡 Planned
+**Status:** 🟢 In Progress (80% complete)
 **Priority:** Medium
 **Effort:** 1-2 weeks
 
 #### Features
 
-- **Multiple Keycloak Instances in One Profile**
+- **Multi-Tenant Support** ✅
+  - Multiple isolated Keycloak instances in one profile
+  - Separate databases per tenant
+  - Parallel or sequential migration
+  - Implementation: `scripts/lib/multi_tenant.sh`, `profiles/multi-tenant-example.yaml`
   ```yaml
+  mode: multi-tenant
   tenants:
-    - name: tenant-1
-      database:
-        host: db1.example.com
-        name: keycloak_tenant1
-      deployment:
-        namespace: tenant-1
-        deployment: keycloak
-
-    - name: tenant-2
-      database:
-        host: db2.example.com
-        name: keycloak_tenant2
-      deployment:
-        namespace: tenant-2
-        deployment: keycloak
+    - name: enterprise-corp
+      database: {host: db1.example.com, name: keycloak_enterprise}
+      deployment: {namespace: keycloak-enterprise, replicas: 3}
+    - name: smb-startup
+      database: {host: db2.example.com, name: keycloak_smb}
   ```
 
-- **Parallel Migration**
-  - Migrate all tenants in parallel (with `--parallel` flag)
-  - Per-tenant checkpoints and rollback
-  - Aggregated audit log
+- **Clustered Deployment Support** ✅
+  - Multiple Keycloak nodes sharing one database
+  - Rolling update (sequential) or parallel migration
+  - Load balancer integration (HAProxy drain/enable)
+  - Implementation: `scripts/lib/multi_tenant.sh`, `profiles/clustered-bare-metal-example.yaml`
+  ```yaml
+  mode: clustered
+  cluster:
+    load_balancer: {type: haproxy, host: lb.example.com}
+    nodes:
+      - {name: kc-node-1, host: 192.168.1.101, ssh_user: keycloak}
+      - {name: kc-node-2, host: 192.168.1.102, ssh_user: keycloak}
+  ```
 
-- **Rollout Strategies**
-  - Sequential (default): migrate tenant-1, then tenant-2
-  - Canary: migrate 10% of tenants first, validate, then rest
-  - Blue-Green: migrate to new cluster, switch traffic
+- **Live Monitoring** ✅
+  - Real-time ASCII progress bars for all instances simultaneously
+  - Per-instance/per-node Prometheus metrics with `tenant` and `node` labels
+  - Multi-instance Grafana dashboard with template variables
+  - Implementation: `examples/monitoring/grafana-dashboard-multi-instance.json`
 
-#### Use Case
+- **Rollout Strategies** ✅
+  - Parallel: all instances/nodes migrated simultaneously
+  - Sequential: one at a time (rolling update for clustered)
+  - Configuration: `rollout.type` in profile
 
-SaaS platforms with 10+ isolated Keycloak instances.
+#### Use Cases
+
+- **Multi-Tenant:** SaaS platforms with 10+ isolated Keycloak instances
+- **Clustered:** High-availability deployments with 2-8 nodes sharing database
 
 ---
 
@@ -283,10 +296,10 @@ Reasons:
 | Version | Features | Timeline | Status |
 |---------|----------|----------|--------|
 | **v3.0.0** | Core migration, auto-detection, 7 databases | 2026-01 | ✅ Released |
-| **v3.1** | Monitoring (Prometheus, Grafana) | 2026-02 | 🟡 Planned |
-| **v3.2** | Multi-tenant support | 2026-03 | 🟡 Planned |
-| **v3.3** | Advanced strategies (Blue-Green, Canary) | 2026-04 | 🟡 Planned |
-| **v3.4** | Database optimizations | 2026-05 | 🟡 Planned |
+| **v3.1** | Monitoring (Prometheus, Grafana, alerts) | 2026-01 | ✅ Completed |
+| **v3.2** | Multi-tenant & clustered support | 2026-01 | 🟢 In Progress (80%) |
+| **v3.3** | Advanced strategies (Blue-Green, Canary) | 2026-02 | 🟡 Planned |
+| **v3.4** | Database optimizations | 2026-03 | 🟡 Planned |
 | **v4.0** | Web UI (separate project) | 2026-Q3 | 🔵 Under Consideration |
 | **v4.0** | Kubernetes Operator (separate project) | 2026-Q4 | 🔵 Under Consideration |
 
@@ -338,5 +351,5 @@ Want to help implement a feature? Great!
 
 ---
 
-**Last Updated:** 2026-01-29
-**Next Review:** 2026-02-15
+**Last Updated:** 2026-01-29 (v3.2 integration in progress)
+**Next Review:** 2026-02-05

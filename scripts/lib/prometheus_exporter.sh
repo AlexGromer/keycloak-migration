@@ -88,7 +88,18 @@ prom_set_progress() {
     local to_version="${PROFILE_KC_TARGET_VERSION:-unknown}"
     local status="${2:-in_progress}"
 
+    # Multi-instance support: add tenant or node labels
+    local tenant="${TENANT_NAME:-}"
+    local node="${NODE_NAME:-}"
+
     local labels="profile=\"${profile}\",from_version=\"${from_version}\",to_version=\"${to_version}\",status=\"${status}\""
+    if [[ -n "$tenant" ]]; then
+        labels="${labels},tenant=\"${tenant}\""
+    fi
+    if [[ -n "$node" ]]; then
+        labels="${labels},node=\"${node}\""
+    fi
+
     prom_update_metric "keycloak_migration_progress" "$progress" "$labels"
 }
 

@@ -1,0 +1,111 @@
+# Clustered Deployment Profile
+# 4 Keycloak standalone instances on bare-metal servers in cluster
+
+profile:
+  name: clustered-bare-metal
+  description: "4-node Keycloak cluster on bare-metal servers"
+  mode: clustered  # Special mode for clustered deployment
+
+# Global migration settings
+migration:
+  current_version: "16.1.1"
+  target_version: "26.0.7"
+  strategy: rolling_update  # Migrate one node at a time
+  auto_rollback: true
+  backup: true
+
+# Shared database (all nodes use same DB)
+database:
+  type: postgresql
+  host: db-cluster.example.com  # PostgreSQL HA cluster or single instance
+  port: 5432
+  name: keycloak
+  user: keycloak_admin
+  password: ${DB_PASSWORD}
+  admin_user: postgres
+  admin_password: ${DB_ADMIN_PASSWORD}
+  ssl_mode: require
+
+# Distribution settings
+distribution:
+  mode: download
+  download_base_url: "https://github.com/keycloak/keycloak/releases/download"
+  validate_checksums: true
+  local_cache: "/opt/keycloak-dist"  # Shared NFS mount or copy to each node
+
+# Deployment mode
+deployment:
+  mode: standalone  # Each node runs Keycloak as systemd service
+  cluster_mode: infinispan  # Infinispan for distributed cache
+  jgroups_protocol: tcp  # TCP or UDP for cluster communication
+
+# Cluster configuration
+cluster:
+  # Load balancer (HAProxy, nginx, etc.)
+  load_balancer:
+    type: haproxy
+    host: lb.example.com
+    admin_socket: /var/run/haproxy/admin.sock
+    backend_name: keycloak_backend
+
+  # Cluster nodes
+  nodes:
+    # Node 1
+    - name: kc-node-1
+      host: 192.168.1.101
+      ssh_user: keycloak
+      ssh_key: ~/.ssh/id_rsa
+      keycloak_home: /opt/keycloak
+      systemd_service: keycloak
+      jgroups_bind_addr: 192.168.1.101
+      jgroups_bind_port: 7600
+
+    # Node 2
+    - name: kc-node-2
+      host: 192.168.1.102
+      ssh_user: keycloak
+      ssh_key: ~/.ssh/id_rsa
+      keycloak_home: /opt/keycloak
+      systemd_service: keycloak
+      jgroups_bind_addr: 192.168.1.102
+      jgroups_bind_port: 7600
+
+    # Node 3
+    - name: kc-node-3
+      host: 192.168.1.103
+      ssh_user: keycloak
+      ssh_key: ~/.ssh/id_rsa
+      keycloak_home: /opt/keycloak
+      systemd_service: keycloak
+      jgroups_bind_addr: 192.168.1.103
+      jgroups_bind_port: 7600
+
+    # Node 4
+    - name: kc-node-4
+      host: 192.168.1.104
+      ssh_user: keycloak
+      ssh_key: ~/.ssh/id_rsa
+      keycloak_home: /opt/keycloak
+      systemd_service: keycloak
+      jgroups_bind_addr: 192.168.1.104
+      jgroups_bind_port: 7600
+
+# Rolling update strategy
+rollout:
+  type: sequential  # One node at a time (rolling)
+  drain_timeout: 60  # Seconds to wait for connections to drain
+  startup_timeout: 120  # Seconds to wait for node to become healthy
+  health_check_interval: 10  # Seconds between health checks
+  nodes_at_once: 1  # Number of nodes to update simultaneously
+
+# Monitoring
+monitoring:
+  enabled: true
+  prometheus_port: 9090
+  per_node_metrics: true  # Export metrics for each node separately
+
+# Options
+options:
+  skip_preflight: false
+  airgap_mode: false
+  dry_run: false
