@@ -1,0 +1,57 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "keycloak-migration.fullname" . }}-profile
+  labels:
+    {{- include "keycloak-migration.labels" . | nindent 4 }}
+data:
+  migration-profile.yaml: |
+    # Generated Helm Profile
+    profile:
+      name: {{ .Release.Name }}
+      description: "Keycloak migration managed by Helm"
+      created: {{ now | date "2006-01-02T15:04:05Z07:00" }}
+
+    database:
+      type: {{ .Values.database.type }}
+      host: {{ .Values.database.host }}
+      port: {{ .Values.database.port }}
+      name: {{ .Values.database.name }}
+      user: ${DB_USER}
+      password: ${DB_PASSWORD}
+      admin_user: {{ .Values.database.adminUser }}
+      admin_password: ${DB_ADMIN_PASSWORD}
+      {{- if eq .Values.database.type "postgresql" }}
+      ssl_mode: {{ .Values.database.sslMode }}
+      {{- end }}
+
+    keycloak:
+      deployment_mode: {{ .Values.keycloak.deploymentMode }}
+      cluster_mode: {{ .Values.keycloak.clusterMode }}
+      current_version: {{ .Values.migration.currentVersion | quote }}
+      target_version: {{ .Values.migration.targetVersion | quote }}
+      migration_strategy: {{ .Values.migration.strategy }}
+      {{- if eq .Values.keycloak.deploymentMode "kubernetes" }}
+
+      kubernetes:
+        namespace: {{ .Values.keycloak.namespace }}
+        deployment: {{ .Values.keycloak.deployment }}
+        replicas: {{ .Values.keycloak.replicas }}
+      {{- end }}
+
+    distribution:
+      mode: {{ .Values.distribution.mode }}
+      {{- if eq .Values.distribution.mode "download" }}
+      download_base_url: {{ .Values.distribution.downloadBaseUrl | quote }}
+      {{- else if or (eq .Values.distribution.mode "local") (eq .Values.distribution.mode "airgap") }}
+      local_path: {{ .Values.distribution.localPath | quote }}
+      {{- end }}
+      validate_checksums: {{ .Values.distribution.validateChecksums }}
+
+    options:
+      skip_preflight: {{ .Values.migration.skipPreflight }}
+      airgap_mode: {{ .Values.migration.airgapMode }}
+      auto_rollback: {{ .Values.migration.autoRollback }}
+      dry_run: {{ .Values.migration.dryRun }}
+      audit_enabled: {{ .Values.audit.enabled }}
+      audit_format: {{ .Values.audit.format }}

@@ -1,0 +1,136 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ include "keycloak-migration.fullname" . }}-{{ .Values.migration.mode }}
+  labels:
+    {{- include "keycloak-migration.labels" . | nindent 4 }}
+    migration-mode: {{ .Values.migration.mode }}
+spec:
+  backoffLimit: {{ .Values.job.backoffLimit }}
+  {{- if .Values.job.ttlSecondsAfterFinished }}
+  ttlSecondsAfterFinished: {{ .Values.job.ttlSecondsAfterFinished }}
+  {{- end }}
+  {{- if .Values.job.activeDeadlineSeconds }}
+  activeDeadlineSeconds: {{ .Values.job.activeDeadlineSeconds }}
+  {{- end }}
+  template:
+    metadata:
+      annotations:
+        {{- with .Values.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      labels:
+        {{- include "keycloak-migration.selectorLabels" . | nindent 8 }}
+        {{- with .Values.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+    spec:
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      serviceAccountName: {{ include "keycloak-migration.serviceAccountName" . }}
+      {{- with .Values.security.podSecurityContext }}
+      securityContext:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      restartPolicy: {{ .Values.job.restartPolicy }}
+      containers:
+      - name: migration
+        {{- with .Values.security.securityContext }}
+        securityContext:
+          {{- toYaml . | nindent 10 }}
+        {{- end }}
+        image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
+        imagePullPolicy: {{ .Values.image.pullPolicy }}
+        command:
+          - /opt/keycloak-migration/scripts/migrate_keycloak_v3.sh
+        args:
+          - --mode={{ .Values.migration.mode }}
+          - --profile=/etc/migration/migration-profile.yaml
+          {{- if .Values.migration.skipPreflight }}
+          - --skip-preflight
+          {{- end }}
+          {{- if .Values.migration.airgapMode }}
+          - --airgap
+          {{- end }}
+          {{- if .Values.migration.autoRollback }}
+          - --auto-rollback
+          {{- end }}
+          {{- if .Values.migration.dryRun }}
+          - --dry-run
+          {{- end }}
+        env:
+          # Database credentials from secret
+          - name: DB_USER
+            valueFrom:
+              secretKeyRef:
+                name: {{ include "keycloak-migration.secretName" . }}
+                key: DB_USER
+          - name: DB_PASSWORD
+            valueFrom:
+              secretKeyRef:
+                name: {{ include "keycloak-migration.secretName" . }}
+                key: DB_PASSWORD
+          - name: DB_ADMIN_PASSWORD
+            valueFrom:
+              secretKeyRef:
+                name: {{ include "keycloak-migration.secretName" . }}
+                key: DB_ADMIN_PASSWORD
+
+          # Workspace directory
+          - name: WORK_DIR
+            value: /data
+
+          # Audit logging
+          - name: AUDIT_ENABLED
+            value: {{ .Values.audit.enabled | quote }}
+          - name: AUDIT_LOG_FILE
+            value: /data/migration_audit.jsonl
+
+          # Kubernetes context
+          - name: KUBERNETES_NAMESPACE
+            value: {{ .Values.keycloak.namespace }}
+
+        volumeMounts:
+          # Migration profile
+          - name: profile
+            mountPath: /etc/migration
+            readOnly: true
+
+          # Workspace
+          {{- if .Values.persistence.enabled }}
+          - name: workspace
+            mountPath: /data
+          {{- end }}
+
+        {{- with .Values.job.resources }}
+        resources:
+          {{- toYaml . | nindent 10 }}
+        {{- end }}
+
+      volumes:
+        # ConfigMap with migration profile
+        - name: profile
+          configMap:
+            name: {{ include "keycloak-migration.fullname" . }}-profile
+
+        # Persistent workspace
+        {{- if .Values.persistence.enabled }}
+        - name: workspace
+          persistentVolumeClaim:
+            claimName: {{ include "keycloak-migration.pvcName" . }}
+        {{- end }}
+
+      {{- with .Values.job.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.job.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.job.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}

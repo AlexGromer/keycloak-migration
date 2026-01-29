@@ -1,0 +1,76 @@
+# Git
+.git/
+.gitignore
+.github/
+
+# CI/CD
+.gitlab-ci.yml
+
+# Development
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Temporary files
+*.tmp
+*.temp
+tmp/
+temp/
+
+# Backups
+*.backup
+*.bak
+backup_*/
+
+# Work directories
+migration_workspace/
+work/
+dist/
+test_lab/
+
+# State files
+.migration_state
+.preflight_passed
+*.state
+*.checkpoint
+
+# Logs
+*.log
+*.jsonl
+logs/
+
+# Discovery outputs
+discovery_*/
+
+# Node modules (if any)
+node_modules/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+
+# OS artifacts
+.DS_Store
+Thumbs.db
+
+# Local config
+.claude/
+.env
+.env.*
+
+# Documentation build artifacts
+site/
+docs/_build/
+
+# Archives
+*.tar.gz
+*.zip
+*.tgz
+
+# Database dumps
+*.dump
+*.sql

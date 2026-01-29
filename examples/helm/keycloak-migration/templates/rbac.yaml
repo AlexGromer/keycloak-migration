@@ -1,0 +1,54 @@
+{{- if .Values.rbac.create -}}
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ include "keycloak-migration.fullname" . }}
+  labels:
+    {{- include "keycloak-migration.labels" . | nindent 4 }}
+rules:
+  # Read Keycloak deployment
+  - apiGroups: ["apps"]
+    resources: ["deployments", "statefulsets"]
+    verbs: ["get", "list", "watch"]
+
+  # Scale Keycloak deployment
+  - apiGroups: ["apps"]
+    resources: ["deployments/scale", "statefulsets/scale"]
+    verbs: ["get", "update", "patch"]
+
+  # Read pods
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list", "watch"]
+
+  # Read services
+  - apiGroups: [""]
+    resources: ["services"]
+    verbs: ["get", "list"]
+
+  # Read/Write ConfigMaps (for state management)
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    verbs: ["get", "list", "create", "update", "patch"]
+
+  # Read Secrets
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["get", "list"]
+
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ include "keycloak-migration.fullname" . }}
+  labels:
+    {{- include "keycloak-migration.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ include "keycloak-migration.fullname" . }}
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "keycloak-migration.serviceAccountName" . }}
+    namespace: {{ .Release.Namespace }}
+{{- end }}

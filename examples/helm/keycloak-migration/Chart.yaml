@@ -1,0 +1,17 @@
+apiVersion: v2
+name: keycloak-migration
+description: Helm chart for Keycloak Migration Tool v3.0
+type: application
+version: 3.0.0
+appVersion: "3.0.0"
+keywords:
+  - keycloak
+  - migration
+  - identity
+  - authentication
+home: https://github.com/AlexGromer/keycloak-migration
+sources:
+  - https://github.com/AlexGromer/keycloak-migration
+maintainers:
+  - name: AlexGromer
+    email: alexei.pape@yandex.ru

@@ -1,0 +1,230 @@
+# Default values for keycloak-migration
+# This is a YAML-formatted file.
+# Declare variables to be passed into your templates.
+
+# ============================================================================
+# Migration Configuration
+# ============================================================================
+
+migration:
+  # Migration mode: migrate, rollback, validate, dry-run
+  mode: migrate
+
+  # Keycloak versions
+  currentVersion: "16.1.1"
+  targetVersion: "26.0.7"
+
+  # Migration strategy
+  strategy: rolling_update  # Options: rolling_update, blue_green, canary
+
+  # Pre-flight checks
+  skipPreflight: false
+
+  # Airgap mode
+  airgapMode: false
+
+  # Auto-rollback on failure
+  autoRollback: true
+
+  # Dry-run mode (plan only)
+  dryRun: false
+
+# ============================================================================
+# Database Configuration
+# ============================================================================
+
+database:
+  # Database type: postgresql, mysql, mariadb, oracle, mssql
+  type: postgresql
+
+  # Database host (can use existing service)
+  host: "keycloak-db"
+  port: 5432
+
+  # Database name
+  name: keycloak
+
+  # Admin user for migrations
+  adminUser: postgres
+
+  # Credentials (use existingSecret for production)
+  user: keycloak_admin
+  password: ""
+
+  # Use existing secret for database credentials
+  # Secret should have keys: DB_USER, DB_PASSWORD, DB_ADMIN_PASSWORD
+  existingSecret: ""
+
+  # SSL mode for PostgreSQL
+  sslMode: prefer
+
+# ============================================================================
+# Keycloak Deployment
+# ============================================================================
+
+keycloak:
+  # Deployment mode: kubernetes, docker_compose, standalone, custom
+  deploymentMode: kubernetes
+
+  # Kubernetes namespace where Keycloak is deployed
+  namespace: keycloak
+
+  # Deployment name
+  deployment: keycloak
+
+  # Number of replicas
+  replicas: 3
+
+  # Cluster mode: infinispan, jgroups, none
+  clusterMode: infinispan
+
+# ============================================================================
+# Distribution Handler
+# ============================================================================
+
+distribution:
+  # Distribution mode: download, local, airgap, build
+  mode: download
+
+  # Download base URL (for download mode)
+  downloadBaseUrl: "https://github.com/keycloak/keycloak/releases/download"
+
+  # Local directory path (for local/airgap mode)
+  localPath: "/opt/keycloak/dist"
+
+  # Artifact validation
+  validateChecksums: true
+
+# ============================================================================
+# Job Configuration
+# ============================================================================
+
+job:
+  # Job restart policy
+  restartPolicy: OnFailure
+
+  # Backoff limit
+  backoffLimit: 3
+
+  # TTL after finished (seconds)
+  ttlSecondsAfterFinished: 86400  # 24 hours
+
+  # Active deadline (seconds)
+  activeDeadlineSeconds: 7200  # 2 hours
+
+  # Resources
+  resources:
+    requests:
+      memory: "512Mi"
+      cpu: "500m"
+    limits:
+      memory: "2Gi"
+      cpu: "2000m"
+
+  # Node selector
+  nodeSelector: {}
+
+  # Tolerations
+  tolerations: []
+
+  # Affinity
+  affinity: {}
+
+# ============================================================================
+# Image Configuration
+# ============================================================================
+
+image:
+  repository: alexgromer/keycloak-migration
+  pullPolicy: IfNotPresent
+  tag: "3.0.0"
+
+imagePullSecrets: []
+
+# ============================================================================
+# Storage
+# ============================================================================
+
+persistence:
+  # Enable persistent volume for workspace
+  enabled: true
+
+  # Storage class (use default if empty)
+  storageClass: ""
+
+  # Access mode
+  accessMode: ReadWriteOnce
+
+  # Size
+  size: 10Gi
+
+  # Existing PVC (use instead of creating new)
+  existingClaim: ""
+
+# ============================================================================
+# Audit Logging
+# ============================================================================
+
+audit:
+  # Enable audit logging
+  enabled: true
+
+  # Log format: json, text
+  format: json
+
+  # Log to stdout (in addition to file)
+  stdout: true
+
+# ============================================================================
+# Security
+# ============================================================================
+
+security:
+  # Run as non-root user
+  runAsNonRoot: false
+
+  # User ID
+  runAsUser: 0
+
+  # FS Group
+  fsGroup: 0
+
+  # Pod security context
+  podSecurityContext: {}
+
+  # Container security context
+  securityContext: {}
+
+# ============================================================================
+# Service Account
+# ============================================================================
+
+serviceAccount:
+  # Create service account
+  create: true
+
+  # Annotations
+  annotations: {}
+
+  # Name (generated if empty)
+  name: ""
+
+# ============================================================================
+# RBAC
+# ============================================================================
+
+rbac:
+  # Create RBAC resources
+  create: true
+
+# ============================================================================
+# Annotations
+# ============================================================================
+
+podAnnotations: {}
+
+# ============================================================================
+# Labels
+# ============================================================================
+
+podLabels: {}
