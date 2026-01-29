@@ -1,0 +1,24 @@
+# AWS Configuration
+aws_region = "us-east-1"
+
+# EKS Cluster
+eks_cluster_name = "keycloak-production"
+
+# RDS Instance
+rds_instance_identifier = "keycloak-db"
+
+# Database Credentials (use AWS Secrets Manager in production)
+database_user     = "keycloak_admin"
+database_password = "CHANGE_ME"
+
+# Kubernetes
+kubernetes_namespace  = "keycloak"
+kubernetes_deployment = "keycloak"
+kubernetes_replicas   = 3
+
+# Keycloak Versions
+current_keycloak_version = "16.1.1"
+target_keycloak_version  = "26.0.7"
+
+# Migration Options
+dry_run = false  # Set to true for plan-only

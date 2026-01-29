@@ -1,0 +1,85 @@
+---
+# Keycloak Migration Role - Main Tasks
+
+- name: Install dependencies
+  package:
+    name:
+      - git
+      - bash
+      - curl
+      - jq
+      - postgresql-client  # For PostgreSQL backups
+    state: present
+
+- name: Clone migration tool repository
+  git:
+    repo: "{{ migration_tool_repo }}"
+    dest: "{{ migration_tool_path }}"
+    version: "{{ migration_tool_version }}"
+    force: true
+  register: git_clone
+
+- name: Set executable permissions
+  file:
+    path: "{{ migration_tool_path }}/scripts"
+    mode: '0755'
+    recurse: true
+
+- name: Check if profile exists
+  stat:
+    path: "{{ profile_path }}"
+  register: profile_check
+
+- name: Fail if profile not found
+  fail:
+    msg: "Profile {{ migration_profile }} not found at {{ profile_path }}"
+  when: not profile_check.stat.exists
+
+- name: Display migration plan
+  command:
+    cmd: "{{ migration_tool_path }}/scripts/migrate_keycloak_v3.sh plan --profile {{ migration_profile }}"
+    chdir: "{{ migration_tool_path }}"
+  register: migration_plan
+  changed_when: false
+
+- name: Show migration plan
+  debug:
+    var: migration_plan.stdout_lines
+
+- name: Pause for confirmation (if not in dry-run)
+  pause:
+    prompt: "Review the migration plan above. Press ENTER to continue or Ctrl+C to abort"
+  when: not dry_run and not ansible_check_mode
+
+- name: Run migration
+  command:
+    cmd: >
+      {{ migration_tool_path }}/scripts/migrate_keycloak_v3.sh migrate
+      --profile {{ migration_profile }}
+      {% if skip_preflight %}--skip-preflight{% endif %}
+      {% if airgap_mode %}--airgap{% endif %}
+      {% if auto_rollback %}--auto-rollback{% endif %}
+      {% if dry_run %}--dry-run{% endif %}
+    chdir: "{{ migration_tool_path }}"
+  register: migration_result
+  environment:
+    # Pass database credentials from Ansible vault
+    KC_DB_PASSWORD: "{{ keycloak_db_password }}"
+    AUDIT_ENABLED: "true"
+    AUDIT_LOG_FILE: "{{ migration_tool_path }}/migration_audit.jsonl"
+
+- name: Display migration output
+  debug:
+    var: migration_result.stdout_lines
+
+- name: Fetch audit log
+  fetch:
+    src: "{{ migration_tool_path }}/migration_audit.jsonl"
+    dest: "./logs/{{ inventory_hostname }}_migration_audit.jsonl"
+    flat: true
+  when: migration_result is succeeded
+
+- name: Cleanup on failure
+  debug:
+    msg: "Migration failed. Check logs at {{ migration_tool_path }}"
+  when: migration_result is failed

@@ -1,0 +1,53 @@
+---
+# Keycloak Migration Ansible Playbook
+# Automates Keycloak migration across multiple servers
+
+- name: Keycloak Migration Orchestration
+  hosts: keycloak_servers
+  become: true
+  gather_facts: true
+
+  vars:
+    # Migration tool repository
+    migration_tool_repo: "https://github.com/AlexGromer/keycloak-migration.git"
+    migration_tool_version: "v3.0.0"
+    migration_tool_path: "/opt/keycloak-migration"
+
+    # Profile configuration
+    migration_profile: "{{ keycloak_migration_profile | default('standalone-postgresql') }}"
+    profile_path: "{{ migration_tool_path }}/profiles/{{ migration_profile }}.yaml"
+
+    # Migration options
+    skip_preflight: false
+    airgap_mode: false
+    auto_rollback: true
+    dry_run: false
+
+  pre_tasks:
+    - name: Validate Ansible version
+      assert:
+        that:
+          - ansible_version.full is version('2.12', '>=')
+        fail_msg: "Ansible 2.12+ required"
+
+    - name: Check if running as root
+      assert:
+        that:
+          - ansible_user_id == "root" or ansible_become
+        fail_msg: "This playbook requires root privileges"
+
+  roles:
+    - keycloak_migration
+
+  post_tasks:
+    - name: Display migration summary
+      debug:
+        msg: |
+          ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+          ✅ Keycloak Migration Complete
+          ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+          Host: {{ inventory_hostname }}
+          Profile: {{ migration_profile }}
+          Status: Success
+          Audit Log: {{ migration_tool_path }}/migration_audit.jsonl
+          ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
