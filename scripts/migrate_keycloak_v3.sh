@@ -112,6 +112,143 @@ log_section() {
 }
 
 # ============================================================================
+# VERSION AUTO-DETECTION
+# ============================================================================
+
+kc_detect_version() {
+    # Auto-detect current Keycloak version from multiple sources
+    local version=""
+
+    # Method 1: Check Keycloak home directory for version.txt
+    if [[ -n "${PROFILE_KC_HOME:-}" && -f "${PROFILE_KC_HOME}/version.txt" ]]; then
+        version=$(cat "${PROFILE_KC_HOME}/version.txt" | grep -oP '\d+\.\d+\.\d+' | head -1)
+    fi
+
+    # Method 2: Check JAR manifest
+    if [[ -z "$version" && -n "${PROFILE_KC_HOME:-}" ]]; then
+        local jar_file
+        jar_file=$(find "${PROFILE_KC_HOME}/lib" -name "keycloak-server-spi-*.jar" 2>/dev/null | head -1)
+        if [[ -n "$jar_file" ]]; then
+            version=$(unzip -p "$jar_file" META-INF/MANIFEST.MF 2>/dev/null | \
+                grep "Implementation-Version" | cut -d' ' -f2 | tr -d '\r\n' | grep -oP '\d+\.\d+\.\d+')
+        fi
+    fi
+
+    # Method 3: Query database for DATABASECHANGELOG
+    if [[ -z "$version" && -n "${PROFILE_DB_TYPE:-}" ]]; then
+        case "${PROFILE_DB_TYPE}" in
+            postgresql|cockroachdb)
+                if command -v psql &>/dev/null; then
+                    version=$(PGPASSWORD="${PROFILE_DB_PASSWORD}" psql \
+                        -h "${PROFILE_DB_HOST}" -p "${PROFILE_DB_PORT}" \
+                        -U "${PROFILE_DB_USER}" -d "${PROFILE_DB_NAME}" \
+                        -tAc "SELECT id FROM DATABASECHANGELOG ORDER BY DATEEXECUTED DESC LIMIT 1;" 2>/dev/null | \
+                        grep -oP '\d+\.\d+\.\d+' | head -1)
+                fi
+                ;;
+            mysql|mariadb)
+                if command -v mysql &>/dev/null; then
+                    version=$(mysql -h "${PROFILE_DB_HOST}" -P "${PROFILE_DB_PORT}" \
+                        -u "${PROFILE_DB_USER}" -p"${PROFILE_DB_PASSWORD}" "${PROFILE_DB_NAME}" \
+                        -N -e "SELECT id FROM DATABASECHANGELOG ORDER BY DATEEXECUTED DESC LIMIT 1;" 2>/dev/null | \
+                        grep -oP '\d+\.\d+\.\d+' | head -1)
+                fi
+                ;;
+        esac
+    fi
+
+    # Method 4: Check Docker image tag
+    if [[ -z "$version" && "${PROFILE_KC_DEPLOYMENT_MODE:-}" == "docker_compose" ]]; then
+        local compose_file="${PROFILE_KC_COMPOSE_FILE:-docker-compose.yml}"
+        if [[ -f "$compose_file" ]]; then
+            version=$(grep -A5 "keycloak" "$compose_file" | grep "image:" | \
+                grep -oP 'quay.io/keycloak/keycloak:\K[\d\.]+' | head -1)
+        fi
+    fi
+
+    # Method 5: Kubernetes deployment
+    if [[ -z "$version" && "${PROFILE_KC_DEPLOYMENT_MODE:-}" == "kubernetes" ]]; then
+        local namespace="${PROFILE_KC_NAMESPACE:-keycloak}"
+        local deployment="${PROFILE_KC_DEPLOYMENT:-keycloak}"
+        if command -v kubectl &>/dev/null; then
+            version=$(kubectl get deployment "$deployment" -n "$namespace" \
+                -o jsonpath='{.spec.template.spec.containers[0].image}' 2>/dev/null | \
+                grep -oP ':\K[\d\.]+')
+        fi
+    fi
+
+    if [[ -n "$version" ]]; then
+        echo "$version"
+        return 0
+    else
+        log_warn "Could not auto-detect Keycloak version"
+        return 1
+    fi
+}
+
+kc_select_target_version() {
+    # Interactive selection of target version
+    local current_version="${1:-}"
+    local current_idx=-1
+
+    if [[ -z "$current_version" ]]; then
+        echo "ERROR: Current version not specified" >&2
+        return 1
+    fi
+
+    # Find current version index in migration path
+    for i in "${!MIGRATION_PATH[@]}"; do
+        if [[ "${MIGRATION_PATH[$i]}" == "$current_version" ]]; then
+            current_idx=$i
+            break
+        fi
+    done
+
+    if [[ $current_idx -eq -1 ]]; then
+        echo "ERROR: Current version $current_version not in migration path" >&2
+        echo "Supported versions: ${MIGRATION_PATH[*]}" >&2
+        return 1
+    fi
+
+    # Check if already at latest
+    if [[ $current_idx -eq $((${#MIGRATION_PATH[@]} - 1)) ]]; then
+        log_info "Already at latest version: $current_version"
+        echo "$current_version"
+        return 0
+    fi
+
+    # Offer target versions
+    echo ""
+    echo "Current version: $current_version"
+    echo ""
+    echo "Available target versions:"
+    echo ""
+
+    local options=()
+    for ((i=current_idx+1; i<${#MIGRATION_PATH[@]}; i++)); do
+        local version="${MIGRATION_PATH[$i]}"
+        local java_major=$(echo "$version" | cut -d. -f1)
+        local java_req="${JAVA_REQUIREMENTS[$java_major]:-unknown}"
+        options+=("$version")
+        printf "  [%d] %s (Java %s)\n" "$((i-current_idx))" "$version" "$java_req"
+    done
+
+    echo ""
+    read -rp "Select target version [1-${#options[@]}] or 'latest': " choice
+
+    if [[ "$choice" == "latest" || "$choice" == "l" ]]; then
+        echo "${options[-1]}"
+        return 0
+    elif [[ "$choice" =~ ^[0-9]+$ ]] && [[ $choice -ge 1 && $choice -le ${#options[@]} ]]; then
+        echo "${options[$((choice-1))]}"
+        return 0
+    else
+        echo "ERROR: Invalid choice: $choice" >&2
+        return 1
+    fi
+}
+
+# ============================================================================
 # STATE MANAGEMENT
 # ============================================================================
 
@@ -390,24 +527,41 @@ validate_profile_variables() {
     # Database
     if [[ -z "${PROFILE_DB_TYPE:-}" ]]; then
         log_error "Database type not set"
-        ((errors++))
+        errors=$((errors + 1))
     fi
 
     # Deployment
     if [[ -z "${PROFILE_KC_DEPLOYMENT_MODE:-}" ]]; then
         log_error "Deployment mode not set"
-        ((errors++))
+        errors=$((errors + 1))
     fi
 
-    # Versions
+    # Versions - Auto-detect if not set
     if [[ -z "${PROFILE_KC_CURRENT_VERSION:-}" ]]; then
-        log_error "Current Keycloak version not set"
-        ((errors++))
+        log_info "Current version not specified, attempting auto-detection..."
+        if PROFILE_KC_CURRENT_VERSION=$(kc_detect_version); then
+            export PROFILE_KC_CURRENT_VERSION
+            log_success "Auto-detected current version: $PROFILE_KC_CURRENT_VERSION"
+        else
+            log_error "Current Keycloak version not set and auto-detection failed"
+            errors=$((errors + 1))
+        fi
     fi
 
     if [[ -z "${PROFILE_KC_TARGET_VERSION:-}" ]]; then
-        log_error "Target Keycloak version not set"
-        ((errors++))
+        if [[ -n "${PROFILE_KC_CURRENT_VERSION:-}" ]]; then
+            log_info "Target version not specified, launching interactive selection..."
+            if PROFILE_KC_TARGET_VERSION=$(kc_select_target_version "$PROFILE_KC_CURRENT_VERSION"); then
+                export PROFILE_KC_TARGET_VERSION
+                log_success "Selected target version: $PROFILE_KC_TARGET_VERSION"
+            else
+                log_error "Target version selection failed"
+                errors=$((errors + 1))
+            fi
+        else
+            log_error "Target Keycloak version not set (current version unknown)"
+            errors=$((errors + 1))
+        fi
     fi
 
     if [[ $errors -gt 0 ]]; then

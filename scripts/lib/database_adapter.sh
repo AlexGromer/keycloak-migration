@@ -11,6 +11,8 @@ declare -A DB_ADAPTERS=(
     [mariadb]="MariaDB"
     [oracle]="Oracle"
     [mssql]="Microsoft SQL Server"
+    [cockroachdb]="CockroachDB"
+    [h2]="H2 Database (dev only)"
 )
 
 # JDBC driver URLs
@@ -20,6 +22,8 @@ declare -A JDBC_PREFIXES=(
     [mariadb]="jdbc:mariadb://"
     [oracle]="jdbc:oracle:thin:@"
     [mssql]="jdbc:sqlserver://"
+    [cockroachdb]="jdbc:postgresql://"
+    [h2]="jdbc:h2:"
 )
 
 # Default ports
@@ -29,6 +33,8 @@ declare -A DB_DEFAULT_PORTS=(
     [mariadb]="3306"
     [oracle]="1521"
     [mssql]="1433"
+    [cockroachdb]="26257"
+    [h2]="9092"
 )
 
 # ============================================================================
@@ -42,17 +48,22 @@ db_detect_type() {
     if [[ -n "$jdbc_url" ]]; then
         # Detect from JDBC URL
         case "$jdbc_url" in
+            jdbc:postgresql://*:26257*) echo "cockroachdb"; return 0 ;;
             jdbc:postgresql:*) echo "postgresql"; return 0 ;;
             jdbc:mysql:*) echo "mysql"; return 0 ;;
             jdbc:mariadb:*) echo "mariadb"; return 0 ;;
             jdbc:oracle:*) echo "oracle"; return 0 ;;
             jdbc:sqlserver:*) echo "mssql"; return 0 ;;
+            jdbc:h2:*) echo "h2"; return 0 ;;
             *) echo "unknown"; return 1 ;;
         esac
     fi
 
     # Detect from available CLI tools
-    if command -v psql &>/dev/null; then
+    if command -v cockroach &>/dev/null; then
+        echo "cockroachdb"
+        return 0
+    elif command -v psql &>/dev/null; then
         echo "postgresql"
         return 0
     elif command -v mysql &>/dev/null; then
@@ -97,15 +108,32 @@ db_build_jdbc_url() {
     local port="${3:-${DB_DEFAULT_PORTS[$db_type]}}"
     local db_name="$4"
 
+    # Warning for H2 (dev only)
+    if [[ "$db_type" == "h2" ]]; then
+        echo "⚠️  WARNING: H2 database is for development only, NOT recommended for production" >&2
+    fi
+
     case "$db_type" in
         postgresql|mysql|mariadb)
             echo "${JDBC_PREFIXES[$db_type]}${host}:${port}/${db_name}"
+            ;;
+        cockroachdb)
+            # CockroachDB uses PostgreSQL wire protocol
+            echo "${JDBC_PREFIXES[$db_type]}${host}:${port}/${db_name}?sslmode=require"
             ;;
         oracle)
             echo "${JDBC_PREFIXES[$db_type]}${host}:${port}:${db_name}"
             ;;
         mssql)
             echo "${JDBC_PREFIXES[$db_type]}${host}:${port};databaseName=${db_name}"
+            ;;
+        h2)
+            # H2 can be file-based or TCP
+            if [[ "$host" == "file" ]]; then
+                echo "${JDBC_PREFIXES[$db_type]}file:${db_name}"
+            else
+                echo "${JDBC_PREFIXES[$db_type]}tcp://${host}:${port}/${db_name}"
+            fi
             ;;
         *)
             echo "ERROR: Unknown database type: $db_type" >&2
@@ -127,6 +155,11 @@ db_test_connection() {
             PGPASSWORD="$pass" psql -h "$host" -p "$port" -U "$user" -d "$db_name" \
                 -c "SELECT 1;" &>/dev/null
             ;;
+        cockroachdb)
+            # CockroachDB uses PostgreSQL protocol
+            PGPASSWORD="$pass" psql -h "$host" -p "$port" -U "$user" -d "$db_name" \
+                -c "SELECT 1;" &>/dev/null
+            ;;
         mysql|mariadb)
             mysql -h "$host" -P "$port" -u "$user" -p"$pass" "$db_name" \
                 -e "SELECT 1;" &>/dev/null
@@ -138,6 +171,11 @@ db_test_connection() {
         mssql)
             sqlcmd -S "${host},${port}" -U "$user" -P "$pass" -d "$db_name" \
                 -Q "SELECT 1;" &>/dev/null
+            ;;
+        h2)
+            # H2 testing requires Java, skip for now
+            echo "⚠️  H2 connection test skipped (requires Java)" >&2
+            return 0
             ;;
         *)
             return 1
@@ -209,6 +247,19 @@ db_backup() {
                 -Q "BACKUP DATABASE [$db_name] TO DISK = N'$backup_file' WITH FORMAT;"
             ;;
 
+        cockroachdb)
+            # CockroachDB uses pg_dump (PostgreSQL compatible)
+            PGPASSWORD="$pass" pg_dump -h "$host" -p "$port" -U "$user" -d "$db_name" \
+                -F c -f "$backup_file"
+            ;;
+
+        h2)
+            echo "⚠️  H2 backup: copy .mv.db file manually from Keycloak data directory" >&2
+            echo "   Location typically: KEYCLOAK_HOME/data/h2/" >&2
+            echo "   Use BACKUP TO 'backup.zip' in H2 console for online backup" >&2
+            return 1
+            ;;
+
         *)
             echo "ERROR: Backup not implemented for $db_type" >&2
             return 1
@@ -259,6 +310,18 @@ db_restore() {
         mssql)
             sqlcmd -S "${host},${port}" -U "$user" -P "$pass" \
                 -Q "RESTORE DATABASE [$db_name] FROM DISK = N'$backup_file' WITH REPLACE;"
+            ;;
+
+        cockroachdb)
+            # CockroachDB uses pg_restore (PostgreSQL compatible)
+            PGPASSWORD="$pass" pg_restore -h "$host" -p "$port" -U "$user" -d "$db_name" \
+                --clean "$backup_file"
+            ;;
+
+        h2)
+            echo "⚠️  H2 restore: copy .mv.db file manually to Keycloak data directory" >&2
+            echo "   Stop Keycloak before restoring H2 database" >&2
+            return 1
             ;;
 
         *)

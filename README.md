@@ -1,30 +1,81 @@
 # Keycloak Migration Tool v3.0
 
-**Universal Keycloak migration framework** supporting multi-DBMS, multi-deployment environments with auto-discovery, atomic checkpoints, and airgap mode.
+**One-command Keycloak migration utility** with auto-detection, atomic checkpoints, and support for all Keycloak-supported databases.
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Tests](https://img.shields.io/badge/tests-137%2F137-success)](tests/)
 [![Bash](https://img.shields.io/badge/bash-5.0%2B-green.svg)](scripts/)
+[![Databases](https://img.shields.io/badge/databases-7-blue.svg)](scripts/lib/database_adapter.sh)
+
+---
+
+## 🚀 Quick Start (90% of cases)
+
+### 1. Clone Repository
+
+```bash
+git clone https://github.com/AlexGromer/keycloak-migration
+cd keycloak-migration
+```
+
+### 2. Run Migration Wizard
+
+```bash
+./scripts/config_wizard.sh
+```
+
+The wizard will:
+1. **Auto-detect** existing Keycloak installation
+2. **Auto-detect** current version from database/deployment
+3. **Prompt** for target version selection
+4. **Generate** migration profile
+5. **Execute** migration with one command
+
+### 3. Or Use Direct Command
+
+If you already have a profile:
+
+```bash
+./scripts/migrate_keycloak_v3.sh migrate --profile=my-profile.yaml
+```
+
+**That's it!** The tool handles everything automatically.
+
+---
 
 ## 🎯 Features
 
-### Core Architecture
-- **Multi-DBMS Support** — PostgreSQL, MySQL, MariaDB, Oracle, MSSQL
-- **Multi-Deployment** — Standalone, Docker, Docker Compose, Kubernetes, Deckhouse
-- **Profile-Based Config** — YAML profiles with auto-discovery
-- **Migration Strategies** — In-place, Rolling Update, Blue-Green deployment
-- **Distribution Modes** — Download, Pre-downloaded, Container, Helm
+### Auto-Detection
+- **Current Version** — Detects from JAR manifest, database, Docker image, or Kubernetes deployment
+- **Database Type** — Auto-detects from JDBC URL or CLI tools
+- **Deployment Mode** — Identifies Standalone, Docker, Kubernetes automatically
+- **Target Version** — Interactive selection with Java requirements shown
+
+### Multi-Database Support
+- ✅ **PostgreSQL** (recommended)
+- ✅ **MySQL / MariaDB**
+- ✅ **CockroachDB** (v18+)
+- ✅ **Oracle Database**
+- ✅ **Microsoft SQL Server**
+- ✅ **H2** (dev only, with warnings)
+
+### Multi-Deployment Support
+- ✅ **Standalone** (systemd, init.d, manual)
+- ✅ **Docker** (single container)
+- ✅ **Docker Compose** (multi-container)
+- ✅ **Kubernetes** (Deployment, StatefulSet)
+- ✅ **Custom** (bring your own scripts)
 
 ### Production-Ready
 - ✅ **Pre-flight Checks** — Disk space, tools, Java versions, network, DB connectivity
-- ✅ **Atomic Checkpoints** — Resume from any step: backup → stop → download → build → start → migrate → health → tests
-- ✅ **Auto-Rollback** — Automatic rollback on health check failure
-- ✅ **Airgap Mode** — Validate all artifacts available before starting
-- ✅ **JSON Audit Logging** — Structured logs for all migration operations
+- ✅ **Atomic Checkpoints** — Resume from any step if interrupted
+- ✅ **Auto-Rollback** — Automatic rollback on failure
+- ✅ **Airgap Mode** — Pre-validate all artifacts available
+- ✅ **JSON Audit Logging** — Full traceability
 - ✅ **Test Coverage** — 137 unit tests, 100% pass rate
 
 ### Migration Path
-Supports Keycloak **16.1.1 → 26.0.7** via intermediate versions:
+Supports Keycloak **16.1.1 → 26.0.7** via safe intermediate versions:
 ```
 16.1.1 → 17.0.1 → 22.0.5 → 25.0.6 → 26.0.7
 ```
@@ -33,7 +84,49 @@ Java requirements automatically validated per version (11 → 11 → 17 → 17 �
 
 ---
 
-## 📦 Quick Start
+## 📖 How It Works
+
+This tool **migrates** your Keycloak installation, not deploys it. You need an existing Keycloak instance to migrate.
+
+**The tool works by:**
+1. Detecting your current Keycloak version and environment
+2. Backing up the database
+3. Stopping Keycloak service
+4. Downloading/building the target version
+5. Updating the database schema
+6. Restarting with new version
+7. Validating health and rollback if needed
+
+**What it doesn't do:**
+- ❌ Install Keycloak from scratch
+- ❌ Provision infrastructure
+- ❌ Configure networking/DNS
+
+For infrastructure provisioning, see [Advanced Deployment Options](#advanced-deployment-options).
+
+---
+
+## 📦 Installation
+
+### Prerequisites
+
+- Bash 5.0+
+- Existing Keycloak installation (16.1.1+)
+- Database client (`psql`, `mysql`, `cockroach`, etc.)
+- Java (version per Keycloak requirements)
+- For Kubernetes: `kubectl`
+
+### Clone and Run
+
+```bash
+git clone https://github.com/AlexGromer/keycloak-migration
+cd keycloak-migration
+./scripts/config_wizard.sh
+```
+
+---
+
+## 🎮 Usage Examples
 
 ### 1. Interactive Wizard (Recommended)
 ```bash
@@ -395,6 +488,88 @@ export JAVA_HOME=/usr/lib/jvm/java-17-openjdk-amd64
 ./scripts/migrate_keycloak_v3.sh download --profile my-profile
 # Then run migration in airgap mode
 ```
+
+---
+
+## 🔧 Advanced Usage Options
+
+For specific infrastructure setups, the migration tool supports integration with automation platforms. **Note:** These are ways to RUN the migration tool, not deploy Keycloak itself.
+
+### Docker (CI/CD & Isolation)
+
+**When to use:** GitLab CI, GitHub Actions, or when you need isolated dependencies.
+
+```bash
+docker run --rm \
+  -v $(pwd)/profiles:/data \
+  -v ~/.kube:/root/.kube \
+  alexgromer/keycloak-migration:3.0.0 \
+  --profile=/data/production.yaml
+```
+
+**Use case:** Clean environment with pre-installed Java/kubectl/helm.
+
+See: [Dockerfile](Dockerfile)
+
+---
+
+### Helm (Kubernetes-Native)
+
+**When to use:** Keycloak deployed in Kubernetes, need integration with K8s Secrets/ConfigMaps.
+
+```bash
+helm install my-migration ./examples/helm/keycloak-migration \
+  --set database.host=keycloak-db \
+  --set migration.targetVersion=26.0.7
+```
+
+**Use case:** Migration as Kubernetes Job with RBAC, automatic retry, kubectl logs.
+
+See: [examples/helm/README.md](examples/helm/README.md)
+
+---
+
+### Ansible (Multi-Server Orchestration)
+
+**When to use:** Multiple servers (>3) need migration, centralized configuration management.
+
+```bash
+ansible-playbook -i inventory examples/ansible/keycloak-migration.yml \
+  --limit production-servers
+```
+
+**Use case:** Migrate 10+ Keycloak instances with one command.
+
+See: [examples/ansible/README.md](examples/ansible/README.md)
+
+---
+
+### Terraform (IaC Integration)
+
+**When to use:** Migration as part of infrastructure code, idempotent deployment.
+
+```hcl
+module "keycloak_migration" {
+  source = "./examples/terraform/modules/keycloak-migration"
+
+  database_host = aws_db_instance.keycloak.endpoint
+  target_version = "26.0.7"
+}
+```
+
+**Use case:** Create infrastructure + migrate in one `terraform apply`.
+
+See: [examples/terraform/README.md](examples/terraform/README.md)
+
+---
+
+### Cloud-Specific Examples
+
+Pre-configured examples for major cloud providers:
+
+- **AWS:** EKS + RDS ([examples/cloud/aws/](examples/cloud/))
+- **GCP:** GKE + Cloud SQL ([examples/cloud/gcp/](examples/cloud/))
+- **Azure:** AKS + Azure Database ([examples/cloud/azure/](examples/cloud/))
 
 ---
 
