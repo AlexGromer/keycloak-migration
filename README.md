@@ -305,6 +305,170 @@ rollout:
 
 ---
 
+### Advanced Migration Strategies (v3.3)
+
+#### Blue-Green Deployment
+
+**Scenario:** Zero-downtime migration with instant traffic switch.
+
+**Profile Example:** `profiles/blue-green-k8s-istio.yaml`
+
+```yaml
+profile:
+  name: blue-green-k8s-istio
+  strategy: blue_green  # Enable Blue-Green mode
+
+migration:
+  current_version: "16.1.1"
+  target_version: "26.0.7"
+
+blue_green:
+  old_environment: "blue"   # Current production
+  new_environment: "green"  # New version deployment
+
+  deployment:
+    type: kubernetes
+    namespace: keycloak
+    replicas: 3
+
+  traffic_router:
+    type: istio  # Supports: istio, nginx, haproxy
+    virtualservice: keycloak-vs
+    namespace: keycloak
+    subset_blue: v16
+    subset_green: v26
+
+  readiness_timeout: 600  # seconds
+  keep_old: false  # Destroy blue after successful switch
+  cleanup_delay: 300  # Wait 5 minutes before cleanup
+
+database:
+  type: postgresql
+  host: postgres.keycloak.svc.cluster.local
+  name: keycloak
+```
+
+**Execute:**
+
+```bash
+./scripts/migrate_keycloak_v3.sh migrate --profile=blue-green-k8s-istio.yaml
+```
+
+**Blue-Green Process:**
+1. **Deploy** green environment (new version) alongside blue
+2. **Wait** for green to be fully ready
+3. **Validate** green environment (smoke tests, health checks)
+4. **Switch** traffic from blue (100% → 0%) to green (0% → 100%)
+5. **Cleanup** old blue environment (optional, configurable delay)
+
+**Benefits:**
+- ✅ Instant traffic switch (zero downtime)
+- ✅ Easy rollback (switch back to blue)
+- ✅ Full validation before cutover
+- ✅ No database migration conflicts (both versions use same DB)
+
+---
+
+#### Canary Deployment
+
+**Scenario:** Progressive rollout with validation at each phase.
+
+**Profile Example:** `profiles/canary-k8s-istio.yaml`
+
+```yaml
+profile:
+  name: canary-k8s-istio
+  strategy: canary  # Enable Canary mode
+
+migration:
+  current_version: "16.1.1"
+  target_version: "26.0.7"
+
+canary:
+  deployment:
+    namespace: keycloak
+    deployment: keycloak
+    replicas: 10  # Total replicas
+
+  traffic_router:
+    type: istio
+    virtualservice: keycloak-vs
+    subset_old: v16
+    subset_new: v26
+
+  # Progressive rollout phases
+  phases:
+    - name: phase-1-initial
+      percentage: 10       # 10% traffic to canary
+      replicas: 1          # 1 canary replica
+      duration: 3600       # 1 hour observation
+      validation:
+        error_rate_threshold: 0.01    # Max 1% errors
+        latency_p99_threshold: 500    # Max 500ms p99
+        min_requests: 100             # Min requests to evaluate
+
+    - name: phase-2-half
+      percentage: 50
+      replicas: 5
+      duration: 7200  # 2 hours
+      validation:
+        error_rate_threshold: 0.01
+        latency_p99_threshold: 500
+        min_requests: 500
+
+    - name: phase-3-full
+      percentage: 100
+      replicas: 10
+      duration: 1800  # 30 min final check
+      validation:
+        error_rate_threshold: 0.01
+        latency_p99_threshold: 500
+        min_requests: 1000
+
+  auto_rollback: true  # Auto-rollback on validation failure
+
+validation:
+  prometheus_url: http://prometheus.monitoring.svc.cluster.local:9090
+```
+
+**Execute:**
+
+```bash
+./scripts/migrate_keycloak_v3.sh migrate --profile=canary-k8s-istio.yaml
+```
+
+**Canary Process:**
+1. **Phase 1:** Deploy 1 canary replica (10% traffic)
+   - Migrate 1 replica to new version
+   - Route 10% traffic to canary
+   - **Validate:** error rate, latency, minimum requests
+   - **Observe:** 1 hour
+2. **Phase 2:** Scale to 5 replicas (50% traffic)
+   - Migrate 4 more replicas
+   - Route 50% traffic to canary
+   - **Validate:** same metrics
+   - **Observe:** 2 hours
+3. **Phase 3:** Full rollout (100% traffic)
+   - Migrate remaining replicas
+   - Route 100% traffic to new version
+   - **Validate:** final check
+   - **Observe:** 30 minutes
+
+**Auto-Rollback Triggers:**
+- Error rate > threshold
+- p99 latency > threshold
+- Insufficient requests (unreliable metrics)
+- 3 consecutive validation failures
+
+**Benefits:**
+- ✅ Risk mitigation through gradual rollout
+- ✅ Automated validation at each phase (Prometheus metrics)
+- ✅ Early detection of issues (10% exposure first)
+- ✅ Automatic rollback on failure
+- ✅ Continuous monitoring during observation periods
+
+---
+
 ### Monitoring Integration (v3.1)
 
 Enable real-time monitoring during migration:

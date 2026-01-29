@@ -1,0 +1,78 @@
+# Blue-Green Migration Profile — Kubernetes + Istio
+# Zero-downtime deployment with instant traffic switch
+
+profile:
+  name: blue-green-k8s-istio
+  strategy: blue_green
+  description: "Blue-Green migration for Kubernetes with Istio traffic management"
+
+migration:
+  current_version: "16.1.1"
+  target_version: "26.0.7"
+  path: "16.1.1 → 18.0.11 → 21.1.2 → 23.0.7 → 24.0.5 → 26.0.7"
+
+blue_green:
+  # Environment names
+  old_environment: "blue"   # Current production
+  new_environment: "green"  # New version deployment
+
+  # Deployment configuration
+  deployment:
+    type: kubernetes
+    namespace: keycloak
+    replicas: 3
+
+    # Optional: Custom manifests for each environment
+    # blue_manifest: /path/to/blue-deployment.yaml
+    # green_manifest: /path/to/green-deployment.yaml
+
+  # Traffic routing
+  traffic_router:
+    type: istio
+    virtualservice: keycloak-vs
+    namespace: keycloak
+    subset_blue: v16      # Old version
+    subset_green: v26     # New version
+
+  # Readiness checks
+  readiness_timeout: 600  # seconds
+  health_endpoint: /health/ready
+
+  # Validation
+  validation:
+    smoke_tests: true
+    smoke_test_script: /opt/kk_migration/tests/smoke_tests.sh
+
+  # Cleanup behavior
+  keep_old: false           # Destroy blue environment after successful switch
+  cleanup_delay: 300        # Wait 5 minutes before cleanup
+  auto_cleanup: true        # Auto-cleanup on failure
+
+# Database configuration
+database:
+  type: postgresql
+  host: postgres.keycloak.svc.cluster.local
+  port: 5432
+  name: keycloak
+  # credentials_file: /opt/kk_migration/.env.db
+
+# Backup settings
+backup:
+  enabled: true
+  method: pg_dump
+  location: /opt/backups/keycloak
+  retention_days: 30
+
+# Rollback settings
+rollback:
+  enabled: true
+  automatic: false  # Manual rollback decision
+
+# Logging
+logging:
+  level: INFO
+  audit_log: /var/log/keycloak-migration/audit.log
+
+# Monitoring (optional)
+monitoring:
+  enabled: false

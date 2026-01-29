@@ -1,0 +1,100 @@
+# Canary Migration Profile — Kubernetes + Istio
+# Progressive rollout with validation: 10% → 50% → 100%
+
+profile:
+  name: canary-k8s-istio
+  strategy: canary
+  description: "Canary migration for Kubernetes with Istio traffic splitting"
+
+migration:
+  current_version: "16.1.1"
+  target_version: "26.0.7"
+  path: "16.1.1 → 18.0.11 → 21.1.2 → 23.0.7 → 24.0.5 → 26.0.7"
+
+canary:
+  # Deployment configuration
+  deployment:
+    namespace: keycloak
+    deployment: keycloak
+    replicas: 10  # Total replicas (canary will scale progressively)
+
+  # Traffic routing
+  traffic_router:
+    type: istio
+    virtualservice: keycloak-vs
+    namespace: keycloak
+    subset_old: v16  # Old version
+    subset_new: v26  # New version
+
+  # Canary phases (progressive rollout)
+  phases:
+    # Phase 1: 10% traffic, 1 replica
+    - name: phase-1-initial
+      percentage: 10
+      replicas: 1
+      duration: 3600  # 1 hour observation
+      validation:
+        error_rate_threshold: 0.01      # Max 1% error rate
+        latency_p99_threshold: 500      # Max 500ms p99 latency
+        min_requests: 100               # Minimum requests to evaluate
+
+    # Phase 2: 50% traffic, 5 replicas
+    - name: phase-2-half
+      percentage: 50
+      replicas: 5
+      duration: 7200  # 2 hours observation
+      validation:
+        error_rate_threshold: 0.01
+        latency_p99_threshold: 500
+        min_requests: 500
+
+    # Phase 3: 100% traffic, all replicas
+    - name: phase-3-full
+      percentage: 100
+      replicas: 10
+      duration: 1800  # 30 minutes final check
+      validation:
+        error_rate_threshold: 0.01
+        latency_p99_threshold: 500
+        min_requests: 1000
+
+  # Rollback behavior
+  auto_rollback: true  # Automatically rollback on validation failure
+
+# Validation settings (Prometheus-based)
+validation:
+  prometheus_url: http://prometheus.monitoring.svc.cluster.local:9090
+  metrics:
+    error_rate_query: 'sum(rate(http_requests_total{status=~"5.."}[5m])) / sum(rate(http_requests_total[5m]))'
+    latency_p99_query: 'histogram_quantile(0.99, sum(rate(http_request_duration_seconds_bucket[5m])) by (le)) * 1000'
+    request_count_query: 'sum(increase(http_requests_total[5m]))'
+
+# Database configuration
+database:
+  type: postgresql
+  host: postgres.keycloak.svc.cluster.local
+  port: 5432
+  name: keycloak
+  # credentials_file: /opt/kk_migration/.env.db
+
+# Backup settings
+backup:
+  enabled: true
+  method: pg_dump
+  location: /opt/backups/keycloak
+  retention_days: 30
+
+# Rollback settings
+rollback:
+  enabled: true
+  automatic: true  # Auto-rollback on canary failure
+
+# Logging
+logging:
+  level: INFO
+  audit_log: /var/log/keycloak-migration/audit.log
+
+# Monitoring (optional)
+monitoring:
+  enabled: true
+  prometheus_exporter: true

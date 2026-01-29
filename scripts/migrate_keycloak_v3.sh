@@ -1679,7 +1679,7 @@ cmd_migrate() {
         load_profile_or_discover "$profile"
     fi
 
-    # Detect migration mode (standard, multi-tenant, clustered)
+    # Detect migration mode (standard, multi-tenant, clustered, blue_green, canary)
     local migration_mode="${PROFILE_MODE:-standard}"
 
     if [[ "$migration_mode" == "multi-tenant" ]]; then
@@ -1689,6 +1689,16 @@ cmd_migrate() {
     elif [[ "$migration_mode" == "clustered" ]]; then
         log_section "Clustered Deployment Migration Mode"
         mt_execute_clustered
+        return $?
+    elif [[ "$migration_mode" == "blue_green" ]]; then
+        log_section "Blue-Green Migration Mode"
+        source "$LIB_DIR/blue_green.sh"
+        bluegreen_execute_migration
+        return $?
+    elif [[ "$migration_mode" == "canary" ]]; then
+        log_section "Canary Migration Mode"
+        source "$LIB_DIR/canary.sh"
+        canary_execute_migration
         return $?
     fi
 
@@ -1829,10 +1839,18 @@ PROFILES:
     Profiles are YAML files in the profiles/ directory.
     Create a profile using: ./scripts/config_wizard.sh
 
-    Examples:
+    Standard Examples:
     - standalone-postgresql.yaml
     - kubernetes-cluster-production.yaml
     - docker-compose-dev.yaml
+
+    Advanced Strategies (v3.3):
+    - blue-green-k8s-istio.yaml        # Zero-downtime deployment
+    - canary-k8s-istio.yaml             # Progressive rollout (10% → 50% → 100%)
+
+    Multi-Instance (v3.2):
+    - multi-tenant-example.yaml         # Multiple isolated instances
+    - clustered-bare-metal-example.yaml # HA cluster with load balancer
 
 ENVIRONMENT VARIABLES:
     PGPASSWORD              PostgreSQL password (if using PostgreSQL)
