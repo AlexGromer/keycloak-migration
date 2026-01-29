@@ -1,0 +1,58 @@
+# Keycloak Migration Profile — AWS EKS + RDS PostgreSQL
+# Environment: AWS Cloud
+# Deployment: EKS (Elastic Kubernetes Service)
+# Database: RDS PostgreSQL
+
+profile:
+  name: aws-eks-rds-postgresql
+  environment: aws-cloud
+
+database:
+  type: postgresql
+  location: external  # RDS is external to EKS
+  host: keycloak-db.abc123.us-east-1.rds.amazonaws.com  # Replace with your RDS endpoint
+  port: 5432
+  name: keycloak
+  user: keycloak_admin
+  credentials_source: secret  # Use Kubernetes secret with RDS credentials
+
+keycloak:
+  deployment_mode: kubernetes
+  distribution_mode: container  # Use container images from ECR
+  cluster_mode: infinispan
+
+  current_version: 16.1.1
+  target_version: 26.0.7
+
+  kubernetes:
+    namespace: keycloak
+    deployment: keycloak
+    service: keycloak-http
+    replicas: 3  # Minimum 3 for HA across AZs
+
+  container:
+    registry: <account-id>.dkr.ecr.us-east-1.amazonaws.com  # Replace with your ECR
+    image: keycloak/keycloak
+    pull_policy: IfNotPresent
+
+migration:
+  strategy: rolling_update  # Zero-downtime migration
+  parallel_jobs: 4
+  timeout_per_version: 1200  # 20 minutes (RDS can be slower)
+  run_smoke_tests: true
+  backup_before_step: true
+
+# AWS-specific notes:
+# 1. Create Kubernetes secret with RDS credentials:
+#    kubectl create secret generic keycloak-db-secret \
+#      --from-literal=username=keycloak_admin \
+#      --from-literal=password=<your-password> \
+#      -n keycloak
+#
+# 2. Ensure security groups allow EKS → RDS (port 5432)
+#
+# 3. Use Multi-AZ RDS for high availability
+#
+# 4. Consider using RDS Proxy for connection pooling
+#
+# 5. Enable automated backups before migration

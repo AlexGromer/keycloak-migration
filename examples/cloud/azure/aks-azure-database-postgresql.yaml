@@ -1,0 +1,72 @@
+# Keycloak Migration Profile — Azure AKS + Azure Database for PostgreSQL
+# Environment: Microsoft Azure
+# Deployment: AKS (Azure Kubernetes Service)
+# Database: Azure Database for PostgreSQL Flexible Server
+
+profile:
+  name: azure-aks-postgresql
+  environment: azure-cloud
+
+database:
+  type: postgresql
+  location: external  # Azure Database is external to AKS
+  host: keycloak-db.postgres.database.azure.com  # Replace with your server name
+  port: 5432
+  name: keycloak
+  user: keycloak_admin@keycloak-db  # Azure requires @server-name suffix
+  credentials_source: secret  # Use Kubernetes secret with Azure Database credentials
+
+keycloak:
+  deployment_mode: kubernetes
+  distribution_mode: container  # Use container images from ACR
+  cluster_mode: infinispan
+
+  current_version: 16.1.1
+  target_version: 26.0.7
+
+  kubernetes:
+    namespace: keycloak
+    deployment: keycloak
+    service: keycloak-http
+    replicas: 3  # Minimum 3 for HA across availability zones
+
+  container:
+    registry: <registry-name>.azurecr.io  # Replace with your ACR name
+    image: keycloak/keycloak
+    pull_policy: IfNotPresent
+
+migration:
+  strategy: rolling_update  # Zero-downtime migration
+  parallel_jobs: 4
+  timeout_per_version: 1200  # 20 minutes
+  run_smoke_tests: true
+  backup_before_step: true
+
+# Azure-specific notes:
+# 1. Create Kubernetes secret with Azure Database credentials:
+#    kubectl create secret generic keycloak-db-secret \
+#      --from-literal=username=keycloak_admin@keycloak-db \
+#      --from-literal=password=<your-password> \
+#      -n keycloak
+#
+# 2. Connection security options:
+#    a) Private endpoint (recommended): VNet integration
+#    b) Public endpoint: Configure firewall rules for AKS subnet
+#    c) SSL/TLS required: Azure enforces encrypted connections
+#
+# 3. SSL connection parameters:
+#    Add to JDBC URL: ?sslmode=require
+#    Download certificate: https://learn.microsoft.com/azure/postgresql/
+#
+# 4. Enable automated backups before migration (Azure Portal)
+#
+# 5. Use High Availability (HA) with zone redundancy
+#
+# 6. Azure AD authentication (optional):
+#    - Use Azure Workload Identity instead of passwords
+#    - Requires Azure AD integration setup
+#
+# 7. Performance considerations:
+#    - Use Premium or Business Critical tier for production
+#    - Enable read replicas for scaling
+#    - Monitor with Azure Monitor

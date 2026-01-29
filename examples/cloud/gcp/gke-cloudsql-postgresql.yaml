@@ -1,0 +1,70 @@
+# Keycloak Migration Profile — GCP GKE + Cloud SQL PostgreSQL
+# Environment: Google Cloud Platform
+# Deployment: GKE (Google Kubernetes Engine)
+# Database: Cloud SQL for PostgreSQL
+
+profile:
+  name: gcp-gke-cloudsql-postgresql
+  environment: gcp-cloud
+
+database:
+  type: postgresql
+  location: external  # Cloud SQL is external to GKE
+  host: 10.123.45.67  # Private IP of Cloud SQL instance
+  # OR use Cloud SQL Proxy:
+  # host: 127.0.0.1  # Localhost when using Cloud SQL Proxy sidecar
+  port: 5432
+  name: keycloak
+  user: keycloak-admin
+  credentials_source: secret  # Use Kubernetes secret with Cloud SQL credentials
+
+keycloak:
+  deployment_mode: kubernetes
+  distribution_mode: container  # Use container images from GCR/Artifact Registry
+  cluster_mode: infinispan
+
+  current_version: 16.1.1
+  target_version: 26.0.7
+
+  kubernetes:
+    namespace: keycloak
+    deployment: keycloak
+    service: keycloak-http
+    replicas: 3  # Minimum 3 for HA across zones
+
+  container:
+    registry: gcr.io/<project-id>  # Replace with your GCR project
+    # OR use Artifact Registry:
+    # registry: <region>-docker.pkg.dev/<project-id>/<repository>
+    image: keycloak/keycloak
+    pull_policy: IfNotPresent
+
+migration:
+  strategy: rolling_update  # Zero-downtime migration
+  parallel_jobs: 4
+  timeout_per_version: 1200  # 20 minutes
+  run_smoke_tests: true
+  backup_before_step: true
+
+# GCP-specific notes:
+# 1. Create Kubernetes secret with Cloud SQL credentials:
+#    kubectl create secret generic keycloak-db-secret \
+#      --from-literal=username=keycloak-admin \
+#      --from-literal=password=<your-password> \
+#      -n keycloak
+#
+# 2. Connection options:
+#    a) Private IP (recommended): Configure VPC peering
+#    b) Cloud SQL Proxy: Add sidecar container to Keycloak pods
+#
+# 3. Cloud SQL Proxy sidecar example:
+#    - image: gcr.io/cloudsql-docker/gce-proxy:latest
+#      command:
+#        - "/cloud_sql_proxy"
+#        - "-instances=<project>:<region>:<instance>=tcp:5432"
+#
+# 4. Enable automated backups before migration
+#
+# 5. Use High Availability (HA) configuration for Cloud SQL
+#
+# 6. Workload Identity for secure authentication (instead of secrets)
