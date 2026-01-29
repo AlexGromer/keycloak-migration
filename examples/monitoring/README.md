@@ -15,7 +15,33 @@ Keycloak Migration Tool supports Prometheus metrics export for real-time monitor
 
 ## Quick Start
 
-### 1. Enable Monitoring
+### Option 1: Docker Compose Stack (Recommended)
+
+Easiest way to get full monitoring stack (Prometheus + Grafana + Alertmanager):
+
+```bash
+cd examples/monitoring
+
+# Start monitoring stack
+docker-compose up -d
+
+# Run migration with monitoring enabled
+cd ../..
+./scripts/migrate_keycloak_v3.sh migrate --profile prod.yaml --enable-monitoring
+```
+
+**Access dashboards:**
+- Grafana: http://localhost:3000 (admin/admin)
+- Prometheus: http://localhost:9091
+- Alertmanager: http://localhost:9093
+
+The Keycloak Migration dashboard is auto-loaded in Grafana.
+
+---
+
+### Option 2: Manual Setup
+
+#### 1. Enable Monitoring
 
 ```bash
 ./scripts/migrate_keycloak_v3.sh migrate --profile prod.yaml --enable-monitoring
@@ -23,7 +49,7 @@ Keycloak Migration Tool supports Prometheus metrics export for real-time monitor
 
 This starts a simple HTTP server on port **9090** exposing metrics.
 
-### 2. Scrape Metrics
+#### 2. Scrape Metrics
 
 Add to Prometheus configuration:
 

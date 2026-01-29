@@ -1,0 +1,186 @@
+groups:
+  - name: keycloak_migration_critical
+    interval: 30s
+    rules:
+      # Critical: Migration failed at any checkpoint
+      - alert: KeycloakMigrationFailed
+        expr: keycloak_migration_checkpoint_status == 3
+        for: 1m
+        labels:
+          severity: critical
+          component: keycloak-migration
+        annotations:
+          summary: "Keycloak migration failed at checkpoint {{ $labels.checkpoint }}"
+          description: |
+            Migration failed at checkpoint: {{ $labels.checkpoint }}
+            Profile: {{ $labels.profile }}
+            From version: {{ $labels.from_version }}
+            To version: {{ $labels.to_version }}
+
+            Action required: Check migration logs and run rollback if needed.
+          runbook_url: "https://github.com/AlexGromer/keycloak-migration/blob/main/TROUBLESHOOTING.md"
+
+      # Critical: High error rate
+      - alert: KeycloakMigrationHighErrorRate
+        expr: rate(keycloak_migration_errors_total[5m]) > 0.5
+        for: 5m
+        labels:
+          severity: critical
+          component: keycloak-migration
+        annotations:
+          summary: "High error rate during Keycloak migration"
+          description: |
+            Error rate: {{ $value | humanize }} errors/sec
+            Profile: {{ $labels.profile }}
+            Error type: {{ $labels.error_type }}
+
+            Multiple errors detected. Migration may be unstable.
+
+  - name: keycloak_migration_warning
+    interval: 1m
+    rules:
+      # Warning: Migration stalled (no progress in 10 minutes)
+      - alert: KeycloakMigrationStalled
+        expr: |
+          changes(keycloak_migration_progress[10m]) == 0
+          and keycloak_migration_progress > 0
+          and keycloak_migration_progress < 1
+        for: 10m
+        labels:
+          severity: warning
+          component: keycloak-migration
+        annotations:
+          summary: "Keycloak migration appears stalled"
+          description: |
+            No progress detected in last 10 minutes.
+            Current progress: {{ $value | humanizePercentage }}
+            Profile: {{ $labels.profile }}
+            Status: {{ $labels.status }}
+
+            Migration may be stuck. Check if process is still running.
+
+      # Warning: Checkpoint taking too long
+      - alert: KeycloakMigrationCheckpointSlow
+        expr: |
+          keycloak_migration_checkpoint_status == 1
+          and changes(keycloak_migration_checkpoint_status[30m]) == 0
+        for: 30m
+        labels:
+          severity: warning
+          component: keycloak-migration
+        annotations:
+          summary: "Keycloak migration checkpoint taking too long"
+          description: |
+            Checkpoint {{ $labels.checkpoint }} has been in progress for >30 minutes.
+            Profile: {{ $labels.profile }}
+
+            This checkpoint may be stuck or encountering performance issues.
+
+      # Warning: Database size growing rapidly
+      - alert: KeycloakMigrationDatabaseGrowth
+        expr: |
+          rate(keycloak_migration_database_size_bytes[15m]) > 100000000
+        for: 15m
+        labels:
+          severity: warning
+          component: keycloak-migration
+        annotations:
+          summary: "Rapid database growth during migration"
+          description: |
+            Database growing at {{ $value | humanize1024 }}/sec
+            Version: {{ $labels.version }}
+            Database: {{ $labels.database }}
+
+            Ensure sufficient disk space is available.
+
+      # Warning: High Java heap usage
+      - alert: KeycloakMigrationHighMemory
+        expr: keycloak_migration_java_heap_bytes > 3000000000
+        for: 5m
+        labels:
+          severity: warning
+          component: keycloak-migration
+        annotations:
+          summary: "High Java heap memory usage during migration"
+          description: |
+            Java heap usage: {{ $value | humanize1024 }}
+            Version: {{ $labels.version }}
+
+            Consider increasing JVM heap size if migration is slow.
+
+  - name: keycloak_migration_info
+    interval: 5m
+    rules:
+      # Info: Migration started
+      - alert: KeycloakMigrationStarted
+        expr: |
+          keycloak_migration_progress > 0
+          and keycloak_migration_progress < 1
+        for: 1m
+        labels:
+          severity: info
+          component: keycloak-migration
+        annotations:
+          summary: "Keycloak migration in progress"
+          description: |
+            Migration started.
+            Profile: {{ $labels.profile }}
+            From: {{ $labels.from_version }}
+            To: {{ $labels.to_version }}
+            Progress: {{ $value | humanizePercentage }}
+
+      # Info: Migration completed successfully
+      - alert: KeycloakMigrationCompleted
+        expr: |
+          keycloak_migration_progress == 1
+          and keycloak_migration_checkpoint_status{checkpoint="tests_ok"} == 2
+        for: 1m
+        labels:
+          severity: info
+          component: keycloak-migration
+        annotations:
+          summary: "Keycloak migration completed successfully"
+          description: |
+            Migration completed successfully!
+            Profile: {{ $labels.profile }}
+            From: {{ $labels.from_version }}
+            To: {{ $labels.to_version }}
+
+            All checkpoints passed. Migration is complete.
+
+  - name: keycloak_migration_sla
+    interval: 1m
+    rules:
+      # SLA: Migration duration exceeds expected time
+      - alert: KeycloakMigrationDurationSLA
+        expr: |
+          keycloak_migration_duration_seconds > 7200
+          and keycloak_migration_progress < 1
+        for: 1m
+        labels:
+          severity: warning
+          component: keycloak-migration
+        annotations:
+          summary: "Keycloak migration exceeding expected duration"
+          description: |
+            Migration has been running for {{ $value | humanizeDuration }}
+            Profile: {{ $labels.profile }}
+            Expected maximum: 2 hours
+
+            Migration may be slower than expected.
+
+      # SLA: Too many errors (quality threshold)
+      - alert: KeycloakMigrationQualityThreshold
+        expr: sum(keycloak_migration_errors_total) > 10
+        for: 1m
+        labels:
+          severity: warning
+          component: keycloak-migration
+        annotations:
+          summary: "Keycloak migration quality threshold exceeded"
+          description: |
+            Total errors: {{ $value }}
+            Profile: {{ $labels.profile }}
+            Threshold: 10 errors
+
+            High number of errors may indicate migration issues.

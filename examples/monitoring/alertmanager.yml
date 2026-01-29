@@ -1,0 +1,100 @@
+global:
+  resolve_timeout: 5m
+
+# Templates for notifications
+templates:
+  - '/etc/alertmanager/templates/*.tmpl'
+
+# Route configuration
+route:
+  # Default receiver for all alerts
+  receiver: 'default'
+
+  # Group alerts by common labels
+  group_by: ['alertname', 'cluster', 'service']
+
+  # Wait time before sending first notification
+  group_wait: 10s
+
+  # Wait time before sending notification about new alerts in same group
+  group_interval: 10s
+
+  # Wait time before re-sending notification
+  repeat_interval: 12h
+
+  # Child routes (specific routing rules)
+  routes:
+    # Critical alerts - immediate notification
+    - receiver: 'critical'
+      match:
+        severity: critical
+      group_wait: 0s
+      repeat_interval: 5m
+
+    # Warning alerts - less frequent
+    - receiver: 'warning'
+      match:
+        severity: warning
+      repeat_interval: 4h
+
+    # Info alerts - very infrequent
+    - receiver: 'info'
+      match:
+        severity: info
+      repeat_interval: 24h
+
+# Notification inhibition rules
+inhibit_rules:
+  # Suppress warning if critical alert is firing for same instance
+  - source_match:
+      severity: 'critical'
+    target_match:
+      severity: 'warning'
+    equal: ['alertname', 'instance']
+
+# Receivers (notification channels)
+receivers:
+  # Default receiver (logs only)
+  - name: 'default'
+    # Add your preferred notification channel here
+    # Examples below (uncomment and configure)
+
+  # Critical alerts
+  - name: 'critical'
+    # Slack example
+    # slack_configs:
+    #   - api_url: 'YOUR_SLACK_WEBHOOK_URL'
+    #     channel: '#alerts-critical'
+    #     title: 'Keycloak Migration CRITICAL Alert'
+    #     text: '{{ range .Alerts }}{{ .Annotations.summary }}\n{{ .Annotations.description }}{{ end }}'
+
+    # Email example
+    # email_configs:
+    #   - to: 'ops-team@example.com'
+    #     from: 'alertmanager@example.com'
+    #     smarthost: 'smtp.example.com:587'
+    #     auth_username: 'alertmanager@example.com'
+    #     auth_password: 'YOUR_PASSWORD'
+    #     headers:
+    #       subject: '[CRITICAL] Keycloak Migration Alert'
+
+    # PagerDuty example
+    # pagerduty_configs:
+    #   - service_key: 'YOUR_PAGERDUTY_SERVICE_KEY'
+    #     description: '{{ .GroupLabels.alertname }}: {{ .CommonAnnotations.summary }}'
+
+  # Warning alerts
+  - name: 'warning'
+    # Slack example
+    # slack_configs:
+    #   - api_url: 'YOUR_SLACK_WEBHOOK_URL'
+    #     channel: '#alerts-warning'
+    #     title: 'Keycloak Migration Warning'
+
+  # Info alerts
+  - name: 'info'
+    # Slack example
+    # slack_configs:
+    #   - api_url: 'YOUR_SLACK_WEBHOOK_URL'
+    #     channel: '#alerts-info'
+    #     title: 'Keycloak Migration Info'

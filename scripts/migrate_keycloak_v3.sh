@@ -26,6 +26,7 @@ source "$LIB_DIR/profile_manager.sh"
 source "$LIB_DIR/keycloak_discovery.sh"
 source "$LIB_DIR/distribution_handler.sh"
 source "$LIB_DIR/audit_logger.sh"
+source "$LIB_DIR/prometheus_exporter.sh"
 
 # ============================================================================
 # CONFIGURATION DEFAULTS
@@ -278,6 +279,11 @@ set_checkpoint() {
     update_state "CHECKPOINT_${version//\./_}" "$checkpoint"
     update_state "LAST_CHECKPOINT" "${version}:${checkpoint}"
     log_info "Checkpoint: ${version} → ${checkpoint}"
+
+    # Update Prometheus metrics if monitoring enabled
+    if [[ "${ENABLE_MONITOR:-false}" == "true" ]]; then
+        prom_set_checkpoint "$checkpoint" 2  # 2 = completed
+    fi
 }
 
 get_checkpoint() {
@@ -1497,8 +1503,22 @@ execute_migration() {
                 ;;
         esac
 
+        # Update overall progress
+        if [[ "${ENABLE_MONITOR:-false}" == "true" ]]; then
+            local progress=$(awk "BEGIN {printf \"%.2f\", $step_num / $total_steps}")
+            prom_set_progress "$progress" "in_progress"
+        fi
+
         step_num=$((step_num + 1))
     done
+
+    # Set progress to 100%
+    if [[ "${ENABLE_MONITOR:-false}" == "true" ]]; then
+        prom_set_progress 1.0 "completed"
+        local duration=$(($(date +%s) - migration_start_ts))
+        prom_set_duration "$duration"
+        prom_set_success_timestamp
+    fi
 
     log_section "Migration Complete!"
     log_success "Keycloak successfully migrated from $current_version to $target_version"
@@ -1567,6 +1587,14 @@ cmd_migrate() {
 
     # Initialize workspace
     mkdir -p "$WORK_DIR"
+
+    # Start monitoring if enabled
+    if [[ "${ENABLE_MONITOR:-false}" == "true" ]]; then
+        local monitor_port="${MONITORING_PORT:-9090}"
+        log_info "Starting Prometheus exporter on port $monitor_port..."
+        prom_start_exporter "$monitor_port"
+        prom_set_progress 0.0 "starting"
+    fi
 
     # Check for resume
     if ! check_resume; then
