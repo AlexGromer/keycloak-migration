@@ -1,0 +1,33 @@
+# Keycloak Migration Profile v3.0
+# Example: Standalone deployment with MySQL
+
+profile:
+  name: standalone-mysql
+  environment: standalone
+
+database:
+  type: mysql
+  location: standalone
+  host: localhost
+  port: 3306
+  name: keycloak
+  user: keycloak
+  credentials_source: env
+
+keycloak:
+  deployment_mode: standalone
+  distribution_mode: download
+  cluster_mode: standalone
+
+  current_version: 16.1.1
+  target_version: 26.0.7
+
+  home_dir: /opt/keycloak
+  service_name: keycloak
+
+migration:
+  strategy: inplace
+  parallel_jobs: 4
+  timeout_per_version: 900
+  run_smoke_tests: true
+  backup_before_step: true

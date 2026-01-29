@@ -1,0 +1,39 @@
+# Keycloak Migration Profile v3.0
+# Example: Docker Compose development environment
+
+profile:
+  name: docker-compose-dev
+  environment: docker-compose
+
+database:
+  type: postgresql
+  location: docker  # PostgreSQL running in Docker container
+  host: postgres  # Container name (Docker network)
+  port: 5432
+  name: keycloak
+  user: keycloak
+  credentials_source: env
+
+keycloak:
+  deployment_mode: docker-compose
+  distribution_mode: container
+  cluster_mode: standalone
+
+  current_version: 16.1.1
+  target_version: 26.0.7
+
+  docker_compose:
+    compose_file: docker-compose.yml
+    service_name: keycloak
+
+  container:
+    registry: quay.io
+    image: keycloak/keycloak
+    pull_policy: Always
+
+migration:
+  strategy: inplace  # Stop → Migrate → Start
+  parallel_jobs: 2  # Less parallelism for dev
+  timeout_per_version: 600
+  run_smoke_tests: true
+  backup_before_step: true

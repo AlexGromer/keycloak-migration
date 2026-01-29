@@ -1,0 +1,41 @@
+# Keycloak Migration Profile v3.0
+# Example: Kubernetes cluster with Infinispan, external PostgreSQL
+
+profile:
+  name: kubernetes-cluster-production
+  environment: kubernetes
+
+database:
+  type: postgresql
+  location: kubernetes  # DB running as Kubernetes service
+  host: postgres-postgresql.database.svc.cluster.local
+  port: 5432
+  name: keycloak
+  user: keycloak
+  credentials_source: secret  # Password from Kubernetes secret
+
+keycloak:
+  deployment_mode: kubernetes
+  distribution_mode: container
+  cluster_mode: infinispan  # Multi-node with embedded Infinispan cache
+
+  current_version: 16.1.1
+  target_version: 26.0.7
+
+  kubernetes:
+    namespace: keycloak
+    deployment: keycloak
+    service: keycloak-http
+    replicas: 3  # 3-node cluster
+
+  container:
+    registry: docker.io
+    image: keycloak/keycloak
+    pull_policy: IfNotPresent
+
+migration:
+  strategy: rolling_update  # Rolling update for zero-downtime
+  parallel_jobs: 4
+  timeout_per_version: 900
+  run_smoke_tests: true
+  backup_before_step: true
