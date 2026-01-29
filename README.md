@@ -1,11 +1,12 @@
-# Keycloak Migration Tool v3.0
+# Keycloak Migration Tool v3.2
 
-**One-command Keycloak migration utility** with auto-detection, atomic checkpoints, and support for all Keycloak-supported databases.
+**One-command Keycloak migration utility** with auto-detection, multi-tenant support, clustered deployments, real-time monitoring, and support for all Keycloak-supported databases.
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
-[![Tests](https://img.shields.io/badge/tests-137%2F137-success)](tests/)
+[![Tests](https://img.shields.io/badge/tests-74%2F74-success)](tests/)
 [![Bash](https://img.shields.io/badge/bash-5.0%2B-green.svg)](scripts/)
 [![Databases](https://img.shields.io/badge/databases-7-blue.svg)](scripts/lib/database_adapter.sh)
+[![Version](https://img.shields.io/badge/version-v3.2-blue.svg)](ROADMAP.md)
 
 ---
 
@@ -72,7 +73,10 @@ If you already have a profile:
 - ✅ **Auto-Rollback** — Automatic rollback on failure
 - ✅ **Airgap Mode** — Pre-validate all artifacts available
 - ✅ **JSON Audit Logging** — Full traceability
-- ✅ **Test Coverage** — 137 unit tests, 100% pass rate
+- ✅ **Real-Time Monitoring** — Prometheus metrics + Grafana dashboards (v3.1)
+- ✅ **Multi-Tenant Support** — Parallel migration of isolated instances (v3.2)
+- ✅ **Clustered Deployments** — Zero-downtime rolling updates (v3.2)
+- ✅ **Test Coverage** — 74 unit tests, 100% pass rate
 
 ### Migration Path
 Supports Keycloak **16.1.1 → 26.0.7** via safe intermediate versions:
@@ -152,6 +156,187 @@ export PROFILE_KC_TARGET_VERSION=26.0.7
 ```
 
 Scans environment and creates profile automatically.
+
+---
+
+## 🚁 Advanced Usage
+
+### Multi-Tenant Migration (v3.2)
+
+**Scenario:** SaaS platform with multiple isolated Keycloak instances.
+
+**Profile Example:** `profiles/multi-tenant-example.yaml`
+
+```yaml
+profile:
+  name: multi-tenant-saas
+  mode: multi-tenant  # Enable multi-tenant mode
+
+migration:
+  strategy: rolling_update
+  parallel: true  # Migrate all tenants simultaneously
+
+tenants:
+  # Tenant 1: Enterprise customer
+  - name: enterprise-corp
+    database:
+      host: db1.example.com
+      name: keycloak_enterprise
+    deployment:
+      mode: kubernetes
+      namespace: keycloak-enterprise
+      replicas: 3
+
+  # Tenant 2: SMB customer
+  - name: smb-startup
+    database:
+      host: db2.example.com
+      name: keycloak_smb
+    deployment:
+      mode: kubernetes
+      namespace: keycloak-smb
+      replicas: 2
+
+rollout:
+  type: parallel  # Options: parallel, sequential
+  max_concurrent: 3  # Maximum tenants migrated simultaneously
+```
+
+**Execute:**
+
+```bash
+./scripts/migrate_keycloak_v3.sh migrate --profile=multi-tenant-saas.yaml
+```
+
+**Live Monitoring:**
+```
+┌─ MIGRATION PROGRESS (3/3 tenants) ────────────────────────────┐
+│ enterprise-corp  |  87% [████████████████████░░░░░░] 16→26    │
+│ smb-startup      |  92% [██████████████████████░░░] 16→26    │
+│ trial-demo       | 100% [████████████████████████] 16→26 ✓   │
+└────────────────────────────────────────────────────────────────┘
+```
+
+**Features:**
+- ✅ Parallel or sequential execution
+- ✅ Per-tenant checkpoints and rollback
+- ✅ Aggregated audit logging
+- ✅ Real-time progress monitoring for all tenants
+- ✅ Independent failure handling (one fails, others continue)
+
+---
+
+### Clustered Deployment Migration (v3.2)
+
+**Scenario:** 4 Keycloak standalone instances in cluster (bare-metal servers).
+
+**Profile Example:** `profiles/clustered-bare-metal-example.yaml`
+
+```yaml
+profile:
+  name: clustered-bare-metal
+  mode: clustered  # Enable clustered mode
+
+migration:
+  strategy: rolling_update  # One node at a time
+  auto_rollback: true
+
+database:
+  type: postgresql
+  host: db-cluster.example.com  # Shared database
+  name: keycloak
+
+cluster:
+  load_balancer:
+    type: haproxy
+    host: lb.example.com
+    admin_socket: /var/run/haproxy/admin.sock
+    backend_name: keycloak_backend
+
+  nodes:
+    - name: kc-node-1
+      host: 192.168.1.101
+      ssh_user: keycloak
+      keycloak_home: /opt/keycloak
+
+    - name: kc-node-2
+      host: 192.168.1.102
+      ssh_user: keycloak
+      keycloak_home: /opt/keycloak
+
+    - name: kc-node-3
+      host: 192.168.1.103
+      ssh_user: keycloak
+      keycloak_home: /opt/keycloak
+
+    - name: kc-node-4
+      host: 192.168.1.104
+      ssh_user: keycloak
+      keycloak_home: /opt/keycloak
+
+rollout:
+  type: sequential  # Rolling update (recommended)
+  nodes_at_once: 1  # Migrate one node at a time
+  drain_timeout: 60  # Seconds to wait for connection drain
+  startup_timeout: 120  # Seconds to wait for node health
+```
+
+**Execute:**
+
+```bash
+./scripts/migrate_keycloak_v3.sh migrate --profile=clustered-bare-metal.yaml
+```
+
+**Rolling Update Process:**
+1. **Drain** node from load balancer (HAProxy)
+2. **Wait** for active connections to finish
+3. **Migrate** node to new version
+4. **Health check** new version
+5. **Enable** node in load balancer
+6. **Repeat** for next node
+
+**Features:**
+- ✅ Zero-downtime rolling update
+- ✅ Load balancer integration (HAProxy, Nginx)
+- ✅ Connection draining before migration
+- ✅ Health checks before re-enabling
+- ✅ Automatic rollback on failure
+- ✅ Per-node monitoring
+
+---
+
+### Monitoring Integration (v3.1)
+
+Enable real-time monitoring during migration:
+
+```bash
+./scripts/migrate_keycloak_v3.sh migrate --profile=prod.yaml --enable-monitoring
+```
+
+**Start monitoring stack:**
+
+```bash
+cd examples/monitoring
+docker-compose up -d
+```
+
+**Access dashboards:**
+- **Grafana:** http://localhost:3000 (7 panels, auto-refresh 5s)
+- **Prometheus:** http://localhost:9091 (metrics endpoint)
+- **Alertmanager:** http://localhost:9093 (11 alert rules)
+
+**Metrics exported:**
+- `keycloak_migration_progress` — Progress percentage (0.0 to 1.0)
+- `keycloak_migration_checkpoint_status` — Checkpoint states
+- `keycloak_migration_duration_seconds` — Total migration time
+- `keycloak_migration_errors_total` — Error counter
+- `keycloak_migration_database_size_bytes` — DB size before/after
+- `keycloak_migration_java_heap_bytes` — Java memory usage
+- `keycloak_migration_last_success_timestamp` — Last successful migration
+
+**Multi-instance labels:**
+- `tenant="enterprise-corp"` — Per-tenant metrics
+- `node="kc-node-3"` — Per-node metrics
 
 ---
 

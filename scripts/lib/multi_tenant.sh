@@ -83,6 +83,203 @@ cluster_get_node_config() {
 }
 
 # ============================================================================
+# Load Balancer Integration
+# ============================================================================
+
+mt_lb_drain_node() {
+    # Drain traffic from cluster node via load balancer
+    # Usage: mt_lb_drain_node <node_name>
+    local node="$1"
+    local lb_type="${CLUSTER_LB_TYPE:-haproxy}"
+
+    log_info "Draining traffic from node: $node (LB: $lb_type)"
+
+    case "$lb_type" in
+        haproxy)
+            mt_lb_haproxy_drain "$node"
+            ;;
+        nginx)
+            mt_lb_nginx_drain "$node"
+            ;;
+        *)
+            log_warn "Unknown load balancer type: $lb_type, skipping drain"
+            return 0
+            ;;
+    esac
+}
+
+mt_lb_enable_node() {
+    # Enable traffic to cluster node via load balancer
+    # Usage: mt_lb_enable_node <node_name>
+    local node="$1"
+    local lb_type="${CLUSTER_LB_TYPE:-haproxy}"
+
+    log_info "Enabling traffic to node: $node (LB: $lb_type)"
+
+    case "$lb_type" in
+        haproxy)
+            mt_lb_haproxy_enable "$node"
+            ;;
+        nginx)
+            mt_lb_nginx_enable "$node"
+            ;;
+        *)
+            log_warn "Unknown load balancer type: $lb_type, skipping enable"
+            return 0
+            ;;
+    esac
+}
+
+mt_lb_wait_drained() {
+    # Wait for active connections to drain from node
+    # Usage: mt_lb_wait_drained <node_name>
+    local node="$1"
+    local timeout="${PROFILE_ROLLOUT_DRAIN_TIMEOUT:-60}"
+    local lb_type="${CLUSTER_LB_TYPE:-haproxy}"
+
+    log_info "Waiting for connections to drain from $node (timeout: ${timeout}s)..."
+
+    local elapsed=0
+    local interval=2
+
+    while [[ $elapsed -lt $timeout ]]; do
+        local active_conns=0
+
+        case "$lb_type" in
+            haproxy)
+                active_conns=$(mt_lb_haproxy_get_connections "$node")
+                ;;
+            nginx)
+                active_conns=$(mt_lb_nginx_get_connections "$node")
+                ;;
+            *)
+                log_warn "Cannot check connections for $lb_type, assuming drained"
+                return 0
+                ;;
+        esac
+
+        if [[ "$active_conns" -eq 0 ]]; then
+            log_success "Node $node fully drained (0 active connections)"
+            return 0
+        fi
+
+        log_info "  $node: $active_conns active connection(s), waiting..."
+        sleep $interval
+        elapsed=$((elapsed + interval))
+    done
+
+    log_warn "Drain timeout exceeded for $node (still has connections)"
+    return 1
+}
+
+# ----------------------------------------------------------------------------
+# HAProxy Integration
+# ----------------------------------------------------------------------------
+
+mt_lb_haproxy_drain() {
+    # Disable server in HAProxy backend
+    local node="$1"
+    local backend="${CLUSTER_LB_BACKEND:-keycloak_backend}"
+    local socket="${CLUSTER_LB_ADMIN_SOCKET:-/var/run/haproxy/admin.sock}"
+
+    if [[ ! -S "$socket" ]]; then
+        log_error "HAProxy admin socket not found: $socket"
+        return 1
+    fi
+
+    # Send command to HAProxy socket
+    echo "disable server $backend/$node" | socat stdio "$socket" 2>/dev/null
+    local result=$?
+
+    if [[ $result -eq 0 ]]; then
+        log_success "HAProxy: server $backend/$node disabled"
+    else
+        log_error "Failed to disable server in HAProxy"
+        return 1
+    fi
+}
+
+mt_lb_haproxy_enable() {
+    # Enable server in HAProxy backend
+    local node="$1"
+    local backend="${CLUSTER_LB_BACKEND:-keycloak_backend}"
+    local socket="${CLUSTER_LB_ADMIN_SOCKET:-/var/run/haproxy/admin.sock}"
+
+    if [[ ! -S "$socket" ]]; then
+        log_error "HAProxy admin socket not found: $socket"
+        return 1
+    fi
+
+    echo "enable server $backend/$node" | socat stdio "$socket" 2>/dev/null
+    local result=$?
+
+    if [[ $result -eq 0 ]]; then
+        log_success "HAProxy: server $backend/$node enabled"
+    else
+        log_error "Failed to enable server in HAProxy"
+        return 1
+    fi
+}
+
+mt_lb_haproxy_get_connections() {
+    # Get active connection count for server
+    local node="$1"
+    local backend="${CLUSTER_LB_BACKEND:-keycloak_backend}"
+    local socket="${CLUSTER_LB_ADMIN_SOCKET:-/var/run/haproxy/admin.sock}"
+
+    if [[ ! -S "$socket" ]]; then
+        echo "0"
+        return 1
+    fi
+
+    # Parse HAProxy stats: field 5 is current sessions
+    local conns
+    conns=$(echo "show stat" | socat stdio "$socket" 2>/dev/null | \
+        grep "^$backend,$node," | cut -d',' -f5 || echo "0")
+
+    echo "${conns:-0}"
+}
+
+# ----------------------------------------------------------------------------
+# Nginx Integration
+# ----------------------------------------------------------------------------
+
+mt_lb_nginx_drain() {
+    # Mark Nginx upstream server as down
+    local node="$1"
+    local upstream="${CLUSTER_LB_BACKEND:-keycloak_upstream}"
+    local api_url="${CLUSTER_LB_API_URL:-http://localhost:8080/api}"
+
+    # Nginx Plus API: PATCH /api/*/http/upstreams/<upstream>/servers/<id>
+    # {"down": true}
+
+    log_warn "Nginx drain not fully implemented (requires Nginx Plus API)"
+    log_info "Manual action: nginx -s reload after marking $node as down"
+
+    # Placeholder for Nginx Plus API call
+    # curl -X PATCH "$api_url/http/upstreams/$upstream/servers/$node" \
+    #      -d '{"down": true}'
+
+    return 0
+}
+
+mt_lb_nginx_enable() {
+    # Mark Nginx upstream server as up
+    local node="$1"
+
+    log_warn "Nginx enable not fully implemented (requires Nginx Plus API)"
+    return 0
+}
+
+mt_lb_nginx_get_connections() {
+    # Get active connections from Nginx
+    local node="$1"
+
+    # Placeholder
+    echo "0"
+}
+
+# ============================================================================
 # Parallel Execution Framework
 # ============================================================================
 

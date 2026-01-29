@@ -70,10 +70,23 @@ prom_update_metric() {
         prom_init_metrics
     fi
 
-    # Update metric (simple sed replacement)
+    # Update metric (flexible replacement - replace line starting with metric_name{)
     if [[ -n "$labels" ]]; then
-        # With labels
-        sed -i "s|^${metric_name}{${labels}}.*|${metric_name}{${labels}} ${value}|" "$PROM_METRICS_FILE"
+        # With labels: replace any line starting with metric_name{
+        # This allows updating from empty labels to real labels
+        if grep -q "^${metric_name}{" "$PROM_METRICS_FILE"; then
+            sed -i "s|^${metric_name}{.*|${metric_name}{${labels}} ${value}|" "$PROM_METRICS_FILE"
+        else
+            # Metric doesn't exist, append after TYPE declaration
+            local type_line
+            type_line=$(grep -n "^# TYPE ${metric_name}" "$PROM_METRICS_FILE" | cut -d: -f1)
+            if [[ -n "$type_line" ]]; then
+                sed -i "${type_line}a\\${metric_name}{${labels}} ${value}" "$PROM_METRICS_FILE"
+            else
+                # No TYPE line, append to end
+                echo "${metric_name}{${labels}} ${value}" >> "$PROM_METRICS_FILE"
+            fi
+        fi
     else
         # Without labels (update first occurrence)
         sed -i "0,/^${metric_name}{/s|^${metric_name}{.*|${metric_name} ${value}|" "$PROM_METRICS_FILE"
