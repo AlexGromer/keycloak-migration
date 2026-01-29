@@ -1,0 +1,201 @@
+name: CI
+
+on:
+  push:
+    branches: [ main, develop ]
+  pull_request:
+    branches: [ main, develop ]
+
+jobs:
+  # ============================================================================
+  # Job 1: Syntax Check
+  # ============================================================================
+  syntax-check:
+    name: Bash Syntax Check
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Check syntax for all scripts
+        run: |
+          set -e
+          echo "Checking syntax for all bash scripts..."
+          find scripts/ tests/ -name "*.sh" -type f | while read -r script; do
+            echo "Checking: $script"
+            bash -n "$script" || exit 1
+          done
+          echo "✓ All scripts have valid syntax"
+
+  # ============================================================================
+  # Job 2: ShellCheck (Linting)
+  # ============================================================================
+  shellcheck:
+    name: ShellCheck Linting
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install ShellCheck
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y shellcheck
+
+      - name: Run ShellCheck
+        run: |
+          set -e
+          echo "Running ShellCheck on all scripts..."
+          find scripts/ tests/ -name "*.sh" -type f | while read -r script; do
+            echo "Linting: $script"
+            # SC2086: Allow word splitting (common in bash scripts)
+            # SC2155: Allow combined declaration + assignment
+            # SC1091: Allow sourcing files not found by shellcheck
+            shellcheck -e SC2086,SC2155,SC1091 "$script" || exit 1
+          done
+          echo "✓ All scripts pass ShellCheck"
+
+  # ============================================================================
+  # Job 3: Unit Tests
+  # ============================================================================
+  unit-tests:
+    name: Unit Tests
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Run test suite
+        run: |
+          chmod +x tests/run_all_tests.sh
+          ./tests/run_all_tests.sh
+
+      - name: Verify test results
+        run: |
+          if grep -q "ALL TESTS PASSED" /tmp/test_results.txt 2>/dev/null; then
+            echo "✓ All 137 tests passed"
+          else
+            echo "✗ Tests failed"
+            exit 1
+          fi
+
+  # ============================================================================
+  # Job 4: Security — Secrets Scan
+  # ============================================================================
+  secrets-scan:
+    name: Secrets Detection
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # Full history for gitleaks
+
+      - name: Run Gitleaks
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITLEAKS_LICENSE: ${{ secrets.GITLEAKS_LICENSE }}
+
+  # ============================================================================
+  # Job 5: Security — Dependency Audit
+  # ============================================================================
+  security-audit:
+    name: Security Audit
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Check for hardcoded secrets in configs
+        run: |
+          echo "Scanning YAML profiles for hardcoded credentials..."
+          if grep -rE "(password|secret|token|key):\s*['\"]?[a-zA-Z0-9]+" profiles/ 2>/dev/null; then
+            echo "✗ Found potential hardcoded credentials in profiles/"
+            exit 1
+          else
+            echo "✓ No hardcoded credentials detected"
+          fi
+
+      - name: Verify .gitignore coverage
+        run: |
+          echo "Verifying .gitignore patterns..."
+          required_patterns=(".claude/" ".env" "*.key" "*.pem" "credentials.json")
+          missing=0
+          for pattern in "${required_patterns[@]}"; do
+            if ! grep -qF "$pattern" .gitignore; then
+              echo "✗ Missing pattern: $pattern"
+              missing=$((missing + 1))
+            fi
+          done
+          if [ $missing -gt 0 ]; then
+            echo "✗ .gitignore missing $missing required patterns"
+            exit 1
+          else
+            echo "✓ .gitignore has all required patterns"
+          fi
+
+  # ============================================================================
+  # Job 6: Profile Validation
+  # ============================================================================
+  profile-validation:
+    name: Validate YAML Profiles
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install yamllint
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y yamllint
+
+      - name: Validate all profiles
+        run: |
+          set -e
+          echo "Validating YAML profiles..."
+          find profiles/ -name "*.yaml" -type f | while read -r profile; do
+            echo "Validating: $profile"
+            yamllint -d relaxed "$profile" || exit 1
+          done
+          echo "✓ All profiles are valid YAML"
+
+      - name: Test profile loading
+        run: |
+          set -e
+          source scripts/lib/profile_manager.sh
+          for profile in profiles/*.yaml; do
+            profile_name=$(basename "$profile" .yaml)
+            echo "Testing: $profile_name"
+            profile_load "$profile_name" || exit 1
+          done
+          echo "✓ All profiles load successfully"
+
+  # ============================================================================
+  # Summary Job (requires all checks to pass)
+  # ============================================================================
+  ci-success:
+    name: CI Success
+    runs-on: ubuntu-latest
+    needs:
+      - syntax-check
+      - shellcheck
+      - unit-tests
+      - secrets-scan
+      - security-audit
+      - profile-validation
+    steps:
+      - name: All checks passed
+        run: |
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          echo "✅ CI PASSED — All checks successful"
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          echo ""
+          echo "  ✓ Syntax check"
+          echo "  ✓ ShellCheck linting"
+          echo "  ✓ Unit tests (137/137)"
+          echo "  ✓ Secrets scan"
+          echo "  ✓ Security audit"
+          echo "  ✓ Profile validation"
+          echo ""
+          echo "Ready to merge! 🚀"

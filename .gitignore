@@ -1,1 +1,123 @@
+# ============================================================================
+# Keycloak Migration Tool — .gitignore
+# ============================================================================
+
+# Claude Code local settings (CRITICAL - NEVER commit)
 .claude/
+
+# Environment variables & secrets
+.env
+.env.*
+*.env
+.env.local
+
+# Credentials & keys
+*_key
+*_key.*
+*_secret
+*_secret.*
+credentials.json
+*.pem
+*.key
+*.crt
+*.p12
+*.jks
+*.keystore
+
+# Password managers
+pass/
+.password-store/
+
+# API tokens
+.token
+*.token
+api_key.txt
+
+# Database credentials
+.pgpass
+.my.cnf
+.msql_history
+.psql_history
+
+# ============================================================================
+# Migration-Specific
+# ============================================================================
+
+# Work directories
+migration_workspace/
+work/
+dist/
+tmp/
+temp/
+scratch/
+
+# State files
+.migration_state
+.preflight_passed
+*.state
+*.checkpoint
+
+# Backup files
+*.dump
+*.sql
+*.backup
+*.bak
+backup_*/
+backups/
+
+# Logs
+*.log
+*.jsonl
+logs/
+audit/
+
+# Discovery outputs
+discovery_*/
+discovered_*.yaml
+
+# Test outputs
+test_lab/
+.test_artifacts/
+
+# ============================================================================
+# General
+# ============================================================================
+
+# OS artifacts
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+*~
+
+# IDE
+.vscode/
+.idea/
+*.iml
+
+# Temporary files
+*.tmp
+*.temp
+
+# Archives
+*.tar.gz
+*.zip
+*.tgz
+
+# Node (if using any JS tools)
+node_modules/
+package-lock.json
+
+# Python (if using any Python tools)
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+
+# ============================================================================
+# Keep these files (exceptions)
+# ============================================================================
+!profiles/*.yaml
+!tests/*.sh
+!scripts/**/*.sh
