@@ -34,6 +34,12 @@ source "$LIB_DIR/multi_tenant.sh"
 [[ -f "$LIB_DIR/rate_limiter.sh" ]] && source "$LIB_DIR/rate_limiter.sh"
 [[ -f "$LIB_DIR/backup_rotation.sh" ]] && source "$LIB_DIR/backup_rotation.sh"
 
+# Source v3.6 security hardening features
+[[ -f "$LIB_DIR/security_checks.sh" ]] && source "$LIB_DIR/security_checks.sh"
+[[ -f "$LIB_DIR/input_validator.sh" ]] && source "$LIB_DIR/input_validator.sh"
+[[ -f "$LIB_DIR/secrets_manager.sh" ]] && source "$LIB_DIR/secrets_manager.sh"
+[[ -f "$LIB_DIR/audit_logger_v2.sh" ]] && source "$LIB_DIR/audit_logger_v2.sh"
+
 # ============================================================================
 # CONFIGURATION DEFAULTS
 # ============================================================================
@@ -1475,6 +1481,22 @@ execute_migration() {
         echo ""
     else
         log_warn "Preflight checks not available (upgrade to v3.5 for production safety)"
+    fi
+
+    # v3.6: Run security checks before migration
+    if declare -F run_comprehensive_security_scan >/dev/null 2>&1; then
+        log_section "Security Scan (v3.6 Security Hardening)"
+
+        # Run comprehensive security scan (ShellCheck, gitleaks, hardcoded secrets)
+        # fail_on_critical=false to not block migration on warnings
+        if ! run_comprehensive_security_scan "$SCRIPT_DIR/.." "false"; then
+            log_warn "Security scan found issues (non-blocking)"
+            log_warn "Review security scan output above"
+        else
+            log_success "Security scan PASSED"
+        fi
+
+        echo ""
     fi
 
     # Airgap: validate all artifacts available before starting

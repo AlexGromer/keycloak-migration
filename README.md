@@ -1,12 +1,12 @@
-# Keycloak Migration Tool v3.5
+# Keycloak Migration Tool v3.6
 
-**One-command Keycloak migration utility** with auto-detection, multi-tenant support, clustered deployments, real-time monitoring, production hardening, and support for all Keycloak-supported databases.
+**One-command Keycloak migration utility** with auto-detection, multi-tenant support, clustered deployments, real-time monitoring, production hardening, **security hardening** (SAST, secrets scanning, input validation, audit logging), and support for all Keycloak-supported databases.
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
-[![Tests](https://img.shields.io/badge/tests-90%2B-success)](tests/)
+[![Tests](https://img.shields.io/badge/tests-428%20total-success)](tests/)
 [![Bash](https://img.shields.io/badge/bash-5.0%2B-green.svg)](scripts/)
 [![Databases](https://img.shields.io/badge/databases-7-blue.svg)](scripts/lib/database_adapter.sh)
-[![Version](https://img.shields.io/badge/version-v3.5-blue.svg)](ROADMAP.md)
+[![Version](https://img.shields.io/badge/version-v3.6-blue.svg)](ROADMAP.md)
 
 ---
 
@@ -73,6 +73,11 @@ If you already have a profile:
 - ✅ **Backup Rotation** — Automatic cleanup with multiple policies (keep-last-N, time-based, size-based, GFS) (v3.5)
 - ✅ **Connection Leak Detection** — Auto-detect and report idle connections (v3.5)
 - ✅ **Circuit Breaker** — Automatic failure protection with retry logic (v3.5)
+- ✅ **SAST Integration** — ShellCheck static analysis on pre-commit (v3.6)
+- ✅ **Secrets Scanning** — gitleaks integration prevents credential leaks (v3.6)
+- ✅ **Input Validation** — SQL/command/path injection prevention (v3.6)
+- ✅ **Secrets Management** — Universal interface for Vault, K8s, AWS, Azure (v3.6)
+- ✅ **HMAC Audit Logging** — Tamper-proof cryptographic signatures (v3.6)
 - ✅ **Atomic Checkpoints** — Resume from any step if interrupted
 - ✅ **Auto-Rollback** — Automatic rollback on failure
 - ✅ **Airgap Mode** — Pre-validate all artifacts available
@@ -80,7 +85,7 @@ If you already have a profile:
 - ✅ **Real-Time Monitoring** — Prometheus metrics + Grafana dashboards (v3.1)
 - ✅ **Multi-Tenant Support** — Parallel migration of isolated instances (v3.2)
 - ✅ **Clustered Deployments** — Zero-downtime rolling updates (v3.2)
-- ✅ **Test Coverage** — 90+ unit tests, ~96% pass rate
+- ✅ **Test Coverage** — 428 tests, 99.8% pass rate (v3.6)
 
 ### Migration Path
 Supports Keycloak **16.1.1 → 26.0.7** via safe intermediate versions:

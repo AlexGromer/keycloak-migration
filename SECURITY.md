@@ -155,6 +155,45 @@ database:
 - Java version verification
 - Network reachability (for non-airgap)
 
+### v3.6 Security Hardening (Released: 2026-01-30)
+
+**6. SAST Integration**
+- ShellCheck static analysis on all bash scripts
+- Pre-commit hook blocks commits with critical issues
+- Automated CI/CD security scan
+
+**7. Secrets Scanning (Enhanced)**
+- gitleaks integration (pre-commit + manual scan)
+- Git history scanning for leaked credentials
+- Pattern-based hardcoded secrets detection
+- Blocks commits containing: `.claude/`, `.env`, `*.key`
+
+**8. Input Validation**
+- SQL injection prevention (8 patterns)
+- Command injection prevention (7 patterns)
+- Path traversal protection
+- YAML injection detection
+- SSRF prevention (localhost, internal IPs blocked)
+- Email header injection protection
+
+**9. Universal Secrets Management**
+- Unified interface for 6 backends:
+  - HashiCorp Vault (KV v1/v2, Transit, AppRole)
+  - Kubernetes Secrets (in-cluster + kubectl)
+  - AWS Secrets Manager
+  - Azure Key Vault
+  - File-based (.env format)
+  - Environment variables
+- Auto-detection of available backend
+- Secure credential rotation workflows
+
+**10. HMAC Audit Logging**
+- Cryptographic signatures (SHA-256/SHA-512)
+- Tamper-proof log entries
+- Log integrity verification
+- Structured formats: JSON, logfmt, plain text
+- Specialized audit functions (migration, security, DB ops, config changes)
+
 ## Known Security Considerations
 
 ### 1. Database Credentials

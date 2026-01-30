@@ -1,0 +1,39 @@
+# Gitleaks configuration for Keycloak Migration Tool
+# https://github.com/gitleaks/gitleaks
+
+title = "Keycloak Migration Tool - Gitleaks Config"
+
+[allowlist]
+  description = "Allowlist for test files and documentation with example secrets"
+
+  # Ignore test files with example/fake secrets
+  paths = [
+    '''tests/.*\.sh''',
+    '''examples/.*\.yaml''',
+    '''examples/.*\.sh''',
+    '''docs/.*\.md''',
+    '''ROADMAP.*\.md''',
+  ]
+
+  # Ignore specific patterns that are not real secrets
+  regexes = [
+    # Test/example API keys
+    '''api_key="sk-[a-z0-9]{16}"''',
+    '''password="(admin123|test123|example)"''',
+
+    # Feature flag keys (not secrets)
+    '''flag_key:\s*\w+''',
+
+    # Example JWTs in docs
+    '''eyJ[A-Za-z0-9-_]+\.eyJ[A-Za-z0-9-_]+\.[A-Za-z0-9-_]+''',
+  ]
+
+  # Stopwords that indicate test/example context
+  stopwords = [
+    "test",
+    "example",
+    "fake",
+    "dummy",
+    "mock",
+    "sample",
+  ]

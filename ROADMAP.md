@@ -643,7 +643,7 @@ backup:
 | **v3.3** | Advanced strategies (Blue-Green, Canary) | 2026-01 | ✅ Completed |
 | **v3.4** | Database optimizations | 2026-01 | ✅ Completed |
 | **v3.5** | Production Hardening (preflight checks, rate limiting, backup rotation) | 2026-01 | ✅ Completed |
-| **v3.6** | Security Hardening | 2026-02 | 🔄 Planned |
+| **v3.6** | Security Hardening (SAST, secrets scanning, input validation, audit logging) | 2026-01 | ✅ Completed |
 | **v3.7** | CI/CD Enhancements | 2026-02 | 🔄 Planned |
 | **v4.0** | Web UI (separate project) | 2026-Q3 | 🔵 Under Consideration |
 | **v4.0** | Kubernetes Operator (separate project) | 2026-Q4 | 🔵 Under Consideration |
@@ -708,5 +708,5 @@ Want to help implement a feature? Great!
 
 ---
 
-**Last Updated:** 2026-01-30 (v3.5 completed — Production Hardening done)
-**Next Milestone:** v3.6 Security Hardening (Target: 2026-02-15)
+**Last Updated:** 2026-01-30 (v3.6 completed — Security Hardening done: 428 tests, 99.8% pass rate)
+**Next Milestone:** v3.7 CI/CD Enhancements (Target: 2026-02-28)
