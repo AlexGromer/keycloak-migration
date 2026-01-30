@@ -1524,6 +1524,12 @@ execute_migration() {
     log_section "Migration Complete!"
     log_success "Keycloak successfully migrated from $current_version to $target_version"
 
+    # Run database-specific optimizations
+    if [[ -f "$LIB_DIR/db_optimizations.sh" ]]; then
+        source "$LIB_DIR/db_optimizations.sh"
+        db_run_optimizations 2>/dev/null || log_warn "Post-migration optimizations skipped"
+    fi
+
     # Audit: migration end
     local migration_end_ts
     migration_end_ts=$(date +%s)

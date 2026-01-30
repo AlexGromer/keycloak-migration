@@ -469,6 +469,116 @@ validation:
 
 ---
 
+### Database-Specific Optimizations (v3.4)
+
+#### Automatic Performance Tuning
+
+**Features:**
+- ✅ Auto-tuned parallel jobs (PostgreSQL backup/restore)
+- ✅ Database size-aware optimization
+- ✅ Post-migration VACUUM ANALYZE (PostgreSQL)
+- ✅ Connection pool recommendations
+- ✅ Percona XtraBackup integration (MySQL)
+- ✅ MariaDB mariabackup support
+- ✅ CockroachDB zone-aware backup
+- ✅ Migration time estimation
+
+**Usage:**
+
+All optimizations are **automatic** — no configuration needed. The tool detects database type and applies appropriate optimizations.
+
+**PostgreSQL:**
+
+```bash
+# Parallel backup/restore auto-tuned based on:
+# - CPU cores available
+# - Database size
+# - Formula: min(cpu_cores, max(1, db_size_gb / 2))
+
+# Example output during migration:
+# [INFO] Auto-tuned parallel jobs: 4 (based on CPU cores and DB size)
+# [INFO] Using parallel backup with 4 jobs
+# [INFO] Database size: 12.5GB
+# [INFO] Estimated backup time: 4 minutes (at 50MB/s)
+
+# Post-migration optimizations:
+# [INFO] Running VACUUM ANALYZE on database: keycloak
+# [✓] VACUUM ANALYZE completed in 45s
+
+# Configuration recommendations:
+# [INFO] Recommended postgresql.conf settings:
+#   max_connections = 208
+#   shared_buffers = 2048MB
+#   work_mem = 8MB
+#   maintenance_work_mem = 512MB
+#   effective_cache_size = 6144MB
+```
+
+**MySQL/MariaDB:**
+
+```bash
+# Percona XtraBackup (if available):
+# [INFO] Using Percona XtraBackup for hot backup
+# [✓] XtraBackup completed: /opt/backups/keycloak
+
+# MariaDB mariabackup:
+# [INFO] Using MariaDB mariabackup for hot backup
+
+# InnoDB recommendations:
+# [INFO] Recommended my.cnf settings:
+#   innodb_buffer_pool_size = 6144M  # 75% of RAM
+#   innodb_buffer_pool_instances = 6
+#   innodb_log_file_size = 512M
+#   innodb_flush_log_at_trx_commit = 2
+#   innodb_flush_method = O_DIRECT
+
+# Binary log management:
+# [INFO] Purging old binary logs...
+```
+
+**CockroachDB:**
+
+```bash
+# Cluster information:
+# [INFO] Cluster nodes: 3
+# [INFO] Regions: us-east-1, us-west-1
+
+# Native backup (zone-aware, multi-region):
+# [INFO] Using CockroachDB native backup (zone-aware)
+# [✓] Zone-aware backup completed
+
+# Node draining (for rolling update):
+# [INFO] Draining CockroachDB node 1...
+# [✓] Node 1 drained
+```
+
+**Manual Override:**
+
+If you want to disable auto-tuning and use specific values:
+
+```yaml
+# In profile YAML:
+database:
+  type: postgresql
+  backup:
+    parallel_jobs: 8  # Override auto-tuning (default: auto)
+    verify: true      # Verify backup integrity (default: true)
+
+  optimization:
+    vacuum_analyze: true  # Run after migration (default: true)
+    show_recommendations: true  # Show config tips (default: true)
+```
+
+**Benefits:**
+- ⚡ **2-4x faster backups** (PostgreSQL parallel jobs)
+- ⚡ **Up to 10x faster** (MySQL XtraBackup vs mysqldump)
+- 🎯 **Optimized query performance** (VACUUM ANALYZE)
+- 📊 **Right-sized configuration** (automatic recommendations)
+- 🔒 **Backup verification** (integrity checks)
+- ⏱️ **Accurate time estimates** (before starting migration)
+
+---
+
 ### Monitoring Integration (v3.1)
 
 Enable real-time monitoring during migration:

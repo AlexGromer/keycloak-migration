@@ -195,10 +195,26 @@ db_backup() {
     local user="$5"
     local pass="$6"
     local backup_file="$7"
-    local parallel_jobs="${8:-1}"
+    local parallel_jobs="${8:-auto}"
 
     case "$db_type" in
         postgresql)
+            # Source optimizations library
+            if [[ -f "$LIB_DIR/db_optimizations.sh" ]]; then
+                source "$LIB_DIR/db_optimizations.sh"
+            fi
+
+            # Auto-tune parallel jobs if not specified
+            if [[ "$parallel_jobs" == "auto" ]]; then
+                parallel_jobs=$(pg_auto_tune_parallel_jobs 2>/dev/null || echo "1")
+                log_info "Auto-tuned parallel jobs: $parallel_jobs (based on CPU cores and DB size)"
+            fi
+
+            # Estimate backup time
+            if command -v pg_estimate_backup_time &>/dev/null; then
+                pg_estimate_backup_time 2>/dev/null || true
+            fi
+
             # Use pg_dump with custom format
             local pg_version=$(psql --version | grep -oP '\d+' | head -1)
             local dump_opts="-h $host -p $port -U $user -d $db_name -F c -f $backup_file"
@@ -206,28 +222,66 @@ db_backup() {
             # Add parallel jobs if PostgreSQL >= 9.3
             if [[ "$pg_version" -ge 9 && "$parallel_jobs" -gt 1 ]]; then
                 dump_opts="$dump_opts -j $parallel_jobs"
+                log_info "Using parallel backup with $parallel_jobs jobs"
             fi
 
             PGPASSWORD="$pass" pg_dump $dump_opts
+
+            # Verify backup integrity
+            if command -v pg_verify_backup &>/dev/null; then
+                pg_verify_backup "$backup_file" 2>/dev/null || log_warn "Backup verification skipped"
+            fi
             ;;
 
         mysql)
+            # Source optimizations library
+            if [[ -f "$LIB_DIR/db_optimizations.sh" ]]; then
+                source "$LIB_DIR/db_optimizations.sh"
+            fi
+
+            # Try Percona XtraBackup first (hot backup, faster)
+            if command -v xtrabackup &>/dev/null; then
+                log_info "Using Percona XtraBackup for hot backup"
+                mysql_use_xtrabackup "$backup_file" 2>/dev/null && return 0 || {
+                    log_warn "XtraBackup failed, falling back to mysqldump"
+                }
+            fi
+
+            # Fallback to mysqldump
+            log_info "Using mysqldump (cold backup)"
             mysqldump -h "$host" -P "$port" -u "$user" -p"$pass" \
                 --single-transaction --routines --triggers --events \
                 "$db_name" > "$backup_file"
+
+            # Show InnoDB recommendations
+            if command -v mysql_innodb_buffer_pool_recommendation &>/dev/null; then
+                mysql_innodb_buffer_pool_recommendation 2>/dev/null || true
+            fi
             ;;
 
         mariadb)
+            # Source optimizations library
+            if [[ -f "$LIB_DIR/db_optimizations.sh" ]]; then
+                source "$LIB_DIR/db_optimizations.sh"
+            fi
+
             # MariaDB supports mariabackup for hot backup
             if command -v mariabackup &>/dev/null; then
+                log_info "Using MariaDB mariabackup for hot backup"
                 mariabackup --backup --target-dir="$backup_file" \
                     --host="$host" --port="$port" --user="$user" --password="$pass" \
                     --databases="$db_name"
             else
                 # Fallback to mysqldump
+                log_info "Using mysqldump (cold backup)"
                 mysqldump -h "$host" -P "$port" -u "$user" -p"$pass" \
                     --single-transaction --routines --triggers --events \
                     "$db_name" > "$backup_file"
+            fi
+
+            # Show InnoDB recommendations
+            if command -v mysql_innodb_buffer_pool_recommendation &>/dev/null; then
+                mysql_innodb_buffer_pool_recommendation 2>/dev/null || true
             fi
             ;;
 
@@ -248,7 +302,26 @@ db_backup() {
             ;;
 
         cockroachdb)
-            # CockroachDB uses pg_dump (PostgreSQL compatible)
+            # Source optimizations library
+            if [[ -f "$LIB_DIR/db_optimizations.sh" ]]; then
+                source "$LIB_DIR/db_optimizations.sh"
+            fi
+
+            # Show cluster info
+            if command -v cockroach_get_cluster_info &>/dev/null; then
+                cockroach_get_cluster_info 2>/dev/null || true
+            fi
+
+            # Try native CockroachDB backup first (zone-aware, recommended for multi-region)
+            if command -v cockroach &>/dev/null && [[ "$backup_file" == nodelocal://* || "$backup_file" == s3://* ]]; then
+                log_info "Using CockroachDB native backup (zone-aware)"
+                cockroach_zone_aware_backup "$backup_file" 2>/dev/null && return 0 || {
+                    log_warn "Native backup failed, falling back to pg_dump"
+                }
+            fi
+
+            # Fallback: CockroachDB uses pg_dump (PostgreSQL compatible)
+            log_info "Using pg_dump for CockroachDB backup"
             PGPASSWORD="$pass" pg_dump -h "$host" -p "$port" -U "$user" -d "$db_name" \
                 -F c -f "$backup_file"
             ;;
@@ -275,10 +348,21 @@ db_restore() {
     local user="$5"
     local pass="$6"
     local backup_file="$7"
-    local parallel_jobs="${8:-1}"
+    local parallel_jobs="${8:-auto}"
 
     case "$db_type" in
         postgresql)
+            # Source optimizations library
+            if [[ -f "$LIB_DIR/db_optimizations.sh" ]]; then
+                source "$LIB_DIR/db_optimizations.sh"
+            fi
+
+            # Auto-tune parallel jobs if not specified
+            if [[ "$parallel_jobs" == "auto" ]]; then
+                parallel_jobs=$(pg_auto_tune_parallel_jobs 2>/dev/null || echo "1")
+                log_info "Auto-tuned parallel jobs: $parallel_jobs (based on CPU cores)"
+            fi
+
             # Terminate active connections first
             PGPASSWORD="$pass" psql -h "$host" -p "$port" -U "$user" -d postgres -c \
                 "SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname='$db_name' AND pid <> pg_backend_pid();"
@@ -289,9 +373,16 @@ db_restore() {
 
             if [[ "$pg_version" -ge 9 && "$parallel_jobs" -gt 1 ]]; then
                 restore_opts="$restore_opts -j $parallel_jobs"
+                log_info "Using parallel restore with $parallel_jobs jobs"
             fi
 
             PGPASSWORD="$pass" pg_restore $restore_opts "$backup_file"
+
+            # Run VACUUM ANALYZE after restore
+            log_info "Running post-restore optimizations..."
+            if command -v pg_vacuum_analyze &>/dev/null; then
+                pg_vacuum_analyze 2>/dev/null || log_warn "VACUUM ANALYZE skipped"
+            fi
             ;;
 
         mysql|mariadb)
