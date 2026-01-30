@@ -29,6 +29,11 @@ source "$LIB_DIR/audit_logger.sh"
 source "$LIB_DIR/prometheus_exporter.sh"
 source "$LIB_DIR/multi_tenant.sh"
 
+# Source v3.5 production safety features
+[[ -f "$LIB_DIR/preflight_checks.sh" ]] && source "$LIB_DIR/preflight_checks.sh"
+[[ -f "$LIB_DIR/rate_limiter.sh" ]] && source "$LIB_DIR/rate_limiter.sh"
+[[ -f "$LIB_DIR/backup_rotation.sh" ]] && source "$LIB_DIR/backup_rotation.sh"
+
 # ============================================================================
 # CONFIGURATION DEFAULTS
 # ============================================================================
@@ -1433,6 +1438,45 @@ execute_migration() {
         return 0
     fi
 
+    # v3.5: Run preflight checks before migration
+    if declare -F run_all_preflight_checks >/dev/null 2>&1; then
+        log_section "Preflight Checks (Production Safety v3.5)"
+
+        # Determine backup directory
+        local backup_dir="${WORK_DIR}/backups"
+        mkdir -p "$backup_dir"
+
+        # Get Keycloak URL if available
+        local kc_url=""
+        if [[ -n "${PROFILE_KC_URL:-}" ]]; then
+            kc_url="$PROFILE_KC_URL"
+        fi
+
+        # Run all preflight checks
+        if ! run_all_preflight_checks \
+            "${PROFILE_FILE:-$WORK_DIR/profile.yaml}" \
+            "$PROFILE_DB_TYPE" \
+            "$PROFILE_DB_HOST" \
+            "$PROFILE_DB_PORT" \
+            "$PROFILE_DB_USER" \
+            "$PROFILE_DB_PASSWORD" \
+            "$PROFILE_DB_NAME" \
+            "$backup_dir" \
+            "$kc_url" \
+            "${PROFILE_KC_ADMIN_USER:-admin}" \
+            "${PROFILE_KC_ADMIN_PASSWORD:-}"; then
+
+            log_error "Preflight checks FAILED — Cannot proceed with migration"
+            log_error "Fix the issues above and retry"
+            exit 1
+        fi
+
+        log_success "Preflight checks PASSED — Migration can proceed"
+        echo ""
+    else
+        log_warn "Preflight checks not available (upgrade to v3.5 for production safety)"
+    fi
+
     # Airgap: validate all artifacts available before starting
     if [[ "${AIRGAP_MODE:-false}" == "true" ]]; then
         dist_validate_airgap "${migration_steps[@]}" || {
@@ -1528,6 +1572,22 @@ execute_migration() {
     if [[ -f "$LIB_DIR/db_optimizations.sh" ]]; then
         source "$LIB_DIR/db_optimizations.sh"
         db_run_optimizations 2>/dev/null || log_warn "Post-migration optimizations skipped"
+    fi
+
+    # v3.5: Run backup rotation policy
+    if declare -F auto_rotate_backups >/dev/null 2>&1; then
+        log_section "Backup Rotation (Production Safety v3.5)"
+
+        local backup_dir="${WORK_DIR}/backups"
+
+        # Use rotation policy from profile or default
+        local rotation_policy="${PROFILE_BACKUP_ROTATION_POLICY:-keep_last_n}"
+        local keep_count="${PROFILE_BACKUP_KEEP_COUNT:-5}"
+        local max_age_days="${PROFILE_BACKUP_MAX_AGE_DAYS:-30}"
+        local max_size_gb="${PROFILE_BACKUP_MAX_SIZE_GB:-100}"
+
+        auto_rotate_backups "$backup_dir" "$rotation_policy" "$keep_count" "$max_age_days" "$max_size_gb"
+        echo ""
     fi
 
     # Audit: migration end

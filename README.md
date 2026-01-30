@@ -1,12 +1,12 @@
-# Keycloak Migration Tool v3.2
+# Keycloak Migration Tool v3.5
 
-**One-command Keycloak migration utility** with auto-detection, multi-tenant support, clustered deployments, real-time monitoring, and support for all Keycloak-supported databases.
+**One-command Keycloak migration utility** with auto-detection, multi-tenant support, clustered deployments, real-time monitoring, production hardening, and support for all Keycloak-supported databases.
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
-[![Tests](https://img.shields.io/badge/tests-74%2F74-success)](tests/)
+[![Tests](https://img.shields.io/badge/tests-90%2B-success)](tests/)
 [![Bash](https://img.shields.io/badge/bash-5.0%2B-green.svg)](scripts/)
 [![Databases](https://img.shields.io/badge/databases-7-blue.svg)](scripts/lib/database_adapter.sh)
-[![Version](https://img.shields.io/badge/version-v3.2-blue.svg)](ROADMAP.md)
+[![Version](https://img.shields.io/badge/version-v3.5-blue.svg)](ROADMAP.md)
 
 ---
 
@@ -68,7 +68,11 @@ If you already have a profile:
 - ✅ **Custom** (bring your own scripts)
 
 ### Production-Ready
-- ✅ **Pre-flight Checks** — Disk space, tools, Java versions, network, DB connectivity
+- ✅ **Extended Pre-flight Checks** — 15 comprehensive checks (disk, memory, network, DB health, Keycloak status, dependencies, credentials) (v3.5)
+- ✅ **Rate Limiting** — Prevents production database overload with adaptive throttling (v3.5)
+- ✅ **Backup Rotation** — Automatic cleanup with multiple policies (keep-last-N, time-based, size-based, GFS) (v3.5)
+- ✅ **Connection Leak Detection** — Auto-detect and report idle connections (v3.5)
+- ✅ **Circuit Breaker** — Automatic failure protection with retry logic (v3.5)
 - ✅ **Atomic Checkpoints** — Resume from any step if interrupted
 - ✅ **Auto-Rollback** — Automatic rollback on failure
 - ✅ **Airgap Mode** — Pre-validate all artifacts available
@@ -76,7 +80,7 @@ If you already have a profile:
 - ✅ **Real-Time Monitoring** — Prometheus metrics + Grafana dashboards (v3.1)
 - ✅ **Multi-Tenant Support** — Parallel migration of isolated instances (v3.2)
 - ✅ **Clustered Deployments** — Zero-downtime rolling updates (v3.2)
-- ✅ **Test Coverage** — 74 unit tests, 100% pass rate
+- ✅ **Test Coverage** — 90+ unit tests, ~96% pass rate
 
 ### Migration Path
 Supports Keycloak **16.1.1 → 26.0.7** via safe intermediate versions:
@@ -576,6 +580,253 @@ database:
 - 📊 **Right-sized configuration** (automatic recommendations)
 - 🔒 **Backup verification** (integrity checks)
 - ⏱️ **Accurate time estimates** (before starting migration)
+
+---
+
+### Production Hardening (v3.5)
+
+#### Comprehensive Preflight Checks
+
+**15 Production Safety Checks** run automatically before migration:
+
+**System Resources:**
+- ✅ Disk space (backup directory + minimum requirements)
+- ✅ Memory availability
+- ✅ Network connectivity
+
+**Database Health:**
+- ✅ Database connectivity
+- ✅ Database version detection
+- ✅ Database size calculation
+- ✅ Replication status (PRIMARY vs REPLICA warning)
+
+**Keycloak Health:**
+- ✅ Keycloak service status
+- ✅ Admin API credentials validation
+
+**Backup Validation:**
+- ✅ Backup space availability (3x database size)
+- ✅ Backup directory permissions
+
+**Dependencies:**
+- ✅ Required tools (psql, mysql, cockroach, etc.)
+- ✅ Java version compatibility
+
+**Configuration:**
+- ✅ Profile YAML syntax
+- ✅ Credentials validation
+
+**Usage:**
+
+Preflight checks run **automatically** before every migration:
+
+```bash
+./scripts/migrate_keycloak_v3.sh migrate --profile=prod.yaml
+
+# Output:
+# ═══════════════════════════════════════════════════════════════
+#   PREFLIGHT CHECKS — PRODUCTION SAFETY v3.5
+# ═══════════════════════════════════════════════════════════════
+#
+# 1. DISK SPACE CHECK
+# [INFO] Checking disk space on: /opt/backups
+# [INFO] Required: 10GB minimum
+# [INFO] Available space: 250GB
+# [✓ PREFLIGHT] Disk space: 250GB (OK)
+#
+# 2. MEMORY CHECK
+# [INFO] Required free memory: 2GB minimum
+# [INFO] Available memory: 16GB
+# [✓ PREFLIGHT] Memory: 16GB (OK)
+#
+# 3. NETWORK CONNECTIVITY CHECK
+# [INFO] Testing connectivity to: postgres.keycloak.svc:5432
+# [✓ PREFLIGHT] Network: postgres.keycloak.svc:5432 (reachable)
+#
+# 4. DATABASE CONNECTIVITY CHECK
+# [INFO] Database: postgresql at postgres.keycloak.svc:5432/keycloak
+# [✓ PREFLIGHT] PostgreSQL: Connected
+#
+# 5. DATABASE VERSION CHECK
+# [INFO] PostgreSQL Version: PostgreSQL 15.4
+# [✓ PREFLIGHT] Database version: OK
+#
+# 6. DATABASE SIZE CHECK
+# [INFO] Database size: 12.50GB
+# [✓ PREFLIGHT] Database size check: OK
+#
+# 7. DATABASE REPLICATION CHECK
+# [✓ PREFLIGHT] Database is PRIMARY instance: OK
+#
+# ... (15 checks total)
+#
+# PREFLIGHT SUMMARY
+# Total checks: 15
+# Passed: 15
+# Failed: 0
+# Warnings: 0
+#
+# [✓ PREFLIGHT] PREFLIGHT PASSED — All checks successful
+```
+
+**Blocking Failures:**
+
+If critical checks fail, migration is **blocked**:
+
+```bash
+# Example: Insufficient disk space
+[✗ PREFLIGHT ERROR] Insufficient disk space: 5GB < 10GB
+[✗ PREFLIGHT ERROR] Free up space or specify different backup location
+
+PREFLIGHT SUMMARY
+Passed: 12
+Failed: 3
+Warnings: 0
+
+[✗ PREFLIGHT ERROR] PREFLIGHT FAILED — Cannot proceed with migration
+[✗ PREFLIGHT ERROR] Failure reasons:
+  - Disk space
+  - Database connectivity
+  - Missing dependencies
+
+# Migration does NOT proceed until issues are fixed
+```
+
+#### Rate Limiting & Database Protection
+
+**Prevents production database overload** during migration with intelligent throttling:
+
+**Features:**
+- ✅ **Fixed Rate:** Simple N ops/sec throttling
+- ✅ **Token Bucket:** Burst handling with smoothing
+- ✅ **Adaptive:** Monitors database load, adjusts rate dynamically
+- ✅ **Circuit Breaker:** Stops on consecutive failures (5 threshold)
+- ✅ **Exponential Backoff:** Retry logic with increasing delays
+- ✅ **Connection Pool Monitoring:** Warns when usage > 80%
+- ✅ **Leak Detection:** Finds idle-in-transaction connections
+
+**Automatic Rate Limiting:**
+
+All database operations are rate-limited automatically:
+
+```bash
+# Example output during migration:
+[RATE LIMITER] Processing backup operations with adaptive strategy
+[RATE LIMITER] DB load: 45%, rate adjusted: 10 → 7 ops/sec
+[CONNECTION POOL] Active: 45 / 100 (45%)
+[RATE LIMITER] Progress: 1250/5000 (25%)
+
+# If database is overloaded (>80% connections):
+[RATE LIMITER] DB load: 85%, rate adjusted: 10 → 2 ops/sec
+[CONNECTION POOL WARNING] Usage above 80% — reducing rate
+
+# Circuit breaker protection:
+[CIRCUIT BREAKER] Failure count: 3/5
+[CIRCUIT BREAKER] State: OPEN (too many failures: 5)
+[RATE LIMITER ERROR] Circuit breaker OPEN, blocking operations for 30s
+```
+
+**Configuration:**
+
+```yaml
+# In profile YAML (optional):
+migration:
+  rate_limiting:
+    enabled: true
+    strategy: adaptive  # fixed | token_bucket | adaptive
+    ops_per_second: 10  # Base rate (adaptive adjusts this)
+    circuit_breaker:
+      threshold: 5      # Failures before circuit opens
+      timeout: 30       # Seconds before retry
+```
+
+#### Backup Rotation Policies
+
+**Automatic cleanup** of old backups with multiple strategies:
+
+**Policies:**
+1. **Keep Last N:** Retain only the N most recent backups
+2. **Time-Based:** Delete backups older than X days
+3. **Size-Based:** Delete oldest when total size exceeds limit
+4. **GFS (Grandfather-Father-Son):** Daily/Weekly/Monthly retention
+5. **Combined:** Mix of all policies
+
+**Usage:**
+
+Backup rotation runs **automatically** after successful migration:
+
+```bash
+# Output:
+═══════════════════════════════════════════════════════════════
+  BACKUP ROTATION (PRODUCTION SAFETY v3.5)
+═══════════════════════════════════════════════════════════════
+
+[ROTATION INFO] Policy: Keep last 5 backups
+[ROTATION INFO] Directory: /opt/migration_workspace/backups
+[ROTATION INFO] Pattern: *.dump
+[ROTATION INFO] Found 8 backup(s)
+[ROTATION INFO] Deleting old backup: backup_20260110_120000.dump
+[ROTATION INFO] Deleting old backup: backup_20260111_120000.dump
+[ROTATION INFO] Deleting old backup: backup_20260112_120000.dump
+[✓ ROTATION] Deleted 3 backup(s), freed 45120MB
+
+Backup Statistics for: /opt/migration_workspace/backups
+[ROTATION INFO] Total backups: 5
+[ROTATION INFO] Total size: 75.50GB
+[ROTATION INFO] Oldest backup: backup_20260120_120000.dump (10 days old)
+[ROTATION INFO] Newest backup: backup_20260130_120000.dump (1 hours ago)
+[ROTATION INFO] Average backup size: 15100MB
+[ROTATION INFO] Available disk space: 175GB
+[✓ ROTATION] Disk space: OK (175GB available)
+```
+
+**Configuration:**
+
+```yaml
+# In profile YAML:
+backup:
+  rotation:
+    policy: keep_last_n  # keep_last_n | time_based | size_based | gfs | combined
+    keep_count: 5        # For keep_last_n
+    max_age_days: 30     # For time_based
+    max_size_gb: 100     # For size_based
+
+    # For GFS (Grandfather-Father-Son):
+    # policy: gfs
+    # daily_keep: 7      # 7 daily backups
+    # weekly_keep: 4     # 4 weekly backups (Sundays)
+    # monthly_keep: 12   # 12 monthly backups (1st of month)
+```
+
+**Manual Rotation:**
+
+```bash
+# Run rotation manually
+cd /opt/kk_migration
+source scripts/lib/backup_rotation.sh
+
+# Keep last 5 backups
+rotate_keep_last_n /opt/backups 5
+
+# Delete backups older than 30 days
+rotate_by_age /opt/backups 30
+
+# Keep total size under 100GB
+rotate_by_size /opt/backups 100
+
+# GFS policy (7 daily, 4 weekly, 12 monthly)
+rotate_gfs /opt/backups 7 4 12
+
+# Get statistics
+get_backup_statistics /opt/backups
+```
+
+**Benefits:**
+- 💾 **Automatic cleanup** — No manual backup management
+- 📊 **Multiple policies** — Choose strategy that fits your needs
+- 🔒 **Configurable retention** — Keep what you need, delete the rest
+- 📈 **Disk space monitoring** — Warns when space is low
+- 🎯 **GFS support** — Industry-standard enterprise retention
 
 ---
 
