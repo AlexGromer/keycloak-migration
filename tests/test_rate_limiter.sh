@@ -56,9 +56,9 @@ declare -F rate_limited_execute >/dev/null && \
 test_report "Test Suite 2: Fixed Rate Limiter"
 
 # Test fixed rate limiting (10 ops/sec)
-local start_time
-local end_time
-local duration
+start_time=""
+end_time=""
+duration=""
 
 start_time=$(date +%s)
 

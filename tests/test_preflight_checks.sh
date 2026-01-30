@@ -83,7 +83,7 @@ else
 fi
 
 # Test with non-existent directory (should create it)
-local test_dir="$WORK_DIR/new_backup_dir"
+test_dir="$WORK_DIR/new_backup_dir"
 if check_backup_permissions "$test_dir"; then
     assert_true "true" "Backup permissions: Created $test_dir"
 else
