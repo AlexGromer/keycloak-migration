@@ -4,6 +4,13 @@
 
 set -euo pipefail
 
+# Container runtime abstraction (podman/docker) — provides cr_compose.
+# Normally sourced transitively by the orchestrator; guarded here for standalone use.
+if [[ -n "${LIB_DIR:-}" && -f "$LIB_DIR/container_runtime.sh" ]]; then
+    # shellcheck source=/dev/null
+    source "$LIB_DIR/container_runtime.sh"
+fi
+
 # ============================================================================
 # Blue-Green Migration — Main Executor
 # ============================================================================
@@ -123,7 +130,7 @@ bluegreen_deploy_k8s() {
         replicas=$(yq eval '.blue_green.deployment.replicas' "$PROFILE_FILE" 2>/dev/null || echo "3")
 
         kubectl create deployment "$deployment_name" \
-            --image="quay.io/keycloak/keycloak:$version" \
+            --image="$(dist_image_ref "$version")" \
             --replicas="$replicas" \
             -n "$namespace" \
             --dry-run=client -o yaml | \
@@ -160,7 +167,8 @@ bluegreen_deploy_compose() {
     export ENVIRONMENT="$env_name"
 
     log_info "Starting Docker Compose stack: $compose_file"
-    docker-compose -f "$compose_file" -p "keycloak-${env_name}" up -d || {
+    # shellcheck disable=SC2046  # cr_compose returns command words
+    $(cr_compose) -f "$compose_file" -p "keycloak-${env_name}" up -d || {
         log_error "Failed to start compose stack"
         return 1
     }
@@ -268,7 +276,8 @@ bluegreen_wait_compose_ready() {
 
     while [[ $elapsed -lt $timeout ]]; do
         local healthy
-        healthy=$(docker-compose -p "$project" ps --format json 2>/dev/null | \
+        # shellcheck disable=SC2046  # cr_compose returns command words
+        healthy=$($(cr_compose) -p "$project" ps --format json 2>/dev/null | \
             jq -r '.[] | select(.Health == "healthy") | .Name' | wc -l)
 
         if [[ "$healthy" -gt 0 ]]; then
@@ -462,7 +471,8 @@ bluegreen_cleanup_environment() {
             kubectl delete deployment "keycloak-${env_name}" -n "$namespace" 2>/dev/null || true
             ;;
         docker-compose)
-            docker-compose -p "keycloak-${env_name}" down -v 2>/dev/null || true
+            # shellcheck disable=SC2046  # cr_compose returns command words
+            $(cr_compose) -p "keycloak-${env_name}" down -v 2>/dev/null || true
             ;;
         bare-metal)
             local servers_count

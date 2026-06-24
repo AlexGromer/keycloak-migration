@@ -13,6 +13,34 @@ ARCHIVE_DIR="${ARCHIVE_DIR:-./keycloak_archives}"
 EXTRACT_DIR="${EXTRACT_DIR:-./keycloak_installations}"
 AIRGAP_MODE="${AIRGAP_MODE:-false}"
 
+# Locate sibling libraries (derive from BASH_SOURCE — this file had no LIB_DIR).
+SCRIPT_DIR="${SCRIPT_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)}"
+LIB_DIR="${LIB_DIR:-$SCRIPT_DIR}"
+
+# Container runtime abstraction (podman/docker) — provides cr(), cr_compose,
+# cr_detect, cr_available. All container engine calls below route through cr().
+# shellcheck source=/dev/null
+[[ -f "$LIB_DIR/container_runtime.sh" ]] && source "$LIB_DIR/container_runtime.sh"
+
+# ============================================================================
+# Image Reference — single source of truth for container image refs
+# ============================================================================
+
+dist_image_ref() {
+    # Echo the full image ref for a Keycloak version.
+    #   PROFILE_CONTAINER_IMAGE_REF set → use it, replacing literal {version}
+    #   else ${PROFILE_CONTAINER_REGISTRY:-quay.io}/${PROFILE_CONTAINER_IMAGE:-keycloak/keycloak}:<version>
+    local v="$1"
+
+    if [[ -n "${PROFILE_CONTAINER_IMAGE_REF:-}" ]]; then
+        printf '%s\n' "${PROFILE_CONTAINER_IMAGE_REF//\{version\}/$v}"
+    else
+        local registry="${PROFILE_CONTAINER_REGISTRY:-quay.io}"
+        local image="${PROFILE_CONTAINER_IMAGE:-keycloak/keycloak}"
+        printf '%s\n' "${registry}/${image}:${v}"
+    fi
+}
+
 # ============================================================================
 # Airgap Mode — Validate Offline Readiness
 # ============================================================================
@@ -41,13 +69,19 @@ dist_validate_airgap() {
             done
             ;;
         container)
-            # Check all images exist locally
-            local registry="${PROFILE_CONTAINER_REGISTRY:-docker.io}"
-            local image="${PROFILE_CONTAINER_IMAGE:-keycloak/keycloak}"
+            # If a saved-image tar is configured for offline load, it must exist.
+            if [[ -n "${PROFILE_CONTAINER_IMAGE_TAR:-}" && ! -f "$PROFILE_CONTAINER_IMAGE_TAR" ]]; then
+                log_error "Container image tar configured but missing: $PROFILE_CONTAINER_IMAGE_TAR"
+                missing=$((missing + 1))
+            fi
+            # Each image must be present locally, or loadable from the tar.
             for version in "${migration_path[@]}"; do
-                local full_image="${registry}/${image}:${version}"
-                if docker image inspect "$full_image" &>/dev/null 2>&1; then
+                local full_image
+                full_image="$(dist_image_ref "$version")"
+                if cr image inspect "$full_image" &>/dev/null; then
                     log_success "Image available: $full_image"
+                elif [[ -n "${PROFILE_CONTAINER_IMAGE_TAR:-}" && -f "$PROFILE_CONTAINER_IMAGE_TAR" ]]; then
+                    log_success "Image $full_image not loaded yet — will load from $PROFILE_CONTAINER_IMAGE_TAR"
                 else
                     log_error "Image missing: $full_image"
                     missing=$((missing + 1))
@@ -240,55 +274,130 @@ dist_predownloaded() {
 
 dist_container() {
     local version="$1"
-    local registry="${PROFILE_CONTAINER_REGISTRY:-docker.io}"
-    local image="${PROFILE_CONTAINER_IMAGE:-keycloak/keycloak}"
+    local acquisition="${PROFILE_CONTAINER_ACQUISITION:-}"
     local pull_policy="${PROFILE_CONTAINER_PULL_POLICY:-IfNotPresent}"
 
-    local full_image="${registry}/${image}:${version}"
+    local full_image
+    full_image="$(dist_image_ref "$version")"
 
-    log_info "Container mode: Image $full_image (policy: $pull_policy)"
+    log_info "Container mode: Image $full_image (acquisition: ${acquisition:-pull}, policy: $pull_policy)"
 
-    # Check if image exists locally
+    # Is the image already present locally?
     local image_exists=false
-    if docker image inspect "$full_image" &>/dev/null; then
+    if cr image inspect "$full_image" &>/dev/null; then
         image_exists=true
         log_info "Image exists locally: $full_image"
     fi
 
-    # Pull based on policy
-    case "$pull_policy" in
-        Always)
-            log_info "Pull policy: Always — pulling image..."
-            docker pull "$full_image" || {
-                log_error "Failed to pull image: $full_image"
-                return 1
-            }
-            log_success "Image pulled: $full_image"
+    case "$acquisition" in
+        ""|pull|Always|IfNotPresent)
+            # Acquire via registry pull, honoring pull policy. An explicit
+            # acquisition of Always/IfNotPresent overrides PROFILE_CONTAINER_PULL_POLICY.
+            local effective_policy="$pull_policy"
+            case "$acquisition" in
+                Always|IfNotPresent) effective_policy="$acquisition" ;;
+            esac
+
+            case "$effective_policy" in
+                Always)
+                    log_info "Pull policy: Always — pulling image..."
+                    cr pull "$full_image" || {
+                        log_error "Failed to pull image: $full_image"
+                        return 1
+                    }
+                    log_success "Image pulled: $full_image"
+                    ;;
+
+                IfNotPresent)
+                    if ! $image_exists; then
+                        log_info "Pull policy: IfNotPresent — image not found, pulling..."
+                        cr pull "$full_image" || {
+                            log_error "Failed to pull image: $full_image"
+                            return 1
+                        }
+                        log_success "Image pulled: $full_image"
+                    else
+                        log_info "Pull policy: IfNotPresent — using existing image"
+                    fi
+                    ;;
+
+                Never)
+                    if ! $image_exists; then
+                        log_error "Pull policy: Never — image not found locally and pull disabled"
+                        return 1
+                    fi
+                    log_info "Pull policy: Never — using existing image"
+                    ;;
+
+                *)
+                    log_error "Unknown pull policy: $effective_policy"
+                    return 1
+                    ;;
+            esac
             ;;
 
-        IfNotPresent)
-            if ! $image_exists; then
-                log_info "Pull policy: IfNotPresent — image not found, pulling..."
-                docker pull "$full_image" || {
-                    log_error "Failed to pull image: $full_image"
+        load)
+            # Air-gapped: load the image from a saved tar if not already present.
+            if $image_exists; then
+                log_info "Acquisition: load — image already present, skipping load"
+            elif [[ -n "${PROFILE_CONTAINER_IMAGE_TAR:-}" && -f "$PROFILE_CONTAINER_IMAGE_TAR" ]]; then
+                log_info "Acquisition: load — loading image from $PROFILE_CONTAINER_IMAGE_TAR"
+                cr load -i "$PROFILE_CONTAINER_IMAGE_TAR" || {
+                    log_error "Failed to load image tar: $PROFILE_CONTAINER_IMAGE_TAR"
                     return 1
                 }
-                log_success "Image pulled: $full_image"
+                if ! cr image inspect "$full_image" &>/dev/null; then
+                    log_error "Image $full_image not found after loading $PROFILE_CONTAINER_IMAGE_TAR"
+                    return 1
+                fi
+                log_success "Image loaded: $full_image"
             else
-                log_info "Pull policy: IfNotPresent — using existing image"
+                log_error "Acquisition: load — image absent and PROFILE_CONTAINER_IMAGE_TAR unset/missing"
+                return 1
             fi
             ;;
 
-        Never)
-            if ! $image_exists; then
-                log_error "Pull policy: Never — image not found locally and pull disabled"
+        preloaded|Never)
+            # Image must already exist locally; never touch the network.
+            if ! cr image inspect "$full_image" &>/dev/null; then
+                log_error "Acquisition: preloaded — image not present locally: $full_image"
                 return 1
             fi
-            log_info "Pull policy: Never — using existing image"
+            log_info "Acquisition: preloaded — using existing image: $full_image"
+            ;;
+
+        build)
+            # Build the image locally from an Astra/RedOS base image.
+            local base_image="${PROFILE_CONTAINER_BASE_IMAGE:-}"
+            if [[ -z "$base_image" ]]; then
+                log_error "Acquisition: build — PROFILE_CONTAINER_BASE_IMAGE is required"
+                return 1
+            fi
+
+            # JDK per hop facts: 21 for KC 26.x, otherwise 17.
+            local jdk
+            if [[ "$version" == 26* ]]; then jdk=21; else jdk=17; fi
+
+            log_info "Acquisition: build — building $full_image from base $base_image (jdk=$jdk)"
+
+            if ! declare -F img_build >/dev/null 2>&1; then
+                # shellcheck source=/dev/null
+                [[ -f "$LIB_DIR/image_builder.sh" ]] && source "$LIB_DIR/image_builder.sh"
+            fi
+            if ! declare -F img_build >/dev/null 2>&1; then
+                log_error "img_build not available (image_builder.sh missing)"
+                return 1
+            fi
+
+            img_build "$version" "$base_image" "$jdk" || {
+                log_error "Build failed for $full_image"
+                return 1
+            }
+            log_success "Image built: $full_image"
             ;;
 
         *)
-            log_error "Unknown pull policy: $pull_policy"
+            log_error "Unknown container acquisition mode: $acquisition (expected pull|load|preloaded|build)"
             return 1
             ;;
     esac
@@ -306,26 +415,63 @@ dist_container_update() {
     local version="$1"
     local mode="${PROFILE_KC_DEPLOYMENT_MODE}"
 
-    local registry="${PROFILE_CONTAINER_REGISTRY:-docker.io}"
-    local image="${PROFILE_CONTAINER_IMAGE:-keycloak/keycloak}"
-    local full_image="${registry}/${image}:${version}"
+    local full_image
+    full_image="$(dist_image_ref "$version")"
 
-    log_info "Updating container to version: $version"
+    log_info "Updating container to version: $version (image: $full_image)"
 
     case "$mode" in
-        docker)
-            local container_name="${PROFILE_KC_CONTAINER_NAME:-keycloak}"
+        run)
+            # Ephemeral run mode: the migration tool boots the container itself
+            # at service-start time. Nothing to update here — avoid double-boot.
+            log_info "Deployment mode 'run': boot deferred to service start (no container update needed)"
+            ;;
 
-            # Stop container
-            docker stop "$container_name" 2>/dev/null || true
+        docker|podman)
+            local container_name="${PROFILE_KC_RUN_CONTAINER_NAME:-${PROFILE_KC_CONTAINER_NAME:-keycloak}}"
 
-            # Remove old container
-            docker rm "$container_name" 2>/dev/null || true
+            # Capture current env and mounts so the replacement keeps its config.
+            local env_args=() mount_args=()
+            local captured=false
+            if cr inspect "$container_name" &>/dev/null; then
+                local env_lines mount_lines line
+                env_lines="$(cr inspect -f '{{range .Config.Env}}{{println .}}{{end}}' "$container_name" 2>/dev/null || true)"
+                mount_lines="$(cr inspect -f '{{range .Mounts}}{{.Source}}:{{.Destination}}{{println}}{{end}}' "$container_name" 2>/dev/null || true)"
 
-            # Start new container with new image
-            # NOTE: This is simplified — in real scenario, preserve volumes, env vars, etc.
-            log_warn "Container mode update requires manual docker run with preserved config"
-            log_info "Please update your docker run command to use image: $full_image"
+                while IFS= read -r line; do
+                    [[ -n "$line" ]] && env_args+=(-e "$line")
+                done <<< "$env_lines"
+                while IFS= read -r line; do
+                    [[ "$line" == *:* ]] && mount_args+=(-v "$line")
+                done <<< "$mount_lines"
+
+                if [[ ${#env_args[@]} -gt 0 || ${#mount_args[@]} -gt 0 ]]; then
+                    captured=true
+                fi
+            fi
+
+            if $captured; then
+                log_info "Captured $(( ${#env_args[@]} / 2 )) env var(s) and $(( ${#mount_args[@]} / 2 )) mount(s) from $container_name"
+
+                cr stop "$container_name" 2>/dev/null || true
+                cr rm "$container_name" 2>/dev/null || true
+
+                cr run -d --name "$container_name" \
+                    "${env_args[@]}" \
+                    "${mount_args[@]}" \
+                    "$full_image" || {
+                    log_error "Failed to start replacement container with image: $full_image"
+                    return 1
+                }
+                log_success "Container $container_name updated to image: $full_image"
+                log_warn "Note: published ports/networks are NOT auto-captured — verify reachability"
+            else
+                # Inspect data insufficient — fall back to manual guidance.
+                cr stop "$container_name" 2>/dev/null || true
+                cr rm "$container_name" 2>/dev/null || true
+                log_warn "Container mode update requires manual run with preserved config"
+                log_info "Please update your run command to use image: $full_image"
+            fi
             ;;
 
         docker-compose)
@@ -341,8 +487,11 @@ dist_container_update() {
             # This assumes image line is like: image: keycloak/keycloak:16.1.1
             sed -i "s|image:.*keycloak.*:.*|image: $full_image|" "$compose_file"
 
+            local compose_cmd="docker-compose"
+            declare -F cr_compose >/dev/null 2>&1 && compose_cmd="$(cr_compose)"
+
             log_success "Updated $compose_file"
-            log_info "Restart with: docker-compose up -d"
+            log_info "Restart with: $compose_cmd up -d"
             ;;
 
         kubernetes|deckhouse)
@@ -449,6 +598,7 @@ handle_distribution() {
 
 # Make functions available when sourced
 if [[ "${BASH_SOURCE[0]}" != "${0}" ]]; then
+    export -f dist_image_ref
     export -f dist_download
     export -f dist_predownloaded
     export -f dist_container

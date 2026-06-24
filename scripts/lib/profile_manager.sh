@@ -91,6 +91,7 @@ profile_load() {
     export PROFILE_KC_TARGET_VERSION=$(parse_yaml_value "target_version" "$profile_file")
     export PROFILE_KC_HOME_DIR=$(parse_yaml_value "home_dir" "$profile_file")
     export PROFILE_KC_SERVICE_NAME=$(parse_yaml_value "service_name" "$profile_file")
+    export PROFILE_KC_RUN_CONTAINER_NAME=$(parse_yaml_value "run_container_name" "$profile_file")
 
     # Kubernetes settings (if applicable)
     export PROFILE_K8S_NAMESPACE=$(parse_yaml_value "namespace" "$profile_file")
@@ -103,6 +104,14 @@ profile_load() {
     export PROFILE_CONTAINER_IMAGE=$(parse_yaml_value "image" "$profile_file")
     export PROFILE_CONTAINER_PULL_POLICY=$(parse_yaml_value "pull_policy" "$profile_file")
 
+    # Container runtime / image acquisition settings (v3.6 — podman/run support)
+    export PROFILE_CONTAINER_RUNTIME=$(parse_yaml_value "runtime" "$profile_file")
+    export PROFILE_CONTAINER_IMAGE_REF=$(parse_yaml_value "image_ref" "$profile_file")
+    export PROFILE_CONTAINER_IMAGE_TAR=$(parse_yaml_value "image_tar" "$profile_file")
+    export PROFILE_CONTAINER_ACQUISITION=$(parse_yaml_value "acquisition" "$profile_file")
+    export PROFILE_CONTAINER_ACQUISITION="${PROFILE_CONTAINER_ACQUISITION:-pull}"
+    export PROFILE_CONTAINER_BASE_IMAGE=$(parse_yaml_value "base_image" "$profile_file")
+
     # Docker Compose settings (if applicable)
     export PROFILE_KC_COMPOSE_FILE=$(parse_yaml_section_value "docker_compose" "compose_file" "$profile_file")
     export PROFILE_KC_COMPOSE_SERVICE=$(parse_yaml_section_value "docker_compose" "service_name" "$profile_file")
@@ -114,6 +123,8 @@ profile_load() {
     export PROFILE_MIGRATION_TIMEOUT=$(parse_yaml_value "timeout_per_version" "$profile_file")
     export PROFILE_MIGRATION_RUN_TESTS=$(parse_yaml_value "run_smoke_tests" "$profile_file")
     export PROFILE_MIGRATION_BACKUP=$(parse_yaml_value "backup_before_step" "$profile_file")
+    export PROFILE_APPLY_SKIPPED_INDEXES=$(parse_yaml_value "apply_skipped_indexes" "$profile_file")
+    export PROFILE_APPLY_SKIPPED_INDEXES="${PROFILE_APPLY_SKIPPED_INDEXES:-false}"
 
     # Multi-instance settings (v3.2)
     export PROFILE_MODE=$(parse_yaml_section_value "profile" "mode" "$profile_file")

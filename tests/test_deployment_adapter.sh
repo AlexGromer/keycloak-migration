@@ -5,7 +5,9 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
+# shellcheck source=/dev/null
 source "$SCRIPT_DIR/test_framework.sh"
+# shellcheck source=/dev/null
 source "$PROJECT_ROOT/scripts/lib/deployment_adapter.sh"
 
 # ============================================================================
@@ -17,7 +19,8 @@ assert_true "deploy_validate_mode docker" "docker is valid"
 assert_true "deploy_validate_mode docker-compose" "docker-compose is valid"
 assert_true "deploy_validate_mode kubernetes" "kubernetes is valid"
 assert_true "deploy_validate_mode deckhouse" "deckhouse is valid"
-assert_false "deploy_validate_mode podman 2>/dev/null" "podman is invalid"
+assert_true "deploy_validate_mode podman" "podman is valid"
+assert_true "deploy_validate_mode run" "run is valid"
 assert_false "deploy_validate_mode nomad 2>/dev/null" "nomad is invalid"
 
 # ============================================================================
@@ -29,6 +32,8 @@ assert_not_empty "${DEPLOY_MODES[docker]}" "docker has description"
 assert_not_empty "${DEPLOY_MODES[docker-compose]}" "docker-compose has description"
 assert_not_empty "${DEPLOY_MODES[kubernetes]}" "kubernetes has description"
 assert_not_empty "${DEPLOY_MODES[deckhouse]}" "deckhouse has description"
+assert_not_empty "${DEPLOY_MODES[podman]:-}" "podman has description"
+assert_not_empty "${DEPLOY_MODES[run]:-}" "run has description"
 
 # ============================================================================
 describe "kc_get_config_path()"

@@ -119,8 +119,8 @@ canary_migrate_replicas() {
     # For Kubernetes: create new ReplicaSet with new image
     # For now, placeholder
 
-    # Example: kubectl set image deployment/$deployment keycloak=keycloak:$target_version -n $namespace
-    if kubectl set image deployment/"$deployment" "keycloak=quay.io/keycloak/keycloak:$target_version" \
+    # Example: kubectl set image deployment/$deployment keycloak=<image_ref> -n $namespace
+    if kubectl set image deployment/"$deployment" "keycloak=$(dist_image_ref "$target_version")" \
         -n "$namespace" >/dev/null 2>&1; then
         log_success "Deployment image updated"
     else

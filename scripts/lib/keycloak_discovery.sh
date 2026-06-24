@@ -69,32 +69,32 @@ kc_discover_standalone() {
 }
 
 kc_discover_docker() {
-    # Discover Keycloak in Docker containers
+    # Discover Keycloak in containers (docker or podman via cr)
 
-    if ! docker ps &>/dev/null; then
+    if ! cr ps &>/dev/null; then
         return 0
     fi
 
     local discoveries=()
 
     # Find running containers with Keycloak
-    local containers=$(docker ps --format '{{.Names}}' | grep -i keycloak || true)
+    local containers=$(cr ps --format '{{.Names}}' | grep -i keycloak || true)
 
     for container in $containers; do
         # Check if it's actually Keycloak
-        if docker exec "$container" test -f /opt/keycloak/bin/kc.sh 2>/dev/null || \
-           docker exec "$container" test -f /opt/keycloak/bin/standalone.sh 2>/dev/null; then
+        if cr exec "$container" test -f /opt/keycloak/bin/kc.sh 2>/dev/null || \
+           cr exec "$container" test -f /opt/keycloak/bin/standalone.sh 2>/dev/null; then
             local version=$(kc_get_version "docker" "$container" 2>/dev/null || echo "unknown")
-            local image=$(docker inspect "$container" --format '{{.Config.Image}}')
+            local image=$(cr inspect "$container" --format '{{.Config.Image}}')
             discoveries+=("$container|$version|docker:$image")
         fi
     done
 
     # Also check stopped containers
-    local stopped=$(docker ps -a --filter "status=exited" --format '{{.Names}}' | grep -i keycloak || true)
+    local stopped=$(cr ps -a --filter "status=exited" --format '{{.Names}}' | grep -i keycloak || true)
     for container in $stopped; do
-        if docker inspect "$container" --format '{{.Config.Image}}' | grep -qi keycloak; then
-            local image=$(docker inspect "$container" --format '{{.Config.Image}}')
+        if cr inspect "$container" --format '{{.Config.Image}}' | grep -qi keycloak; then
+            local image=$(cr inspect "$container" --format '{{.Config.Image}}')
             discoveries+=("$container|stopped|docker:$image")
         fi
     done
@@ -119,7 +119,8 @@ kc_discover_docker_compose() {
                 if echo "$service" | grep -qi "keycloak"; then
                     # Try to get running version
                     local version="unknown"
-                    if docker-compose -f "$compose_file" ps | grep -q "$service.*Up"; then
+                    # shellcheck disable=SC2046  # cr_compose returns command words
+                    if $(cr_compose) -f "$compose_file" ps | grep -q "$service.*Up"; then
                         version=$(kc_get_version "docker-compose" "$service" "$compose_file" 2>/dev/null || echo "running")
                     fi
                     discoveries+=("$service|$version|docker-compose:$compose_file")
@@ -460,11 +461,19 @@ kc_auto_discover_profile() {
         standalone)
             kc_discover_database "standalone" "${PROFILE_KC_HOME_DIR}"
             ;;
-        docker)
+        docker|podman|run)
             kc_discover_database "docker" "${PROFILE_KC_CONTAINER_NAME}"
+            ;;
+        docker-compose)
+            kc_discover_database "docker-compose" \
+                "${PROFILE_KC_COMPOSE_SERVICE:-${PROFILE_KC_SERVICE_NAME:-keycloak}}" \
+                "${PROFILE_KC_COMPOSE_FILE:-docker-compose.yml}"
             ;;
         kubernetes)
             kc_discover_database "kubernetes" "${PROFILE_K8S_NAMESPACE}" "${PROFILE_K8S_DEPLOYMENT}"
+            ;;
+        deckhouse)
+            kc_discover_database "deckhouse" "${PROFILE_K8S_NAMESPACE:-d8-keycloak}"
             ;;
     esac
 

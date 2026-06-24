@@ -20,6 +20,8 @@ LIB_DIR="$SCRIPT_DIR/lib"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
 # Source libraries
+# v3.7: container runtime abstraction (podman/docker) — source FIRST (other libs use `cr`)
+[[ -f "$LIB_DIR/container_runtime.sh" ]] && source "$LIB_DIR/container_runtime.sh"
 source "$LIB_DIR/database_adapter.sh"
 source "$LIB_DIR/deployment_adapter.sh"
 source "$LIB_DIR/profile_manager.sh"
@@ -40,6 +42,9 @@ source "$LIB_DIR/multi_tenant.sh"
 [[ -f "$LIB_DIR/secrets_manager.sh" ]] && source "$LIB_DIR/secrets_manager.sh"
 [[ -f "$LIB_DIR/audit_logger_v2.sh" ]] && source "$LIB_DIR/audit_logger_v2.sh"
 
+# v3.7: container-hop migration model verification (Layer 2 — MIGRATION_MODEL)
+[[ -f "$LIB_DIR/migration_verify.sh" ]] && source "$LIB_DIR/migration_verify.sh"
+
 # ============================================================================
 # CONFIGURATION DEFAULTS
 # ============================================================================
@@ -50,15 +55,29 @@ mkdir -p "$WORK_DIR"
 STATE_FILE="$WORK_DIR/migration_state.env"
 LOG_FILE="$WORK_DIR/migration_$(date +%Y%m%d_%H%M%S).log"
 
-# Migration path (Keycloak versions)
-# Includes all supported starting versions and upgrade targets
-declare -a MIGRATION_PATH=(
-    "16.1.1"
-    "17.0.1"
-    "22.0.5"
-    "25.0.6"
-    "26.0.7"
+# Migration hops per target MAJOR (Keycloak).
+# The detected source (e.g. 16.x) is the START, never re-booted — only these
+# intermediate/target versions are booted as real containers so Keycloak runs
+# both Liquibase (Layer 1) and RealmMigration (Layer 2) on startup.
+# Verified safe (migrations are cumulative): 16 -> 24.0.5 -> 26.6.3 / 16 -> 25.0.6.
+declare -A MIGRATION_HOPS=(
+    [26]="24.0.5 26.6.3"
+    [25]="25.0.6"
 )
+# Full target version per target MAJOR (last hop of each path).
+declare -A MIGRATION_TARGET_FULL=(
+    [26]="26.6.3"
+    [25]="25.0.6"
+)
+# Default target major (overridable via env/profile).
+DEFAULT_TARGET_MAJOR="${DEFAULT_TARGET_MAJOR:-26}"
+# Patch releases that must NEVER be booted (known migration-breaking bugs):
+#   26.6.0/26.6.1 -> exit-after-migration (#48438) + custom-browser-flow corruption (#47908).
+FORBIDDEN_VERSIONS="${FORBIDDEN_VERSIONS:-26.6.0 26.6.1}"
+# Target majors that are EOL (warn but allow).
+EOL_TARGET_MAJORS="${EOL_TARGET_MAJORS:-25}"
+# Minimum PostgreSQL major required by target major 26 (26.6 dropped PG13).
+MIN_PG_FOR_26="${MIN_PG_FOR_26:-14}"
 
 # Java requirements per Keycloak version
 declare -A JAVA_REQUIREMENTS=(
@@ -171,12 +190,12 @@ kc_detect_version() {
         esac
     fi
 
-    # Method 4: Check Docker image tag
-    if [[ -z "$version" && "${PROFILE_KC_DEPLOYMENT_MODE:-}" == "docker_compose" ]]; then
+    # Method 4: Check container image tag (compose / single container), any registry
+    if [[ -z "$version" && "${PROFILE_KC_DEPLOYMENT_MODE:-}" =~ ^(docker-compose|docker|podman|run)$ ]]; then
         local compose_file="${PROFILE_KC_COMPOSE_FILE:-docker-compose.yml}"
         if [[ -f "$compose_file" ]]; then
             version=$(grep -A5 "keycloak" "$compose_file" | grep "image:" | \
-                grep -oP 'quay.io/keycloak/keycloak:\K[\d\.]+' | head -1)
+                grep -oP 'keycloak[^:[:space:]]*:\K[0-9][0-9.]*' | head -1)
         fi
     fi
 
@@ -200,66 +219,122 @@ kc_detect_version() {
     fi
 }
 
-kc_select_target_version() {
-    # Interactive selection of target version
-    local current_version="${1:-}"
-    local current_idx=-1
+# Return 0 if version $1 <= version $2 (semantic version order).
+_ver_le() {
+    [[ "$1" == "$2" ]] && return 0
+    [[ "$(printf '%s\n%s\n' "$1" "$2" | sort -V | head -n1)" == "$1" ]]
+}
 
+# Echo the space-separated list of container hops to BOOT to reach a target major,
+# from the detected current version. The current version is the START and is never
+# re-booted; any hop at or below it is skipped (already migrated).
+kc_build_migration_path() {
+    local current="$1" target_major="$2"
+    local hops="${MIGRATION_HOPS[$target_major]:-}"
+    if [[ -z "$hops" ]]; then
+        echo "ERROR: no migration hops defined for target major '$target_major'" >&2
+        return 1
+    fi
+    local out=() hop
+    for hop in $hops; do
+        _ver_le "$hop" "$current" && continue
+        out+=("$hop")
+    done
+    if [[ ${#out[@]} -eq 0 ]]; then
+        echo "ERROR: current version $current is already at/beyond target major '$target_major'" >&2
+        return 1
+    fi
+    echo "${out[*]}"
+}
+
+# Gate: target major 26 (26.6) requires PostgreSQL >= MIN_PG_FOR_26 (PG13 dropped).
+check_db_version_for_target() {
+    local target_major="$1"
+    [[ "$target_major" != "26" ]] && return 0
+    case "${PROFILE_DB_TYPE:-}" in postgresql|postgres|cockroachdb) ;; *) return 0 ;; esac
+    command -v psql &>/dev/null || { log_warn "psql not found; cannot verify PG >= $MIN_PG_FOR_26 for target 26.x"; return 0; }
+    local pgver
+    pgver=$(PGPASSWORD="${PROFILE_DB_PASSWORD:-}" psql -h "${PROFILE_DB_HOST}" -p "${PROFILE_DB_PORT}" \
+        -U "${PROFILE_DB_USER}" -d "${PROFILE_DB_NAME}" -tAc "SHOW server_version_num;" 2>/dev/null | tr -d ' ')
+    if [[ -z "$pgver" || ! "$pgver" =~ ^[0-9]+$ ]]; then
+        log_warn "Could not determine PostgreSQL version; ensure PG >= $MIN_PG_FOR_26 before target 26.x"
+        return 0
+    fi
+    local pg_major=$(( pgver / 10000 ))
+    if [[ "$pg_major" -lt "$MIN_PG_FOR_26" ]]; then
+        log_error "Target major 26 requires PostgreSQL >= $MIN_PG_FOR_26, found $pg_major — upgrade PostgreSQL first"
+        return 1
+    fi
+    log_success "PostgreSQL $pg_major satisfies >= $MIN_PG_FOR_26 for target 26.x"
+    return 0
+}
+
+# Select the target version. Returns the FULL target version (e.g. 26.6.3) on stdout;
+# all UI goes to stderr so command substitution captures only the version.
+# Honors TARGET_MAJOR env / non-interactive default (DEFAULT_TARGET_MAJOR).
+kc_select_target_version() {
+    local current_version="${1:-}"
     if [[ -z "$current_version" ]]; then
         echo "ERROR: Current version not specified" >&2
         return 1
     fi
 
-    # Find current version index in migration path
-    for i in "${!MIGRATION_PATH[@]}"; do
-        if [[ "${MIGRATION_PATH[$i]}" == "$current_version" ]]; then
-            current_idx=$i
-            break
+    # Available target majors, newest first.
+    local majors=() m
+    for m in "${!MIGRATION_TARGET_FULL[@]}"; do majors+=("$m"); done
+    IFS=$'\n' read -r -d '' -a majors < <(printf '%s\n' "${majors[@]}" | sort -rn && printf '\0')
+
+    local chosen_major="${TARGET_MAJOR:-}"
+    if [[ -z "$chosen_major" ]] && { [[ ! -t 0 ]] || [[ "${ASSUME_DEFAULTS:-false}" == "true" ]]; }; then
+        chosen_major="$DEFAULT_TARGET_MAJOR"
+        echo "Non-interactive: defaulting target major to $chosen_major" >&2
+    fi
+
+    if [[ -z "$chosen_major" ]]; then
+        {
+            echo ""
+            echo "Current version: $current_version"
+            echo "Available target majors:"
+            local i=1
+            for m in "${majors[@]}"; do
+                local full="${MIGRATION_TARGET_FULL[$m]}" tag=""
+                [[ "$m" == "$DEFAULT_TARGET_MAJOR" ]] && tag=" (recommended, default)"
+                [[ " $EOL_TARGET_MAJORS " == *" $m "* ]] && tag="$tag [EOL - unsupported]"
+                printf "  [%d] major %s -> %s%s\n" "$i" "$m" "$full" "$tag"
+                i=$((i + 1))
+            done
+        } >&2
+        local choice
+        read -rp "Select target major [default $DEFAULT_TARGET_MAJOR]: " choice
+        if [[ -z "$choice" ]]; then
+            chosen_major="$DEFAULT_TARGET_MAJOR"
+        elif [[ "$choice" =~ ^[0-9]+$ ]] && [[ "$choice" -ge 1 && "$choice" -le ${#majors[@]} ]]; then
+            chosen_major="${majors[$((choice - 1))]}"
+        else
+            chosen_major="$choice"
+        fi
+    fi
+
+    local target_full="${MIGRATION_TARGET_FULL[$chosen_major]:-}"
+    if [[ -z "$target_full" ]]; then
+        echo "ERROR: no target defined for major '$chosen_major'" >&2
+        return 1
+    fi
+
+    local fv
+    for fv in $FORBIDDEN_VERSIONS; do
+        if [[ "$target_full" == "$fv" ]]; then
+            echo "ERROR: target $target_full is a forbidden (migration-breaking) release" >&2
+            return 1
         fi
     done
 
-    if [[ $current_idx -eq -1 ]]; then
-        echo "ERROR: Current version $current_version not in migration path" >&2
-        echo "Supported versions: ${MIGRATION_PATH[*]}" >&2
-        return 1
+    if [[ " $EOL_TARGET_MAJORS " == *" $chosen_major "* ]]; then
+        echo "WARNING: target major $chosen_major ($target_full) is EOL/unsupported - proceed only if required" >&2
     fi
 
-    # Check if already at latest
-    if [[ $current_idx -eq $((${#MIGRATION_PATH[@]} - 1)) ]]; then
-        log_info "Already at latest version: $current_version"
-        echo "$current_version"
-        return 0
-    fi
-
-    # Offer target versions
-    echo ""
-    echo "Current version: $current_version"
-    echo ""
-    echo "Available target versions:"
-    echo ""
-
-    local options=()
-    for ((i=current_idx+1; i<${#MIGRATION_PATH[@]}; i++)); do
-        local version="${MIGRATION_PATH[$i]}"
-        local java_major=$(echo "$version" | cut -d. -f1)
-        local java_req="${JAVA_REQUIREMENTS[$java_major]:-unknown}"
-        options+=("$version")
-        printf "  [%d] %s (Java %s)\n" "$((i-current_idx))" "$version" "$java_req"
-    done
-
-    echo ""
-    read -rp "Select target version [1-${#options[@]}] or 'latest': " choice
-
-    if [[ "$choice" == "latest" || "$choice" == "l" ]]; then
-        echo "${options[-1]}"
-        return 0
-    elif [[ "$choice" =~ ^[0-9]+$ ]] && [[ $choice -ge 1 && $choice -le ${#options[@]} ]]; then
-        echo "${options[$((choice-1))]}"
-        return 0
-    else
-        echo "ERROR: Invalid choice: $choice" >&2
-        return 1
-    fi
+    echo "$target_full"
+    return 0
 }
 
 # ============================================================================
@@ -394,9 +469,18 @@ run_preflight_checks() {
     esac
     # Add deployment-specific tools
     case "${PROFILE_KC_DEPLOYMENT_MODE:-}" in
-        docker) required_tools+=("docker") ;;
-        docker-compose) required_tools+=("docker" "docker-compose") ;;
         kubernetes|deckhouse) required_tools+=("kubectl") ;;
+    esac
+    # Container modes: a runtime (podman OR docker) is validated via cr_available below
+    case "${PROFILE_KC_DEPLOYMENT_MODE:-}" in
+        docker|podman|run|docker-compose)
+            if declare -F cr_available >/dev/null 2>&1 && cr_available; then
+                log_success "Container runtime available: ${CONTAINER_RUNTIME:-?}"
+            else
+                log_error "No container runtime (podman/docker) found for mode '${PROFILE_KC_DEPLOYMENT_MODE}'"
+                errors=$((errors + 1))
+            fi
+            ;;
     esac
     if [[ "${PROFILE_KC_DISTRIBUTION_MODE:-}" == "helm" ]]; then
         required_tools+=("helm")
@@ -411,46 +495,36 @@ run_preflight_checks() {
         fi
     done
 
-    # 3. Java check for ALL versions in migration path
-    local current="${PROFILE_KC_CURRENT_VERSION}"
-    local target="${PROFILE_KC_TARGET_VERSION}"
-    local found_current=false
-    local java_versions_needed=()
-
-    for version in "${MIGRATION_PATH[@]}"; do
-        if [[ "$version" == "$current" ]]; then
-            found_current=true
-            continue
-        fi
-        if $found_current; then
-            local major=$(echo "$version" | cut -d. -f1)
-            local req="${JAVA_REQUIREMENTS[$major]:-11}"
-            # Add to list if not already there
-            if [[ ! " ${java_versions_needed[*]:-} " =~ " ${req} " ]]; then
-                java_versions_needed+=("$req")
-            fi
-            [[ "$version" == "$target" ]] && break
-        fi
-    done
-
-    if command -v java &>/dev/null; then
-        local current_java=$(java -version 2>&1 | head -1 | cut -d'"' -f2 | cut -d'.' -f1)
-        [[ "$current_java" == "1" ]] && current_java=$(java -version 2>&1 | head -1 | cut -d'"' -f2 | cut -d'.' -f2)
-
-        local max_needed=11
-        for v in "${java_versions_needed[@]}"; do
-            [[ "$v" -gt "$max_needed" ]] && max_needed="$v"
+    # 3. Java check (standalone only — container/K8s images carry their own JDK)
+    if [[ "${PROFILE_KC_DEPLOYMENT_MODE:-}" == "standalone" ]]; then
+        local current="${PROFILE_KC_CURRENT_VERSION}"
+        local target_major
+        target_major=$(echo "${PROFILE_KC_TARGET_VERSION}" | cut -d. -f1)
+        local max_needed=11 _hops _hop
+        _hops=$(kc_build_migration_path "$current" "$target_major" 2>/dev/null) || _hops=""
+        for _hop in $_hops; do
+            local major req
+            major=$(echo "$_hop" | cut -d. -f1)
+            req="${JAVA_REQUIREMENTS[$major]:-11}"
+            [[ "$req" -gt "$max_needed" ]] && max_needed="$req"
         done
 
-        if [[ "$current_java" -ge "$max_needed" ]]; then
-            log_success "Java $current_java (need ${java_versions_needed[*]})"
+        if command -v java &>/dev/null; then
+            local current_java
+            current_java=$(java -version 2>&1 | head -1 | cut -d'"' -f2 | cut -d'.' -f1)
+            [[ "$current_java" == "1" ]] && current_java=$(java -version 2>&1 | head -1 | cut -d'"' -f2 | cut -d'.' -f2)
+            if [[ "$current_java" -ge "$max_needed" ]]; then
+                log_success "Java $current_java (need >= $max_needed)"
+            else
+                log_error "Java $current_java insufficient — migration path requires Java >= $max_needed"
+                errors=$((errors + 1))
+            fi
         else
-            log_error "Java $current_java insufficient — migration path requires: ${java_versions_needed[*]}"
+            log_error "Java not found"
             errors=$((errors + 1))
         fi
     else
-        log_error "Java not found"
-        errors=$((errors + 1))
+        log_info "Java check skipped (mode '${PROFILE_KC_DEPLOYMENT_MODE:-unknown}' — JDK lives in the container image)"
     fi
 
     # 4. Network check (for download mode only)
@@ -597,6 +671,10 @@ validate_profile_variables() {
 
 check_java_for_version() {
     local kc_version="$1"
+    # Container/K8s images carry their own JDK — only validate the host JVM for standalone.
+    if [[ "${PROFILE_KC_DEPLOYMENT_MODE:-}" != "standalone" ]]; then
+        return 0
+    fi
     local major_version=$(echo "$kc_version" | cut -d. -f1)
     local required_java="${JAVA_REQUIREMENTS[$major_version]:-11}"
 
@@ -708,6 +786,7 @@ db_restore_keycloak() {
 
 kc_service_start() {
     local mode="${PROFILE_KC_DEPLOYMENT_MODE}"
+    local version="${1:-${KC_HOP_VERSION:-${PROFILE_KC_TARGET_VERSION:-}}}"
 
     log_info "Starting Keycloak ($mode mode)"
 
@@ -715,8 +794,12 @@ kc_service_start() {
         standalone)
             kc_start "$mode" "${PROFILE_KC_SERVICE_NAME:-keycloak}"
             ;;
-        docker)
+        docker|podman)
             kc_start "$mode" "${PROFILE_KC_CONTAINER_NAME:-keycloak}"
+            ;;
+        run)
+            # Transient migrating container of this hop version (boots → migrates)
+            kc_run_migrating_container "$version"
             ;;
         docker-compose)
             kc_start "$mode" "${PROFILE_KC_COMPOSE_FILE:-docker-compose.yml}"
@@ -736,6 +819,7 @@ kc_service_start() {
 
 kc_service_stop() {
     local mode="${PROFILE_KC_DEPLOYMENT_MODE}"
+    local version="${1:-${KC_HOP_VERSION:-${PROFILE_KC_TARGET_VERSION:-}}}"
 
     log_info "Stopping Keycloak ($mode mode)"
 
@@ -743,8 +827,11 @@ kc_service_stop() {
         standalone)
             kc_stop "$mode" "${PROFILE_KC_SERVICE_NAME:-keycloak}"
             ;;
-        docker)
+        docker|podman)
             kc_stop "$mode" "${PROFILE_KC_CONTAINER_NAME:-keycloak}"
+            ;;
+        run)
+            kc_run_stop_container "${PROFILE_KC_RUN_CONTAINER_NAME:-kc-migrate-${version}}"
             ;;
         docker-compose)
             kc_stop "$mode" "${PROFILE_KC_COMPOSE_FILE:-docker-compose.yml}"
@@ -768,8 +855,11 @@ kc_service_status() {
         standalone)
             kc_status "$mode" "${PROFILE_KC_SERVICE_NAME:-keycloak}"
             ;;
-        docker)
+        docker|podman)
             kc_status "$mode" "${PROFILE_KC_CONTAINER_NAME:-keycloak}"
+            ;;
+        run)
+            kc_status "$mode" "${PROFILE_KC_RUN_CONTAINER_NAME:-kc-migrate-${KC_HOP_VERSION:-${PROFILE_KC_TARGET_VERSION:-}}}"
             ;;
         docker-compose)
             kc_status "$mode" "${PROFILE_KC_COMPOSE_FILE:-docker-compose.yml}"
@@ -844,15 +934,15 @@ build_keycloak() {
         rm -rf "$kc_home/data/tmp"
     fi
 
-    # Build command
-    local build_cmd="$kc_home/bin/kc.sh build"
+    # Build command (array — avoids splitting "kc.sh build" into a bogus single token)
+    local build_cmd=("$kc_home/bin/kc.sh" build)
     local build_log="$WORK_DIR/build_${version}_$(date +%Y%m%d_%H%M%S).log"
 
-    log_info "Running: $build_cmd"
+    log_info "Running: ${build_cmd[*]}"
     log_info "Build log: $build_log"
 
     # Run build
-    if "$build_cmd" > "$build_log" 2>&1; then
+    if "${build_cmd[@]}" > "$build_log" 2>&1; then
         log_success "Build completed"
     else
         log_error "Build failed (exit code: $?)"
@@ -907,10 +997,15 @@ wait_for_migration() {
             "${PROFILE_KC_CONTAINER_NAME:-}" \
             "${PROFILE_KC_COMPOSE_FILE:-}" 2>/dev/null || echo "")
 
-        # Check for migration complete markers
-        if echo "$logs" | grep -qi "Liquibase command 'update' was executed successfully\|Migration successful\|Keycloak.*started"; then
+        # Check for migration complete markers (Layer 1 — Liquibase).
+        # NOTE: a generic "Keycloak ... started" is NOT accepted as proof of migration;
+        # Layer 2 is confirmed separately via MIGRATION_MODEL (kc_verify_migration_model).
+        if echo "$logs" | grep -qi "Liquibase command 'update' was executed successfully\|Migration successful"; then
             migration_complete=true
-            log_success "Database migration completed (${elapsed}s elapsed)"
+            # Persist the startup log so skipped-index warnings can be recovered.
+            MIGRATION_LOG_FILE="$WORK_DIR/kc_startup_${version}_$(date +%Y%m%d_%H%M%S).log"
+            printf '%s\n' "$logs" > "$MIGRATION_LOG_FILE" 2>/dev/null || true
+            log_success "Database schema migration completed (${elapsed}s elapsed)"
             break
         fi
 
@@ -939,9 +1034,11 @@ wait_for_migration() {
         log_warn "  - Large database requiring more time"
         log_warn "  - Migration stuck or failed"
         log_warn "  - Keycloak startup issues"
-        echo ""
-        read -r -p "Continue anyway? [y/N]: " continue_anyway
-        if [[ ! "$continue_anyway" =~ ^[Yy]$ ]]; then
+        # Fail-closed: do not blindly proceed. Layer 2 (MIGRATION_MODEL) would fail anyway.
+        if [[ "${FORCE_MIGRATION:-false}" == "true" ]]; then
+            log_warn "FORCE_MIGRATION=true — continuing despite timeout (NOT recommended)"
+        else
+            log_error "Aborting (set FORCE_MIGRATION=true to override)"
             return 1
         fi
     fi
@@ -1245,6 +1342,9 @@ migrate_to_version() {
     local step_num="$2"
     local total_steps="$3"
 
+    # Expose the current hop version to the service dispatch (run/podman topology).
+    export KC_HOP_VERSION="$target_version"
+
     log_section "Migration Step $step_num/$total_steps: Keycloak $target_version"
 
     # Check for existing checkpoint (resume support)
@@ -1317,6 +1417,23 @@ migrate_to_version() {
     # Step 6: Wait for migration to complete
     if [[ -z "$existing_cp" ]] || ! should_skip_to "$existing_cp" "migrated"; then
         wait_for_migration "$target_version" || return 1
+
+        # Step 6b: AUTHORITATIVE Layer 2 gate — MIGRATION_MODEL must advance to the hop
+        # version. "Container started" != "realm migration applied".
+        if declare -F kc_verify_migration_model >/dev/null 2>&1; then
+            kc_verify_migration_model "$target_version" || {
+                log_error "MIGRATION_MODEL did not advance to $target_version — Layer 2 NOT confirmed"
+                return 1
+            }
+        else
+            log_warn "kc_verify_migration_model unavailable — Layer 2 not independently confirmed"
+        fi
+
+        # Step 6c: surface (and optionally apply) indexes skipped on large tables (>300k rows)
+        if declare -F kc_check_skipped_indexes >/dev/null 2>&1 && [[ -n "${MIGRATION_LOG_FILE:-}" ]]; then
+            kc_check_skipped_indexes "$MIGRATION_LOG_FILE" "$target_version" || true
+        fi
+
         set_checkpoint "$target_version" "migrated"
     else
         log_info "Skipping migration wait (already migrated)"
@@ -1354,6 +1471,12 @@ migrate_to_version() {
         else
             log_info "Skipping smoke tests (already passed)"
         fi
+    fi
+
+    # run topology: the transient migrating container has done its job — stop+remove it
+    # before the next hop boots (single-instance migration; avoids DB lock contention).
+    if [[ "${PROFILE_KC_DEPLOYMENT_MODE}" == "run" ]] && declare -F kc_run_stop_container >/dev/null 2>&1; then
+        kc_run_stop_container "${PROFILE_KC_RUN_CONTAINER_NAME:-kc-migrate-${target_version}}" || true
     fi
 
     # Mark step as fully successful
@@ -1409,25 +1532,21 @@ execute_migration() {
     log_info "Strategy: ${PROFILE_MIGRATION_STRATEGY:-inplace}"
     echo ""
 
-    # Determine migration path
+    # Determine migration path (hops to boot; current is the start, never re-booted)
+    local target_major
+    target_major=$(echo "$target_version" | cut -d. -f1)
+
+    if ! check_db_version_for_target "$target_major"; then
+        exit 1
+    fi
+
     local migration_steps=()
-    local found_current=false
-
-    for version in "${MIGRATION_PATH[@]}"; do
-        if [[ "$version" == "$current_version" ]]; then
-            found_current=true
-            continue
-        fi
-
-        if $found_current; then
-            migration_steps+=("$version")
-
-            # Stop if we reached target
-            if [[ "$version" == "$target_version" ]]; then
-                break
-            fi
-        fi
-    done
+    local _path
+    if ! _path=$(kc_build_migration_path "$current_version" "$target_major"); then
+        log_error "No migration path from $current_version to target major $target_major"
+        exit 1
+    fi
+    read -r -a migration_steps <<< "$_path"
 
     if [[ ${#migration_steps[@]} -eq 0 ]]; then
         log_error "No migration path found from $current_version to $target_version"
@@ -1518,7 +1637,8 @@ execute_migration() {
     # Audit: migration start
     local migration_start_ts
     migration_start_ts=$(date +%s)
-    audit_migration_start "${PROFILE_NAME:-unknown}" "$current_version" "$target_version"
+    # audit_migration_start(source, target, profile) — pass version transition + profile
+    audit_migration_start "$current_version" "$target_version" "${PROFILE_NAME:-unknown}"
 
     # Execute migration steps (strategy-dependent)
     local step_num=1
@@ -1642,21 +1762,14 @@ cmd_plan() {
     echo ""
     echo "Migration Path:"
 
-    local found_current=false
-    for version in "${MIGRATION_PATH[@]}"; do
-        if [[ "$version" == "$current_version" ]]; then
-            found_current=true
-            echo "  ✓ $version (current)"
-            continue
-        fi
-
-        if $found_current; then
-            echo "  → $version"
-
-            if [[ "$version" == "$target_version" ]]; then
-                echo "  ✓ $version (target)"
-                break
-            fi
+    echo "  ✓ $current_version (current)"
+    local _tmajor _phop
+    _tmajor=$(echo "$target_version" | cut -d. -f1)
+    for _phop in $(kc_build_migration_path "$current_version" "$_tmajor" 2>/dev/null); do
+        if [[ "$_phop" == "$target_version" ]]; then
+            echo "  ✓ $_phop (target)"
+        else
+            echo "  → $_phop"
         fi
     done
 
@@ -2025,5 +2138,7 @@ main() {
     esac
 }
 
-# Run main
-main "$@"
+# Run main only when executed directly (allows sourcing functions for tests)
+if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
+    main "$@"
+fi
