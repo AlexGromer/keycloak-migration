@@ -18,8 +18,8 @@ readonly BACKEND_K8S="k8s"
 readonly BACKEND_ENV="env"         # Environment variables (dev/testing only)
 readonly BACKEND_FILE="file"       # File-based (dev/testing only)
 
-# Exit codes
-readonly EXIT_SUCCESS=0
+# Exit codes (guarded to prevent collision when multiple libs are sourced)
+[[ -v EXIT_SUCCESS ]] || readonly EXIT_SUCCESS=0
 readonly EXIT_BACKEND_NOT_CONFIGURED=30
 readonly EXIT_SECRET_NOT_FOUND=31
 readonly EXIT_BACKEND_ERROR=32

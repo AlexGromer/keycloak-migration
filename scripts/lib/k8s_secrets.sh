@@ -23,8 +23,8 @@ readonly K8S_SA_NAMESPACE_PATH="/var/run/secrets/kubernetes.io/serviceaccount/na
 # Kubernetes API
 K8S_API_SERVER="${K8S_API_SERVER:-https://kubernetes.default.svc}"
 
-# Exit codes
-readonly EXIT_SUCCESS=0
+# Exit codes (guarded to prevent collision when multiple libs are sourced)
+[[ -v EXIT_SUCCESS ]] || readonly EXIT_SUCCESS=0
 readonly EXIT_K8S_NOT_CONFIGURED=50
 readonly EXIT_K8S_SECRET_NOT_FOUND=51
 readonly EXIT_K8S_API_ERROR=52

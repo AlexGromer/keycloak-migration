@@ -31,8 +31,8 @@ AUDIT_LOG_FORMAT="${AUDIT_LOG_FORMAT:-json}"  # json, logfmt, plain
 # Minimum log level (logs below this are discarded)
 AUDIT_MIN_LEVEL="${AUDIT_MIN_LEVEL:-$LEVEL_INFO}"
 
-# Exit codes
-readonly EXIT_SUCCESS=0
+# Exit codes (guarded to prevent collision when multiple libs are sourced)
+[[ -v EXIT_SUCCESS ]] || readonly EXIT_SUCCESS=0
 readonly EXIT_HMAC_VERIFICATION_FAILED=60
 readonly EXIT_LOG_WRITE_FAILED=61
 
@@ -282,6 +282,88 @@ audit_migration_complete() {
     else
         audit_error "Migration failed" "migration" "migration_failed" "$metadata"
     fi
+}
+
+# Log migration step (v2-compatible replacement for v1 audit_migration_step)
+audit_migration_step() {
+    local version="$1"
+    local status="$2"
+    local duration="${3:-}"
+
+    local metadata
+    metadata=$(jq -n \
+        --arg version "$version" \
+        --arg status "$status" \
+        --arg duration "$duration" \
+        '{version: $version, status: $status, duration_s: $duration}')
+
+    audit_info "Step ${status}: ${version}" "migration" "migration_step" "$metadata"
+}
+
+# Log migration end (v2-compatible replacement for v1 audit_migration_end)
+audit_migration_end() {
+    local profile="$1"
+    local status="$2"
+    local total_duration="${3:-}"
+
+    local metadata
+    metadata=$(jq -n \
+        --arg profile "$profile" \
+        --arg status "$status" \
+        --arg duration "$total_duration" \
+        '{profile: $profile, status: $status, total_duration_s: $duration}')
+
+    if [[ "$status" == "success" ]]; then
+        audit_info "Migration ${status}" "migration" "migration_end" "$metadata"
+    else
+        audit_error "Migration ${status}" "migration" "migration_end" "$metadata"
+    fi
+}
+
+# Log backup (v2-compatible replacement for v1 audit_backup)
+audit_backup() {
+    local version="$1"
+    local path="$2"
+    local size="${3:-}"
+
+    local metadata
+    metadata=$(jq -n \
+        --arg version "$version" \
+        --arg path "$path" \
+        --arg size "$size" \
+        '{version: $version, backup_path: $path, size_bytes: $size}')
+
+    audit_info "Backup for ${version}" "migration" "backup_created" "$metadata"
+}
+
+# Log rollback (v2-compatible replacement for v1 audit_rollback)
+audit_rollback() {
+    local version="$1"
+    local reason="$2"
+
+    local metadata
+    metadata=$(jq -n \
+        --arg version "$version" \
+        --arg reason "$reason" \
+        '{version: $version, reason: $reason}')
+
+    audit_warn "Rollback triggered for ${version}" "migration" "rollback" "$metadata"
+}
+
+# Log health check (v2-compatible replacement for v1 audit_health_check)
+audit_health_check() {
+    local version="$1"
+    local status="$2"
+    local endpoint="${3:-}"
+
+    local metadata
+    metadata=$(jq -n \
+        --arg version "$version" \
+        --arg status "$status" \
+        --arg endpoint "$endpoint" \
+        '{version: $version, status: $status, endpoint: $endpoint}')
+
+    audit_info "Health check ${status}" "migration" "health_check" "$metadata"
 }
 
 # Log security event (vault access, secrets read)

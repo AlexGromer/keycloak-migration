@@ -25,8 +25,8 @@ readonly MIN_BACKUP_SPACE_MULTIPLIER=3  # Backup space = DB size × 3
 readonly NETWORK_TIMEOUT=5           # Network connectivity timeout (seconds)
 readonly DB_HEALTH_TIMEOUT=10        # Database health check timeout (seconds)
 
-# Exit codes
-readonly EXIT_SUCCESS=0
+# Exit codes (guarded to prevent collision when multiple libs are sourced)
+[[ -v EXIT_SUCCESS ]] || readonly EXIT_SUCCESS=0
 readonly EXIT_DISK_SPACE=10
 readonly EXIT_MEMORY=11
 readonly EXIT_NETWORK=12

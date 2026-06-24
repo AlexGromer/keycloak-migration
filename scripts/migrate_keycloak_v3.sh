@@ -46,6 +46,7 @@ source "$LIB_DIR/multi_tenant.sh"
 
 # Workspace
 WORK_DIR="${WORK_DIR:-./migration_workspace}"
+mkdir -p "$WORK_DIR"
 STATE_FILE="$WORK_DIR/migration_state.env"
 LOG_FILE="$WORK_DIR/migration_$(date +%Y%m%d_%H%M%S).log"
 

@@ -215,17 +215,24 @@ db_backup() {
                 pg_estimate_backup_time 2>/dev/null || true
             fi
 
-            # Use pg_dump with custom format
-            local pg_version=$(psql --version | grep -oP '\d+' | head -1)
-            local dump_opts="-h $host -p $port -U $user -d $db_name -F c -f $backup_file"
+            # Use pg_dump with appropriate format
+            local pg_version
+            pg_version=$(psql --version | grep -oP '\d+' | head -1)
 
-            # Add parallel jobs if PostgreSQL >= 9.3
+            # Parallel dump requires directory format (-Fd), not custom (-Fc)
+            local dump_format="-Fc"
+            local dump_target="-f $backup_file"
             if [[ "$pg_version" -ge 9 && "$parallel_jobs" -gt 1 ]]; then
-                dump_opts="$dump_opts -j $parallel_jobs"
-                log_info "Using parallel backup with $parallel_jobs jobs"
+                dump_format="-Fd"
+                dump_target="-f ${backup_file%.dump}"
+                log_info "Using parallel backup with $parallel_jobs jobs (directory format)"
             fi
 
-            PGPASSWORD="$pass" pg_dump $dump_opts
+            local -a dump_opts=(-h "$host" -p "$port" -U "$user" -d "$db_name" $dump_format)
+            [[ "$parallel_jobs" -gt 1 ]] && dump_opts+=(-j "$parallel_jobs")
+            dump_opts+=($dump_target)
+
+            PGPASSWORD="$pass" pg_dump "${dump_opts[@]}"
 
             # Verify backup integrity
             if command -v pg_verify_backup &>/dev/null; then

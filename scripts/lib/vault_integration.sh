@@ -24,8 +24,8 @@ VAULT_MOUNT_PATH="${VAULT_MOUNT_PATH:-secret}"
 # Token renewal
 VAULT_TOKEN_RENEW_THRESHOLD="${VAULT_TOKEN_RENEW_THRESHOLD:-300}"  # Renew if TTL < 5 min
 
-# Exit codes
-readonly EXIT_SUCCESS=0
+# Exit codes (guarded to prevent collision when multiple libs are sourced)
+[[ -v EXIT_SUCCESS ]] || readonly EXIT_SUCCESS=0
 readonly EXIT_VAULT_NOT_CONFIGURED=40
 readonly EXIT_VAULT_AUTH_FAILED=41
 readonly EXIT_VAULT_READ_FAILED=42

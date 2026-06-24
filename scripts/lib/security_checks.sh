@@ -19,8 +19,8 @@ readonly SEVERITY_MEDIUM=2
 readonly SEVERITY_LOW=1
 readonly SEVERITY_INFO=0
 
-# Exit codes
-readonly EXIT_SUCCESS=0
+# Exit codes (guarded to prevent collision when multiple libs are sourced)
+[[ -v EXIT_SUCCESS ]] || readonly EXIT_SUCCESS=0
 readonly EXIT_CRITICAL_ISSUES=10
 readonly EXIT_TOOL_MISSING=11
 readonly EXIT_SCAN_FAILED=12

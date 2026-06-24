@@ -116,13 +116,13 @@ test_report "Test Suite 4: Exponential Backoff"
 # Test backoff calculation (without actual sleep)
 # Backoff times: attempt 1 = 1s, attempt 2 = 2s, attempt 3 = 4s
 
-local attempt=1
-local base_delay=1
-local multiplier=2
+attempt=1
+base_delay=1
+multiplier=2
 
 # Formula: base_delay × (multiplier ^ attempt)
 # Attempt 1: 1 × (2 ^ 1) = 2s
-local expected_delay=2
+expected_delay=2
 
 # We won't actually sleep, just verify the function exists
 if declare -F exponential_backoff >/dev/null; then

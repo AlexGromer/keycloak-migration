@@ -15,8 +15,8 @@ readonly VALIDATION_STRICT="strict"     # Reject invalid input
 readonly VALIDATION_SANITIZE="sanitize" # Clean and return safe input
 readonly VALIDATION_WARN="warn"         # Log warning but allow
 
-# Exit codes
-readonly EXIT_SUCCESS=0
+# Exit codes (guarded to prevent collision when multiple libs are sourced)
+[[ -v EXIT_SUCCESS ]] || readonly EXIT_SUCCESS=0
 readonly EXIT_VALIDATION_FAILED=20
 readonly EXIT_DANGEROUS_INPUT=21
 
