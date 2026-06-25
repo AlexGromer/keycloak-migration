@@ -305,9 +305,18 @@ validate_file_path() {
         esac
     fi
 
+    # Resolve relative paths against the allowed base so that a bare filename
+    # (e.g. "safe.txt") is interpreted WITHIN allowed_base rather than the
+    # process CWD. Traversal ("..") was already rejected/handled above, so
+    # prefixing the base here cannot be used to escape it.
+    local resolve_target="$path"
+    if [[ "$path" != /* ]]; then
+        resolve_target="${allowed_base%/}/$path"
+    fi
+
     # Normalize path
     local normalized
-    normalized=$(normalize_path "$path")
+    normalized=$(normalize_path "$resolve_target")
 
     # Check if normalized path is within allowed base
     local normalized_base

@@ -407,14 +407,14 @@ run_comprehensive_security_scan() {
     # 2. ShellCheck scan
     ((total_checks++))
     if check_shellcheck_available; then
-        if run_shellcheck_directory "$project_dir/scripts" "warning" "false"; then
+        local shellcheck_rc=0
+        run_shellcheck_directory "$project_dir/scripts" "warning" "false" || shellcheck_rc=$?
+        if [[ $shellcheck_rc -eq 0 ]]; then
             ((passed_checks++))
+        elif [[ $shellcheck_rc -eq $EXIT_CRITICAL_ISSUES ]]; then
+            ((critical_issues++))
         else
-            if [[ $? -eq $EXIT_CRITICAL_ISSUES ]]; then
-                ((critical_issues++))
-            else
-                ((warnings++))
-            fi
+            ((warnings++))
         fi
     else
         sec_log_warn "Skipping ShellCheck (not available)"
@@ -424,14 +424,14 @@ run_comprehensive_security_scan() {
     # 3. Secrets scan (current files)
     ((total_checks++))
     if check_gitleaks_available; then
-        if run_gitleaks_scan "$project_dir" "" "false"; then
+        local gitleaks_rc=0
+        run_gitleaks_scan "$project_dir" "" "false" || gitleaks_rc=$?
+        if [[ $gitleaks_rc -eq 0 ]]; then
             ((passed_checks++))
+        elif [[ $gitleaks_rc -eq $EXIT_CRITICAL_ISSUES ]]; then
+            ((critical_issues++))
         else
-            if [[ $? -eq $EXIT_CRITICAL_ISSUES ]]; then
-                ((critical_issues++))
-            else
-                ((warnings++))
-            fi
+            ((warnings++))
         fi
     else
         sec_log_warn "Skipping gitleaks (not available)"

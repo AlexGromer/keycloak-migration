@@ -80,16 +80,33 @@ canary_execute_phase() {
     log_info "Step 2/4: Routing $percentage% traffic to new version..."
     canary_update_traffic "$percentage"
 
-    # Step 3: Validation
-    log_info "Step 3/4: Validation (duration: ${duration}s)..."
+    # Step 3: Initial validation (fail fast before the observation window)
+    log_info "Step 3/4: Initial validation (duration: ${duration}s)..."
     if ! canary_validate_phase "$phase_idx" "$duration"; then
         log_error "Phase validation failed"
         return 1
     fi
 
-    # Step 4: Observation period
-    log_info "Step 4/4: Observation period ($duration seconds)..."
-    sleep "$duration"
+    # Step 4: Observation period with PERIODIC validation.
+    # Sleep in increments and re-validate each increment so that canary
+    # degradation occurring DURING the observation window is detected and
+    # aborted (fail fast), instead of being missed by a single blind sleep.
+    local check_interval="${CANARY_VALIDATION_INTERVAL:-30}"
+    log_info "Step 4/4: Observation period ($duration seconds, validating every ${check_interval}s)..."
+    local elapsed=0
+    while (( elapsed < duration )); do
+        local nap="$check_interval"
+        if (( nap > duration - elapsed )); then
+            nap=$(( duration - elapsed ))
+        fi
+        sleep "$nap"
+        elapsed=$(( elapsed + nap ))
+        if ! canary_validate_phase "$phase_idx" "$duration"; then
+            log_error "Canary degraded during observation (at ${elapsed}/${duration}s) — failing fast"
+            return 1
+        fi
+        log_info "Observation checkpoint ${elapsed}/${duration}s: healthy"
+    done
 
     log_success "Phase $phase_name completed successfully"
     return 0
