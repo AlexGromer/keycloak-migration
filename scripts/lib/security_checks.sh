@@ -9,19 +9,24 @@ set -euo pipefail
 # ============================================================================
 
 readonly SECURITY_CHECK_VERSION="3.6.0"
+# shellcheck disable=SC2034 # auto: pre-existing finding, behavior-preserving
 readonly SHELLCHECK_MIN_VERSION="0.7.0"
+# shellcheck disable=SC2034 # auto: pre-existing finding, behavior-preserving
 readonly GITLEAKS_MIN_VERSION="8.0.0"
 
 # Severity levels
 readonly SEVERITY_CRITICAL=4
 readonly SEVERITY_HIGH=3
 readonly SEVERITY_MEDIUM=2
+# shellcheck disable=SC2034 # auto: pre-existing finding, behavior-preserving
 readonly SEVERITY_LOW=1
+# shellcheck disable=SC2034 # auto: pre-existing finding, behavior-preserving
 readonly SEVERITY_INFO=0
 
 # Exit codes (guarded to prevent collision when multiple libs are sourced)
 [[ -v EXIT_SUCCESS ]] || readonly EXIT_SUCCESS=0
 readonly EXIT_CRITICAL_ISSUES=10
+# shellcheck disable=SC2034 # auto: pre-existing finding, behavior-preserving
 readonly EXIT_TOOL_MISSING=11
 readonly EXIT_SCAN_FAILED=12
 

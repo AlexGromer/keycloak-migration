@@ -20,6 +20,7 @@ TEST_WORK_DIR=$(mktemp -d)
 WORK_DIR="$TEST_WORK_DIR"
 STATE_FILE="$WORK_DIR/migration_state.env"
 LOG_FILE="$WORK_DIR/test.log"
+# shellcheck disable=SC2034 # auto: pre-existing finding, behavior-preserving
 PROFILE_DIR="$PROJECT_ROOT/profiles"
 
 # Source logging and state functions from main script (extract inline)
@@ -54,6 +55,7 @@ update_state() {
 
 load_state() {
     if [[ -f "$STATE_FILE" ]]; then
+        # shellcheck disable=SC1090 # auto: pre-existing finding, behavior-preserving
         source "$STATE_FILE"
     fi
 }

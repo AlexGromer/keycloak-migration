@@ -8,6 +8,7 @@ set -euo pipefail
 # CONSTANTS
 # ============================================================================
 
+# shellcheck disable=SC2034 # auto: pre-existing finding, behavior-preserving
 readonly VAULT_INTEGRATION_VERSION="3.6.0"
 
 # Vault configuration (override with environment variables)

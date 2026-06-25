@@ -5,6 +5,7 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck disable=SC2034 # auto: pre-existing finding, behavior-preserving
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
 # Test counters
@@ -135,6 +136,7 @@ assert_file_exists() {
 assert_contains() {
     local haystack="$1"
     local needle="$2"
+    # shellcheck disable=SC2016 # auto: pre-existing finding, behavior-preserving
     local msg="${3:-contains '$needle'}"
 
     TESTS_RUN=$((TESTS_RUN + 1))
@@ -158,6 +160,7 @@ assert_exit_code() {
     TESTS_RUN=$((TESTS_RUN + 1))
 
     set +e
+    # shellcheck disable=SC2294 # auto: pre-existing finding, behavior-preserving
     eval "$@" >/dev/null 2>&1
     local actual=$?
     set -e

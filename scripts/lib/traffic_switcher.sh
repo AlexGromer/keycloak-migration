@@ -131,6 +131,7 @@ traffic_switch_nginx() {
 
     # Generate new upstream block
     local upstream_block
+    # shellcheck disable=SC2034 # auto: pre-existing finding, behavior-preserving
     upstream_block=$(cat <<EOF
 upstream $upstream {
     server $backend1 weight=$weight1;

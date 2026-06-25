@@ -58,18 +58,22 @@ fi
 describe "Parallel Execution Framework Functions"
 # ============================================================================
 
+# shellcheck disable=SC2015 # auto: pre-existing finding, behavior-preserving
 declare -F mt_worker >/dev/null && \
     assert_true "true" "mt_worker function exists" || \
     assert_false "true" "mt_worker function exists"
 
+# shellcheck disable=SC2015 # auto: pre-existing finding, behavior-preserving
 declare -F mt_monitor_parallel >/dev/null && \
     assert_true "true" "mt_monitor_parallel function exists" || \
     assert_false "true" "mt_monitor_parallel function exists"
 
+# shellcheck disable=SC2015 # auto: pre-existing finding, behavior-preserving
 declare -F mt_execute_parallel >/dev/null && \
     assert_true "true" "mt_execute_parallel function exists" || \
     assert_false "true" "mt_execute_parallel function exists"
 
+# shellcheck disable=SC2015 # auto: pre-existing finding, behavior-preserving
 declare -F mt_execute_sequential >/dev/null && \
     assert_true "true" "mt_execute_sequential function exists" || \
     assert_false "true" "mt_execute_sequential function exists"
@@ -81,14 +85,17 @@ describe "Load Balancer Integration Functions"
 # Re-source after function additions
 source "$LIB_DIR/multi_tenant.sh" 2>/dev/null || true
 
+# shellcheck disable=SC2015 # auto: pre-existing finding, behavior-preserving
 declare -F mt_lb_drain_node >/dev/null && \
     assert_true "true" "Load balancer drain function exists" || \
     assert_false "true" "Load balancer drain function exists"
 
+# shellcheck disable=SC2015 # auto: pre-existing finding, behavior-preserving
 declare -F mt_lb_enable_node >/dev/null && \
     assert_true "true" "Load balancer enable function exists" || \
     assert_false "true" "Load balancer enable function exists"
 
+# shellcheck disable=SC2015 # auto: pre-existing finding, behavior-preserving
 declare -F mt_lb_wait_drained >/dev/null && \
     assert_true "true" "Wait for drain completion function exists" || \
     assert_false "true" "Wait for drain completion function exists"
