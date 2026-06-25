@@ -101,6 +101,7 @@ while [[ $# -gt 0 ]]; do
             shift
             ;;
         --verbose)
+            # shellcheck disable=SC2034  # VERBOSE flag kept for parity; DEBUG export drives behavior
             VERBOSE="true"
             export DEBUG=1
             shift

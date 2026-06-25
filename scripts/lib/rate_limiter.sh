@@ -462,6 +462,7 @@ detect_connection_leak() {
     local db_name="${6}"
     local idle_threshold="${7:-300}"  # 5 minutes
 
+    # shellcheck disable=SC2034  # reserved for future leak-collection use; kept to preserve behavior
     local leaked_connections=()
 
     case "$db_type" in

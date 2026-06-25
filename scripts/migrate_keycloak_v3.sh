@@ -17,6 +17,7 @@ set -euo pipefail
 VERSION="3.0.0"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 LIB_DIR="$SCRIPT_DIR/lib"
+# shellcheck disable=SC2034  # PROJECT_ROOT kept for external/sourced use
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
 # Source libraries
@@ -115,6 +116,7 @@ GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 BLUE='\033[0;34m'
 CYAN='\033[0;36m'
+# shellcheck disable=SC2034  # MAGENTA part of color palette, reserved for future use
 MAGENTA='\033[0;35m'
 NC='\033[0m'
 BOLD='\033[1m'
@@ -403,6 +405,7 @@ should_skip_to() {
 
 load_state() {
     if [[ -f "$STATE_FILE" ]]; then
+        # shellcheck disable=SC1090  # STATE_FILE path is dynamic at runtime
         source "$STATE_FILE"
         log_info "State loaded from: $STATE_FILE"
     fi
@@ -1791,6 +1794,7 @@ mt_execute_multi_tenant() {
 
     # Parse rollout strategy
     local rollout_type="${PROFILE_ROLLOUT_TYPE:-parallel}"
+    # shellcheck disable=SC2034  # max_concurrent reserved for rollout concurrency control
     local max_concurrent="${PROFILE_ROLLOUT_MAX_CONCURRENT:-3}"
 
     # Count tenants

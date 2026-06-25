@@ -250,6 +250,7 @@ dist_predownloaded() {
         if command -v unzip &>/dev/null; then
             unzip -q "$archive_path" -d "$install_path"
             # Move files up one level if extracted to subfolder
+            # shellcheck disable=SC2012 # ls -d glob + head -1 preserves exact selection semantics; find would change behavior
             local extracted_dir=$(ls -d "$install_path"/keycloak-* 2>/dev/null | head -1)
             if [[ -d "$extracted_dir" ]]; then
                 mv "$extracted_dir"/* "$install_path"/

@@ -57,6 +57,7 @@ KC_DISTRIBUTION="unknown"
 log_init() {
     LOG_FILE="${OUTPUT_DIR}/discovery.log"
     echo "=== Keycloak Discovery Log ===" > "$LOG_FILE"
+    # shellcheck disable=SC2129  # individual redirects intentional, grouping risks behavior change
     echo "Started: $(date)" >> "$LOG_FILE"
     echo "Version: $VERSION" >> "$LOG_FILE"
     echo "Mode: $(if $DRY_RUN; then echo 'DRY-RUN'; elif $USE_MOCK; then echo 'MOCK'; else echo 'LIVE'; fi)" >> "$LOG_FILE"
@@ -558,6 +559,7 @@ analyze_provider() {
     local report="${provider_dir}/analysis.txt"
 
     echo "=== Provider Analysis: $jar_name ===" > "$report"
+    # shellcheck disable=SC2129  # individual redirects intentional, grouping risks behavior change
     echo "Path: $jar" >> "$report"
     echo "Size: $(du -h "$jar" 2>/dev/null | cut -f1 || echo 'unknown')" >> "$report"
     echo "Analyzed: $(date)" >> "$report"
@@ -651,6 +653,7 @@ analyze_provider() {
         migration_type="B"
     fi
 
+    # shellcheck disable=SC2129  # individual redirects intentional, grouping risks behavior change
     echo "--- Migration Assessment ---" >> "$report"
     echo "javax.* references: $javax_count" >> "$report"
     echo "RESTEasy references: $resteasy_count" >> "$report"
@@ -699,6 +702,7 @@ analyze_postgresql() {
     fi
 
     echo "=== PostgreSQL Analysis ===" > "$db_report"
+    # shellcheck disable=SC2129  # individual redirects intentional, grouping risks behavior change
     echo "Host: $PG_HOST:$PG_PORT" >> "$db_report"
     echo "Database: $PG_DB" >> "$db_report"
     echo "Date: $(date)" >> "$db_report"

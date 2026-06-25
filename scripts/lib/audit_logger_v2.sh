@@ -8,6 +8,7 @@ set -euo pipefail
 # CONSTANTS
 # ============================================================================
 
+# shellcheck disable=SC2034  # version constant referenced by sourcing scripts
 readonly AUDIT_LOGGER_VERSION="3.6.0"
 
 # Log levels
@@ -541,7 +542,7 @@ rotate_log_file() {
     cp "$log_file" "$rotated_file"
 
     # Truncate current log
-    > "$log_file"
+    : > "$log_file"
 
     # Cleanup old rotated logs (keep last N)
     local log_dir

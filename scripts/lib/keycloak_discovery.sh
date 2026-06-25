@@ -239,8 +239,10 @@ kc_discover_all() {
 kc_select_installation() {
     # Interactive selection from discovered installations
 
+    # shellcheck disable=SC2178  # false positive: name collides with array 'discoveries' in other functions; here it is a plain string
     local discoveries=$(kc_discover_all)
 
+    # shellcheck disable=SC2128  # false positive: 'discoveries' is a string here, not an array
     if [[ -z "$discoveries" ]]; then
         echo "ERROR: No Keycloak installations found" >&2
         return 1
@@ -386,6 +388,7 @@ kc_discover_database() {
     shift
     local args=("$@")
 
+    # shellcheck disable=SC2034  # config_path captures command output (preserve call); value intentionally unused downstream
     local config_path=$(kc_get_config_path "$deploy_mode" "${args[@]}")
 
     # Try to read database configuration

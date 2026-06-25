@@ -228,8 +228,9 @@ db_backup() {
                 log_info "Using parallel backup with $parallel_jobs jobs (directory format)"
             fi
 
-            local -a dump_opts=(-h "$host" -p "$port" -U "$user" -d "$db_name" $dump_format)
+            local -a dump_opts=(-h "$host" -p "$port" -U "$user" -d "$db_name" "$dump_format")
             [[ "$parallel_jobs" -gt 1 ]] && dump_opts+=(-j "$parallel_jobs")
+            # shellcheck disable=SC2206 # intentional word-split: "-f <path>" -> two array elements
             dump_opts+=($dump_target)
 
             PGPASSWORD="$pass" pg_dump "${dump_opts[@]}"
@@ -249,6 +250,7 @@ db_backup() {
             # Try Percona XtraBackup first (hot backup, faster)
             if command -v xtrabackup &>/dev/null; then
                 log_info "Using Percona XtraBackup for hot backup"
+                # shellcheck disable=SC2015 # B is `return 0` (cannot fail); C runs only on A failure — intended
                 mysql_use_xtrabackup "$backup_file" 2>/dev/null && return 0 || {
                     log_warn "XtraBackup failed, falling back to mysqldump"
                 }
@@ -322,6 +324,7 @@ db_backup() {
             # Try native CockroachDB backup first (zone-aware, recommended for multi-region)
             if command -v cockroach &>/dev/null && [[ "$backup_file" == nodelocal://* || "$backup_file" == s3://* ]]; then
                 log_info "Using CockroachDB native backup (zone-aware)"
+                # shellcheck disable=SC2015 # B is `return 0` (cannot fail); C runs only on A failure — intended
                 cockroach_zone_aware_backup "$backup_file" 2>/dev/null && return 0 || {
                     log_warn "Native backup failed, falling back to pg_dump"
                 }

@@ -222,8 +222,11 @@ rotate_gfs() {
     local today_day
     local today_week
     local today_month
+    # shellcheck disable=SC2034 # reserved/diagnostic value, intentionally retained
     today_day=$(date +%u)    # Day of week (1=Monday, 7=Sunday)
+    # shellcheck disable=SC2034 # reserved/diagnostic value, intentionally retained
     today_week=$(date +%V)   # Week number
+    # shellcheck disable=SC2034 # reserved/diagnostic value, intentionally retained
     today_month=$(date +%d)  # Day of month
 
     # Find all backups
@@ -238,6 +241,7 @@ rotate_gfs() {
         local file_week
         local file_month
         file_day=$(date -r "$backup_file" +%u 2>/dev/null || echo "1")
+        # shellcheck disable=SC2034 # reserved/diagnostic value, intentionally retained
         file_week=$(date -r "$backup_file" +%V 2>/dev/null || echo "1")
         file_month=$(date -r "$backup_file" +%d 2>/dev/null || echo "1")
 

@@ -203,6 +203,7 @@ bluegreen_deploy_baremetal() {
         log_info "Deploying to $server_host (user: $ssh_user)..."
 
         # SSH and deploy (simplified - real implementation would use Ansible/scripts)
+        # shellcheck disable=SC2029  # client-side expansion of local vars is intentional
         ssh "${ssh_user}@${server_host}" "sudo systemctl stop keycloak-${env_name}; \
             cd /opt/keycloak-${env_name}; \
             wget -O keycloak.tar.gz https://github.com/keycloak/keycloak/releases/download/${version}/keycloak-${version}.tar.gz; \
@@ -482,6 +483,7 @@ bluegreen_cleanup_environment() {
                 server_host=$(yq eval ".blue_green.deployment.${env_name}_servers[$i].host" "$PROFILE_FILE" 2>/dev/null)
                 local ssh_user
                 ssh_user=$(yq eval ".blue_green.deployment.${env_name}_servers[$i].ssh_user" "$PROFILE_FILE" 2>/dev/null || echo "keycloak")
+                # shellcheck disable=SC2029  # client-side expansion of local vars is intentional
                 ssh "${ssh_user}@${server_host}" "sudo systemctl stop keycloak-${env_name}" 2>/dev/null || true
             done
             ;;

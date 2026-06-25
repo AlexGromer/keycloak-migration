@@ -11,6 +11,7 @@ echo "=== Type C Provider Analysis ==="
 echo ""
 
 # Find latest discovery
+# shellcheck disable=SC2012  # ls -dt needed for mtime sort; find rewrite would change behavior
 discovery_dir=$(ls -dt "${SCRIPT_DIR}"/../discovery_* 2>/dev/null | head -1)
 
 if [[ -z "$discovery_dir" ]]; then

@@ -45,6 +45,7 @@ WORK_DIR="${SCRIPT_DIR}/../migration_workspace"
 DOWNLOADS_DIR="${WORK_DIR}/downloads"
 STAGING_DIR="${WORK_DIR}/staging"
 BACKUP_DIR="${WORK_DIR}/backups"
+# shellcheck disable=SC2034  # kept for external/sourced use; removing would change provider config surface
 PROVIDERS_DIR="${WORK_DIR}/providers"
 LOG_DIR="${WORK_DIR}/logs"
 
@@ -755,6 +756,7 @@ do_plan() {
 
     echo ""
     echo "Downloads required:"
+    # shellcheck disable=SC2034  # placeholder accumulator; retained to preserve runtime behavior
     local total_size=0
     for ver in "${MIGRATION_PATH[@]}"; do
         printf "  - keycloak-%s.tar.gz (~200MB)\n" "${KC_VERSIONS[$ver]}"
@@ -796,6 +798,7 @@ do_status() {
 
     echo ""
     echo "Backups:"
+    # shellcheck disable=SC2012  # ls -lh output format intentional; find would change displayed columns
     ls -lh "${BACKUP_DIR}"/*.dump 2>/dev/null | awk '{print "  " $9 " (" $5 ")"}' || echo "  None"
 }
 
@@ -808,12 +811,14 @@ do_rollback() {
     if [[ -z "$target_ver" ]]; then
         log_error "Specify version to rollback to: rollback VERSION"
         echo "Available backups:"
-        ls "${BACKUP_DIR}"/pre_kc*.dump 2>/dev/null | while read f; do
+        # shellcheck disable=SC2012  # ls glob listing intentional; output piped to basename loop
+        ls "${BACKUP_DIR}"/pre_kc*.dump 2>/dev/null | while read -r f; do
             echo "  $(basename "$f")"
         done
         exit 1
     fi
 
+    # shellcheck disable=SC2012  # ls + tail -1 selects newest dump; find rewrite would alter ordering semantics
     local backup_file=$(ls "${BACKUP_DIR}"/pre_kc${target_ver}_*.dump 2>/dev/null | tail -1)
 
     if [[ -z "$backup_file" ]] || [[ ! -f "$backup_file" ]]; then

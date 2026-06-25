@@ -64,6 +64,7 @@ WORK_DIR="${SCRIPT_DIR}/../migration_workspace"
 DOWNLOADS_DIR="${WORK_DIR}/downloads"
 STAGING_DIR="${WORK_DIR}/staging"
 BACKUP_DIR="${WORK_DIR}/backups"
+# shellcheck disable=SC2034  # kept for parity with workspace layout; may be used by sourced state/external tooling
 PROVIDERS_DIR="${WORK_DIR}/providers"
 LOG_DIR="${WORK_DIR}/logs"
 
@@ -259,6 +260,7 @@ init_workspace() {
 
     if [[ -f "$state_file" ]]; then
         log_info "Found existing migration state"
+        # shellcheck disable=SC1090  # state_file path is runtime-dynamic (WORK_DIR), cannot be followed statically
         source "$state_file"
 
         # Check if resume is safe
@@ -990,12 +992,14 @@ do_rollback() {
     if [[ -z "$target_ver" ]]; then
         log_error "Specify version to rollback to: rollback VERSION"
         echo "Available backups:"
-        ls "${BACKUP_DIR}"/pre_kc*.dump 2>/dev/null | while read f; do
+        # shellcheck disable=SC2012  # ls is intentional for simple display; filenames are script-controlled
+        ls "${BACKUP_DIR}"/pre_kc*.dump 2>/dev/null | while read -r f; do
             echo "  $(basename "$f")"
         done
         exit 1
     fi
 
+    # shellcheck disable=SC2012  # ls used to pick newest matching dump by name; filenames are script-controlled
     local backup_file=$(ls "${BACKUP_DIR}"/pre_kc${target_ver}_*.dump 2>/dev/null | tail -1)
 
     if [[ -z "$backup_file" ]] || [[ ! -f "$backup_file" ]]; then
@@ -1145,6 +1149,7 @@ do_status() {
     echo ""
     echo "Backups:"
     if ls "${BACKUP_DIR}"/*.dump >/dev/null 2>&1; then
+        # shellcheck disable=SC2012  # ls -lh used for human-readable size listing; filenames are script-controlled
         ls -lh "${BACKUP_DIR}"/*.dump | awk '{print "  " $9 " (" $5 ")"}' || echo "  None"
     else
         echo "  None"

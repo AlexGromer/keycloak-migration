@@ -261,6 +261,7 @@ EOF
     if [[ -f "$dump_file" ]]; then
         local dump_size=$(du -h "$dump_file" | cut -f1)
         log_success "Dump created: $dump_file ($dump_size) in ${duration}s"
+        # shellcheck disable=SC2129  # sequential appends kept as-is to avoid behavior change
         echo "dump_file=$dump_file" >> "$meta_file"
         echo "dump_size=$dump_size" >> "$meta_file"
         echo "dump_duration=${duration}s" >> "$meta_file"
@@ -324,6 +325,7 @@ EOF
     log_section "BACKUP COMPLETE"
 
     echo "Files created:"
+    # shellcheck disable=SC2012  # ls output formatting is intentional; find refactor risks behavior change
     ls -lh "${BACKUP_DIR}/${backup_name}"* 2>/dev/null | awk '{print "  " $9 " (" $5 ")"}'
 
     echo ""
