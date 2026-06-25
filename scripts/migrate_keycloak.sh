@@ -457,6 +457,7 @@ start_and_migrate() {
         # Check if still running
         if ! kill -0 "$kc_pid" 2>/dev/null; then
             log_error "KC $ver crashed during startup"
+            # shellcheck disable=SC2002 # auto: shellcheck 0.10 (CI) finding, behavior-preserving
             cat "$log_file" | tail -50
             return 1
         fi
@@ -498,6 +499,7 @@ start_and_migrate() {
         return 0
     else
         log_error "KC $ver failed to start within ${MIGRATION_TIMEOUT}s"
+        # shellcheck disable=SC2002 # auto: shellcheck 0.10 (CI) finding, behavior-preserving
         cat "$log_file" | tail -30
         return 1
     fi

@@ -234,6 +234,7 @@ test_providers_loaded() {
 #######################################
 # shellcheck disable=SC2329  # cleanup invoked indirectly via 'trap cleanup EXIT'
 cleanup() {
+    # shellcheck disable=SC2317 # auto: shellcheck 0.10 (CI) finding, behavior-preserving
     rm -f /tmp/kc_admin_token.tmp
 }
 trap cleanup EXIT

@@ -957,6 +957,7 @@ do_migrate() {
             log_info "To rollback: ./$(basename "$0") rollback $ver"
             
             # Stop monitor if running
+            # shellcheck disable=SC2015 # auto: shellcheck 0.10 (CI) finding, behavior-preserving
             [[ -n "$monitor_pid" ]] && kill "$monitor_pid" 2>/dev/null || true
             
             exit 1
@@ -970,6 +971,7 @@ do_migrate() {
     done
 
     # Stop monitor if running
+    # shellcheck disable=SC2015 # auto: shellcheck 0.10 (CI) finding, behavior-preserving
     [[ -n "$monitor_pid" ]] && kill "$monitor_pid" 2>/dev/null || true
 
     log_section "MIGRATION COMPLETE"

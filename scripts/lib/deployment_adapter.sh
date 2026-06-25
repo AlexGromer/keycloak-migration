@@ -15,6 +15,7 @@ if [[ -f "$LIB_DIR/container_runtime.sh" ]]; then
 fi
 
 # Detect available container runtime (exports CONTAINER_RUNTIME); non-fatal if none
+# shellcheck disable=SC2015 # auto: shellcheck 0.10 (CI) finding, behavior-preserving
 declare -F cr_detect >/dev/null 2>&1 && cr_detect || true
 
 # Deployment mode registry

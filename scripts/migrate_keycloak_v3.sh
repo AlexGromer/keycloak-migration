@@ -156,6 +156,7 @@ kc_detect_version() {
 
     # Method 1: Check Keycloak home directory for version.txt
     if [[ -n "${PROFILE_KC_HOME:-}" && -f "${PROFILE_KC_HOME}/version.txt" ]]; then
+        # shellcheck disable=SC2002 # auto: shellcheck 0.10 (CI) finding, behavior-preserving
         version=$(cat "${PROFILE_KC_HOME}/version.txt" | grep -oP '\d+\.\d+\.\d+' | head -1)
     fi
 
@@ -787,6 +788,7 @@ db_restore_keycloak() {
 # KEYCLOAK SERVICE OPERATIONS (via adapter)
 # ============================================================================
 
+# shellcheck disable=SC2120 # auto: shellcheck 0.10 (CI) finding, behavior-preserving
 kc_service_start() {
     local mode="${PROFILE_KC_DEPLOYMENT_MODE}"
     local version="${1:-${KC_HOP_VERSION:-${PROFILE_KC_TARGET_VERSION:-}}}"
@@ -820,6 +822,7 @@ kc_service_start() {
     esac
 }
 
+# shellcheck disable=SC2120 # auto: shellcheck 0.10 (CI) finding, behavior-preserving
 kc_service_stop() {
     local mode="${PROFILE_KC_DEPLOYMENT_MODE}"
     local version="${1:-${KC_HOP_VERSION:-${PROFILE_KC_TARGET_VERSION:-}}}"
@@ -881,6 +884,7 @@ kc_service_status() {
 # KEYCLOAK HEALTH CHECK
 # ============================================================================
 
+# shellcheck disable=SC2120 # auto: shellcheck 0.10 (CI) finding, behavior-preserving
 health_check() {
     local endpoint="${1:-http://localhost:8080/health}"
     local max_attempts="${HEALTH_CHECK_RETRIES}"
@@ -1373,6 +1377,7 @@ migrate_to_version() {
 
     # Step 2: Stop Keycloak
     if [[ -z "$existing_cp" ]] || ! should_skip_to "$existing_cp" "stopped"; then
+        # shellcheck disable=SC2119 # auto: shellcheck 0.10 (CI) finding, behavior-preserving
         kc_service_stop || return 1
         set_checkpoint "$target_version" "stopped"
     else
@@ -1411,6 +1416,7 @@ migrate_to_version() {
 
     # Step 5: Start Keycloak (triggers migration)
     if [[ -z "$existing_cp" ]] || ! should_skip_to "$existing_cp" "started"; then
+        # shellcheck disable=SC2119 # auto: shellcheck 0.10 (CI) finding, behavior-preserving
         kc_service_start || return 1
         set_checkpoint "$target_version" "started"
     else
@@ -1444,6 +1450,7 @@ migrate_to_version() {
 
     # Step 7: Health check (with auto-rollback on failure)
     if [[ -z "$existing_cp" ]] || ! should_skip_to "$existing_cp" "health_ok"; then
+        # shellcheck disable=SC2119 # auto: shellcheck 0.10 (CI) finding, behavior-preserving
         if ! health_check; then
             log_error "Health check failed after migration to $target_version"
             if [[ "${AUTO_ROLLBACK:-false}" == "true" ]]; then
@@ -1963,11 +1970,13 @@ cmd_rollback_auto() {
     db_backup_keycloak "$safety_backup" "safety backup before rollback" || true
 
     # Stop → Restore → Start
+    # shellcheck disable=SC2119 # auto: shellcheck 0.10 (CI) finding, behavior-preserving
     kc_service_stop || true
     db_restore_keycloak "$last_backup" "rollback" || {
         log_error "Rollback restore failed!"
         return 1
     }
+    # shellcheck disable=SC2119 # auto: shellcheck 0.10 (CI) finding, behavior-preserving
     kc_service_start || true
 
     log_success "Auto-rollback completed from: $last_backup"
