@@ -577,7 +577,8 @@ check_profile_syntax() {
 
     # YAML syntax check (if yq available)
     if command -v yq >/dev/null 2>&1; then
-        if yq eval '.' "$profile_file" >/dev/null 2>&1; then
+        # yq flavor-agnostic: 'yq eval .' (mikefarah/Go-yq) OR 'yq .' (Go-yq v4 / kislyuk python-yq)
+        if yq eval '.' "$profile_file" >/dev/null 2>&1 || yq '.' "$profile_file" >/dev/null 2>&1; then
             preflight_log_success "Profile YAML syntax: Valid"
         else
             preflight_log_error "Profile YAML syntax: Invalid"
