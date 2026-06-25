@@ -25,12 +25,14 @@ readonly MIN_BACKUP_SPACE_MULTIPLIER=3  # Backup space = DB size × 3
 readonly NETWORK_TIMEOUT=5           # Network connectivity timeout (seconds)
 readonly DB_HEALTH_TIMEOUT=10        # Database health check timeout (seconds)
 
-# Exit codes
-readonly EXIT_SUCCESS=0
+# Exit codes (guarded to prevent collision when multiple libs are sourced)
+[[ -v EXIT_SUCCESS ]] || readonly EXIT_SUCCESS=0
 readonly EXIT_DISK_SPACE=10
+# shellcheck disable=SC2034  # exit-code constant, part of public set (may be used by sourcing scripts)
 readonly EXIT_MEMORY=11
 readonly EXIT_NETWORK=12
 readonly EXIT_DB_HEALTH=13
+# shellcheck disable=SC2034  # exit-code constant, part of public set (may be used by sourcing scripts)
 readonly EXIT_KEYCLOAK_HEALTH=14
 readonly EXIT_DEPENDENCIES=15
 readonly EXIT_CONFIG=16
@@ -575,7 +577,8 @@ check_profile_syntax() {
 
     # YAML syntax check (if yq available)
     if command -v yq >/dev/null 2>&1; then
-        if yq eval '.' "$profile_file" >/dev/null 2>&1; then
+        # yq flavor-agnostic: 'yq eval .' (mikefarah/Go-yq) OR 'yq .' (Go-yq v4 / kislyuk python-yq)
+        if yq eval '.' "$profile_file" >/dev/null 2>&1 || yq '.' "$profile_file" >/dev/null 2>&1; then
             preflight_log_success "Profile YAML syntax: Valid"
         else
             preflight_log_error "Profile YAML syntax: Invalid"
@@ -699,7 +702,9 @@ run_all_preflight_checks() {
 
     # 3. Keycloak Health (optional)
     if [[ -n "$kc_url" ]]; then
+        # shellcheck disable=SC2015  # intentional A && B || C tally; preserving existing behavior
         check_keycloak_status "$kc_url" && ((passed_checks++)) || ((warnings++))
+        # shellcheck disable=SC2015  # intentional A && B || C tally; preserving existing behavior
         check_keycloak_admin_credentials "$kc_url" "$admin_user" "$admin_pass" && ((passed_checks++)) || ((warnings++))
     else
         ((warnings++))
@@ -729,6 +734,7 @@ run_all_preflight_checks() {
         failure_reasons+=("Missing dependencies")
     fi
 
+    # shellcheck disable=SC2015  # intentional A && B || C tally; preserving existing behavior
     check_java_version && ((passed_checks++)) || ((warnings++))
 
     # 6. Configuration
@@ -739,6 +745,7 @@ run_all_preflight_checks() {
         failure_reasons+=("Profile syntax")
     fi
 
+    # shellcheck disable=SC2015  # intentional A && B || C tally; preserving existing behavior
     check_credentials "$db_user" "$db_pass" "$admin_user" "$admin_pass" && ((passed_checks++)) || ((warnings++))
 
     # Summary

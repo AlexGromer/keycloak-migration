@@ -88,12 +88,15 @@ echo "Hello, World!"
 exit 0
 EOF
 
-# Create test script (with issues)
+# Create test script (with a warning-level issue).
+# NOTE: unquoted variable expansion (SC2086) is only *info* severity, so it is
+# not reported at -S warning. Use an unquoted command substitution (SC2046),
+# which IS warning severity, so the "warning" scan reliably flags this script.
 cat > "$WORK_DIR/test_issues.sh" <<'EOF'
 #!/bin/bash
-# Missing quotes around variable (SC2086)
+# Unquoted command substitution (SC2046 - warning) + unquoted var (SC2086 - info)
 file=$1
-cat $file
+cat $(echo $file)
 EOF
 
 # Test ShellCheck on valid script

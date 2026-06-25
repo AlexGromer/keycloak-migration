@@ -241,6 +241,7 @@ step_database_location() {
     esac
 
     PROFILE_DB_NAME=$(ask_text "Database name" "keycloak")
+    # shellcheck disable=SC2034  # consumed externally by profile_save (profile_manager.sh)
     PROFILE_DB_USER=$(ask_text "Database user" "keycloak")
     PROFILE_DB_CREDENTIALS_SOURCE=$(ask_choice "Password source?" \
         "Environment variable" \
@@ -322,7 +323,9 @@ step_distribution_mode() {
 
     # Container-specific settings
     if [[ "$PROFILE_KC_DISTRIBUTION_MODE" == "container" ]]; then
+        # shellcheck disable=SC2034  # consumed externally by profile_save (profile_manager.sh)
         PROFILE_CONTAINER_REGISTRY=$(ask_text "Container registry" "docker.io")
+        # shellcheck disable=SC2034  # consumed externally by profile_save (profile_manager.sh)
         PROFILE_CONTAINER_IMAGE=$(ask_text "Image name" "keycloak/keycloak")
         PROFILE_CONTAINER_PULL_POLICY=$(ask_choice "Image pull policy?" \
             "IfNotPresent (default)" \
@@ -362,6 +365,7 @@ step_cluster_mode() {
         if [[ -z "${PROFILE_K8S_NAMESPACE:-}" ]]; then
             PROFILE_K8S_NAMESPACE=$(ask_text "Kubernetes namespace" "keycloak")
             PROFILE_K8S_DEPLOYMENT=$(ask_text "Deployment name" "keycloak")
+            # shellcheck disable=SC2034  # consumed externally by profile_save (profile_manager.sh)
             PROFILE_K8S_SERVICE=$(ask_text "Service name" "keycloak-http")
         fi
 

@@ -8,6 +8,7 @@ set -euo pipefail
 # CONSTANTS
 # ============================================================================
 
+# shellcheck disable=SC2034  # version constant referenced by external scripts that source this lib
 readonly INPUT_VALIDATOR_VERSION="3.6.0"
 
 # Validation modes
@@ -15,8 +16,8 @@ readonly VALIDATION_STRICT="strict"     # Reject invalid input
 readonly VALIDATION_SANITIZE="sanitize" # Clean and return safe input
 readonly VALIDATION_WARN="warn"         # Log warning but allow
 
-# Exit codes
-readonly EXIT_SUCCESS=0
+# Exit codes (guarded to prevent collision when multiple libs are sourced)
+[[ -v EXIT_SUCCESS ]] || readonly EXIT_SUCCESS=0
 readonly EXIT_VALIDATION_FAILED=20
 readonly EXIT_DANGEROUS_INPUT=21
 
@@ -104,7 +105,7 @@ validate_sql_identifier() {
             "$VALIDATION_SANITIZE")
                 # Remove invalid characters
                 local sanitized
-                sanitized=$(echo "$identifier" | sed 's/[^a-zA-Z0-9_]//g')
+                sanitized="${identifier//[^a-zA-Z0-9_]/}"
                 echo "$sanitized"
                 return 0
                 ;;
@@ -185,6 +186,7 @@ sanitize_command_arg() {
 
     # Remove dangerous characters: ; & | ` $ ( ) < > ~ \ '
     local sanitized
+    # shellcheck disable=SC2016  # single quotes intentional: chars are literal arguments to tr -d, not for expansion
     sanitized=$(echo "$input" | tr -d ';& |'"'"'`$()<>~\"')
 
     echo "$sanitized"
@@ -305,9 +307,18 @@ validate_file_path() {
         esac
     fi
 
+    # Resolve relative paths against the allowed base so that a bare filename
+    # (e.g. "safe.txt") is interpreted WITHIN allowed_base rather than the
+    # process CWD. Traversal ("..") was already rejected/handled above, so
+    # prefixing the base here cannot be used to escape it.
+    local resolve_target="$path"
+    if [[ "$path" != /* ]]; then
+        resolve_target="${allowed_base%/}/$path"
+    fi
+
     # Normalize path
     local normalized
-    normalized=$(normalize_path "$path")
+    normalized=$(normalize_path "$resolve_target")
 
     # Check if normalized path is within allowed base
     local normalized_base
@@ -550,6 +561,7 @@ validate_url() {
     fi
 
     # Check if scheme is allowed
+    # shellcheck disable=SC2076  # literal substring match intended (quoted), not regex matching
     if [[ ! " $allowed_schemes " =~ " $scheme " ]]; then
         case "$mode" in
             "$VALIDATION_STRICT")

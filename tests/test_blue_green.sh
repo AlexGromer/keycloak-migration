@@ -63,19 +63,19 @@ if [[ -f "$PROFILE_DIR/blue-green-k8s-istio.yaml" ]]; then
     export PROFILE_FILE="$PROFILE_DIR/blue-green-k8s-istio.yaml"
 
     # Extract mode
-    mode=$(yq eval '.profile.strategy' "$PROFILE_FILE" 2>/dev/null || echo "")
+    mode=$(yq_get '.profile.strategy' "$PROFILE_FILE" 2>/dev/null || echo "")
     assert_equals "blue_green" "$mode" "Profile strategy detected as blue_green"
 
     # Extract old environment
-    old_env=$(yq eval '.blue_green.old_environment' "$PROFILE_FILE" 2>/dev/null || echo "")
+    old_env=$(yq_get '.blue_green.old_environment' "$PROFILE_FILE" 2>/dev/null || echo "")
     assert_equals "blue" "$old_env" "Old environment is 'blue'"
 
     # Extract new environment
-    new_env=$(yq eval '.blue_green.new_environment' "$PROFILE_FILE" 2>/dev/null || echo "")
+    new_env=$(yq_get '.blue_green.new_environment' "$PROFILE_FILE" 2>/dev/null || echo "")
     assert_equals "green" "$new_env" "New environment is 'green'"
 
     # Extract traffic router type
-    router_type=$(yq eval '.blue_green.traffic_router.type' "$PROFILE_FILE" 2>/dev/null || echo "")
+    router_type=$(yq_get '.blue_green.traffic_router.type' "$PROFILE_FILE" 2>/dev/null || echo "")
     assert_equals "istio" "$router_type" "Traffic router is Istio"
 else
     assert_true "true" "Profile file not found (skip profile tests)"
@@ -106,7 +106,7 @@ EOF
 export PROFILE_FILE="$mock_profile"
 
 # Test deployment type detection
-deployment_type=$(yq eval '.blue_green.deployment.type' "$PROFILE_FILE" 2>/dev/null || echo "")
+deployment_type=$(yq_get '.blue_green.deployment.type' "$PROFILE_FILE" 2>/dev/null || echo "")
 assert_equals "kubernetes" "$deployment_type" "Deployment type detected"
 
 # ============================================================================

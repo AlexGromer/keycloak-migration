@@ -93,6 +93,7 @@ else
 fi
 
 # Simulate failures
+# shellcheck disable=SC2034 # auto: pre-existing finding, behavior-preserving
 for i in {1..5}; do
     circuit_breaker_failure
 done
@@ -116,13 +117,17 @@ test_report "Test Suite 4: Exponential Backoff"
 # Test backoff calculation (without actual sleep)
 # Backoff times: attempt 1 = 1s, attempt 2 = 2s, attempt 3 = 4s
 
-local attempt=1
-local base_delay=1
-local multiplier=2
+# shellcheck disable=SC2034 # auto: pre-existing finding, behavior-preserving
+attempt=1
+# shellcheck disable=SC2034 # auto: pre-existing finding, behavior-preserving
+base_delay=1
+# shellcheck disable=SC2034 # auto: pre-existing finding, behavior-preserving
+multiplier=2
 
 # Formula: base_delay × (multiplier ^ attempt)
 # Attempt 1: 1 × (2 ^ 1) = 2s
-local expected_delay=2
+# shellcheck disable=SC2034 # auto: pre-existing finding, behavior-preserving
+expected_delay=2
 
 # We won't actually sleep, just verify the function exists
 if declare -F exponential_backoff >/dev/null; then

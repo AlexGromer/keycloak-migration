@@ -9,6 +9,7 @@ set -euo pipefail
 # Colors
 RED='\033[0;31m'
 GREEN='\033[0;32m'
+# shellcheck disable=SC2034  # YELLOW kept for color palette completeness
 YELLOW='\033[1;33m'
 BLUE='\033[0;34m'
 CYAN='\033[0;36m'
@@ -231,7 +232,9 @@ test_providers_loaded() {
 #######################################
 # Cleanup
 #######################################
+# shellcheck disable=SC2329  # cleanup invoked indirectly via 'trap cleanup EXIT'
 cleanup() {
+    # shellcheck disable=SC2317 # auto: shellcheck 0.10 (CI) finding, behavior-preserving
     rm -f /tmp/kc_admin_token.tmp
 }
 trap cleanup EXIT

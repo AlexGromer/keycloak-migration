@@ -8,6 +8,7 @@
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
+# shellcheck disable=SC2034  # part of color palette, kept for completeness
 BLUE='\033[0;34m'
 CYAN='\033[0;36m'
 MAGENTA='\033[0;35m'
@@ -17,11 +18,14 @@ DIM='\033[2m'
 
 # Unicode symbols
 CHECK="✓"
+# shellcheck disable=SC2034  # symbol kept for completeness
 CROSS="✗"
+# shellcheck disable=SC2034  # symbol kept for completeness
 ARROW="→"
 SPINNER=('⠋' '⠙' '⠹' '⠸' '⠼' '⠴' '⠦' '⠧' '⠇' '⠏')
 
 # Monitor state
+# shellcheck disable=SC2034  # reserved monitor state field
 MONITOR_PID=""
 STATE_FILE=""
 LOG_FILE=""
@@ -69,6 +73,7 @@ draw_progress_bar() {
     [[ $percent -ge 75 ]] && color="$GREEN"
     [[ $percent -lt 25 ]] && color="$RED"
 
+    # shellcheck disable=SC2059  # format intentionally embeds color escape codes
     printf "${color}["
     printf "%${filled}s" | tr ' ' '='
     printf "%${empty}s" | tr ' ' '-'
@@ -144,6 +149,7 @@ parse_state() {
         return
     fi
 
+    # shellcheck disable=SC1090  # state file path is dynamic (work_dir-based)
     source "$STATE_FILE" 2>/dev/null || true
 
     local current_ver="${CURRENT_VERSION:-16}"
@@ -222,6 +228,7 @@ draw_screen() {
 
     # Get KC process info (if running)
     local kc_info=$(get_kc_process_info "$current_ver")
+    # shellcheck disable=SC2034  # kc_vsz captured from positional read, intentionally unused
     IFS=':' read -r kc_status kc_pid kc_cpu kc_mem kc_vsz kc_rss <<< "$kc_info"
 
     # Time info
@@ -285,6 +292,7 @@ draw_screen() {
         printf "  CPU:    %5.1f%%\n" "$kc_cpu"
         printf "  Memory: %5.1f%% (%s KB)\n" "$kc_mem" "$kc_rss"
     else
+        # shellcheck disable=SC2059  # format intentionally embeds color escape codes
         printf "  ${DIM}Status: NOT RUNNING${NC}\n"
     fi
     echo ""
@@ -312,6 +320,7 @@ monitor_loop() {
 
         # Check if migration finished
         if [[ -f "$STATE_FILE" ]]; then
+            # shellcheck disable=SC1090  # state file path is dynamic (work_dir-based)
             source "$STATE_FILE" 2>/dev/null || true
             if [[ "$CURRENT_VERSION" == "26" ]] && [[ "$LAST_SUCCESSFUL" == "26" ]]; then
                 # Migration complete

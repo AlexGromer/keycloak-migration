@@ -28,7 +28,14 @@ pg_auto_tune_parallel_jobs() {
     if (( $(echo "$db_size_gb < 2" | bc -l) )); then
         optimal_jobs=1
     elif (( $(echo "$db_size_gb < 10" | bc -l) )); then
-        optimal_jobs=$(( db_size_gb / 2 ))
+        # db_size_gb may be a float (e.g. "5.25"); bash integer arithmetic
+        # would error on the decimal point, so divide via bc and round.
+        if command -v bc >/dev/null 2>&1; then
+            optimal_jobs=$(printf "%.0f" "$(echo "$db_size_gb / 2" | bc -l)")
+        else
+            # Integer fallback: strip the fractional part before dividing.
+            optimal_jobs=$(( ${db_size_gb%%.*} / 2 ))
+        fi
     else
         optimal_jobs=$cpu_cores
     fi

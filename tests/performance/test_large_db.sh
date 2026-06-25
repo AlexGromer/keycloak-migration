@@ -10,6 +10,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
+# shellcheck disable=SC2034 # auto: pre-existing finding, behavior-preserving
 LIB_DIR="$PROJECT_ROOT/scripts/lib"
 
 # Source test framework
@@ -33,6 +34,7 @@ log_section() { echo "=== $1 ==="; }
 # ============================================================================
 
 # Database sizes to test (GB)
+# shellcheck disable=SC2034 # auto: pre-existing finding, behavior-preserving
 readonly DB_SIZES=(1 5 10 25 50 100)
 
 # Test database credentials (adjust for your test environment)

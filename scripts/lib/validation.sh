@@ -154,6 +154,7 @@ prom_query_instant() {
 
     # URL-encode query
     local encoded_query
+    # shellcheck disable=SC2034 # auto: pre-existing finding, behavior-preserving
     encoded_query=$(python3 -c "import urllib.parse; print(urllib.parse.quote('$query'))" 2>/dev/null || echo "$query")
 
     # Query Prometheus

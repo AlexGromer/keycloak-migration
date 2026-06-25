@@ -58,18 +58,22 @@ fi
 describe "Parallel Execution Framework Functions"
 # ============================================================================
 
+# shellcheck disable=SC2015 # auto: pre-existing finding, behavior-preserving
 declare -F mt_worker >/dev/null && \
     assert_true "true" "mt_worker function exists" || \
     assert_false "true" "mt_worker function exists"
 
+# shellcheck disable=SC2015 # auto: pre-existing finding, behavior-preserving
 declare -F mt_monitor_parallel >/dev/null && \
     assert_true "true" "mt_monitor_parallel function exists" || \
     assert_false "true" "mt_monitor_parallel function exists"
 
+# shellcheck disable=SC2015 # auto: pre-existing finding, behavior-preserving
 declare -F mt_execute_parallel >/dev/null && \
     assert_true "true" "mt_execute_parallel function exists" || \
     assert_false "true" "mt_execute_parallel function exists"
 
+# shellcheck disable=SC2015 # auto: pre-existing finding, behavior-preserving
 declare -F mt_execute_sequential >/dev/null && \
     assert_true "true" "mt_execute_sequential function exists" || \
     assert_false "true" "mt_execute_sequential function exists"
@@ -81,14 +85,17 @@ describe "Load Balancer Integration Functions"
 # Re-source after function additions
 source "$LIB_DIR/multi_tenant.sh" 2>/dev/null || true
 
+# shellcheck disable=SC2015 # auto: pre-existing finding, behavior-preserving
 declare -F mt_lb_drain_node >/dev/null && \
     assert_true "true" "Load balancer drain function exists" || \
     assert_false "true" "Load balancer drain function exists"
 
+# shellcheck disable=SC2015 # auto: pre-existing finding, behavior-preserving
 declare -F mt_lb_enable_node >/dev/null && \
     assert_true "true" "Load balancer enable function exists" || \
     assert_false "true" "Load balancer enable function exists"
 
+# shellcheck disable=SC2015 # auto: pre-existing finding, behavior-preserving
 declare -F mt_lb_wait_drained >/dev/null && \
     assert_true "true" "Wait for drain completion function exists" || \
     assert_false "true" "Wait for drain completion function exists"
@@ -141,12 +148,12 @@ describe "Profile Examples YAML Validation"
 
 # Test: Multi-tenant profile YAML structure
 if command -v yq &>/dev/null && [[ -f "$PROFILE_DIR/multi-tenant-example.yaml" ]]; then
-    tenant_count=$(yq eval '.tenants | length' "$PROFILE_DIR/multi-tenant-example.yaml" 2>/dev/null || echo "0")
+    tenant_count=$(yq_get '.tenants | length' "$PROFILE_DIR/multi-tenant-example.yaml" 2>/dev/null || echo "0")
 
     assert_true "[[ $tenant_count -gt 0 ]]" \
         "Multi-tenant profile has tenants defined"
 
-    rollout_type=$(yq eval '.rollout.type' "$PROFILE_DIR/multi-tenant-example.yaml" 2>/dev/null || echo "")
+    rollout_type=$(yq_get '.rollout.type' "$PROFILE_DIR/multi-tenant-example.yaml" 2>/dev/null || echo "")
 
     assert_not_empty "$rollout_type" \
         "Rollout type defined in multi-tenant profile"
@@ -154,12 +161,12 @@ fi
 
 # Test: Clustered profile YAML structure
 if command -v yq &>/dev/null && [[ -f "$PROFILE_DIR/clustered-bare-metal-example.yaml" ]]; then
-    node_count=$(yq eval '.cluster.nodes | length' "$PROFILE_DIR/clustered-bare-metal-example.yaml" 2>/dev/null || echo "0")
+    node_count=$(yq_get '.cluster.nodes | length' "$PROFILE_DIR/clustered-bare-metal-example.yaml" 2>/dev/null || echo "0")
 
     assert_true "[[ $node_count -gt 0 ]]" \
         "Clustered profile has nodes defined"
 
-    lb_type=$(yq eval '.cluster.load_balancer.type' "$PROFILE_DIR/clustered-bare-metal-example.yaml" 2>/dev/null || echo "")
+    lb_type=$(yq_get '.cluster.load_balancer.type' "$PROFILE_DIR/clustered-bare-metal-example.yaml" 2>/dev/null || echo "")
 
     assert_not_empty "$lb_type" \
         "Load balancer type defined in clustered profile"

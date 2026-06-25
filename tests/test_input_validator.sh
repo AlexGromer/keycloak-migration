@@ -321,17 +321,20 @@ fi
 test_report "Test Suite 11: Log Message Sanitization"
 
 # Test newline removal
+# NOTE: assert the sanitized value directly. A previous `grep -qv '\n'` check
+# was broken — in grep, '\n' matches the literal letter 'n', not a newline, so
+# it tested nothing (and failed on any string containing 'n'/'t').
 result=$(sanitize_log_message "Line 1
 Line 2")
-assert_true "echo '$result' | grep -qv '\n'" "Log sanitize: Newline removed"
+assert_equals "Line 1Line 2" "$result" "Log sanitize: Newline removed"
 
 # Test carriage return removal
 result=$(sanitize_log_message "Test$(printf '\r')message")
-assert_true "echo '$result' | grep -qv '\r'" "Log sanitize: Carriage return removed"
+assert_equals "Testmessage" "$result" "Log sanitize: Carriage return removed"
 
 # Test tab removal
 result=$(sanitize_log_message "Test$(printf '\t')message")
-assert_true "echo '$result' | grep -qv '\t'" "Log sanitize: Tab removed"
+assert_equals "Testmessage" "$result" "Log sanitize: Tab removed"
 
 # ============================================================================
 # TEST SUITE 12: Email Validation
@@ -378,7 +381,7 @@ result=$(validate_url "https://example.com" "strict" "https http")
 assert_equals "https://example.com" "$result" "URL: Valid HTTPS"
 
 result=$(validate_url "http://example.com/path" "strict" "https http")
-assert_equals "http://example.com/path" "URL: Valid HTTP with path"
+assert_equals "http://example.com/path" "$result" "URL: Valid HTTP with path"
 
 # Invalid scheme
 if validate_url "ftp://example.com" "strict" "https http" >/dev/null 2>&1; then

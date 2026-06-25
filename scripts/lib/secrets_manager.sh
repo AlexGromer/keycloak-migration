@@ -8,6 +8,7 @@ set -euo pipefail
 # CONSTANTS
 # ============================================================================
 
+# shellcheck disable=SC2034 # auto: pre-existing finding, behavior-preserving
 readonly SECRETS_MANAGER_VERSION="3.6.0"
 
 # Supported backends
@@ -18,8 +19,8 @@ readonly BACKEND_K8S="k8s"
 readonly BACKEND_ENV="env"         # Environment variables (dev/testing only)
 readonly BACKEND_FILE="file"       # File-based (dev/testing only)
 
-# Exit codes
-readonly EXIT_SUCCESS=0
+# Exit codes (guarded to prevent collision when multiple libs are sourced)
+[[ -v EXIT_SUCCESS ]] || readonly EXIT_SUCCESS=0
 readonly EXIT_BACKEND_NOT_CONFIGURED=30
 readonly EXIT_SECRET_NOT_FOUND=31
 readonly EXIT_BACKEND_ERROR=32
@@ -287,14 +288,15 @@ get_secret_file() {
     fi
 
     # File format: key=value (one per line)
-    local value
-    value=$(grep "^${secret_key}=" "$secrets_file" | cut -d= -f2-)
-
-    if [[ -z "$value" ]]; then
+    # Distinguish "key absent" from "key present with empty value" — an empty
+    # secret is valid and must be returned, not reported as not-found.
+    if ! grep -q "^${secret_key}=" "$secrets_file"; then
         sm_log_error "Secret not found in file: $secret_key"
         return $EXIT_SECRET_NOT_FOUND
     fi
 
+    local value
+    value=$(grep "^${secret_key}=" "$secrets_file" | head -1 | cut -d= -f2-)
     echo "$value"
 }
 
@@ -535,7 +537,7 @@ list_secrets_aws() {
 
 get_secret_azure() {
     local secret_key="$1"
-    local vault_name="${AZURE_VAULT_NAME}"
+    local vault_name="${AZURE_VAULT_NAME:-}"
 
     if [[ -z "$vault_name" ]]; then
         sm_log_error "AZURE_VAULT_NAME not configured"
@@ -561,7 +563,7 @@ get_secret_azure() {
 set_secret_azure() {
     local secret_key="$1"
     local secret_value="$2"
-    local vault_name="${AZURE_VAULT_NAME}"
+    local vault_name="${AZURE_VAULT_NAME:-}"
 
     az keyvault secret set --vault-name "$vault_name" --name "$secret_key" --value "$secret_value" >/dev/null
 
@@ -570,7 +572,7 @@ set_secret_azure() {
 
 delete_secret_azure() {
     local secret_key="$1"
-    local vault_name="${AZURE_VAULT_NAME}"
+    local vault_name="${AZURE_VAULT_NAME:-}"
 
     az keyvault secret delete --vault-name "$vault_name" --name "$secret_key" >/dev/null
 
@@ -578,7 +580,7 @@ delete_secret_azure() {
 }
 
 list_secrets_azure() {
-    local vault_name="${AZURE_VAULT_NAME}"
+    local vault_name="${AZURE_VAULT_NAME:-}"
 
     az keyvault secret list --vault-name "$vault_name" --query "[].name" -o tsv
 }

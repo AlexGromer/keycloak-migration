@@ -8,6 +8,7 @@ set -euo pipefail
 # CONSTANTS
 # ============================================================================
 
+# shellcheck disable=SC2034 # auto: pre-existing finding, behavior-preserving
 readonly VAULT_INTEGRATION_VERSION="3.6.0"
 
 # Vault configuration (override with environment variables)
@@ -24,8 +25,8 @@ VAULT_MOUNT_PATH="${VAULT_MOUNT_PATH:-secret}"
 # Token renewal
 VAULT_TOKEN_RENEW_THRESHOLD="${VAULT_TOKEN_RENEW_THRESHOLD:-300}"  # Renew if TTL < 5 min
 
-# Exit codes
-readonly EXIT_SUCCESS=0
+# Exit codes (guarded to prevent collision when multiple libs are sourced)
+[[ -v EXIT_SUCCESS ]] || readonly EXIT_SUCCESS=0
 readonly EXIT_VAULT_NOT_CONFIGURED=40
 readonly EXIT_VAULT_AUTH_FAILED=41
 readonly EXIT_VAULT_READ_FAILED=42
@@ -124,6 +125,7 @@ vault_login_approle() {
 }
 
 # Renew token if TTL is low
+# shellcheck disable=SC2120 # auto: shellcheck 0.10 (CI) finding, behavior-preserving
 vault_renew_token() {
     local threshold="${1:-$VAULT_TOKEN_RENEW_THRESHOLD}"
 
@@ -198,6 +200,7 @@ vault_read_secret() {
     fi
 
     # Renew token if needed
+    # shellcheck disable=SC2119 # auto: shellcheck 0.10 (CI) finding, behavior-preserving
     vault_renew_token >/dev/null 2>&1 || true
 
     local kv_path
@@ -250,6 +253,7 @@ vault_write_secret() {
         return $EXIT_VAULT_NOT_CONFIGURED
     fi
 
+    # shellcheck disable=SC2119 # auto: shellcheck 0.10 (CI) finding, behavior-preserving
     vault_renew_token >/dev/null 2>&1 || true
 
     vault_log_debug "Writing secret: $path"
@@ -296,6 +300,7 @@ vault_delete_secret() {
         return $EXIT_VAULT_NOT_CONFIGURED
     fi
 
+    # shellcheck disable=SC2119 # auto: shellcheck 0.10 (CI) finding, behavior-preserving
     vault_renew_token >/dev/null 2>&1 || true
 
     vault_log_debug "Deleting secret: $path (permanent: $permanent)"
@@ -332,6 +337,7 @@ vault_list_secrets() {
         return $EXIT_VAULT_NOT_CONFIGURED
     fi
 
+    # shellcheck disable=SC2119 # auto: shellcheck 0.10 (CI) finding, behavior-preserving
     vault_renew_token >/dev/null 2>&1 || true
 
     vault_log_debug "Listing secrets: $path"

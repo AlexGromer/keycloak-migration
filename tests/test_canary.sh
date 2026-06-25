@@ -66,19 +66,19 @@ if [[ -f "$PROFILE_DIR/canary-k8s-istio.yaml" ]]; then
     export PROFILE_FILE="$PROFILE_DIR/canary-k8s-istio.yaml"
 
     # Extract mode
-    mode=$(yq eval '.profile.strategy' "$PROFILE_FILE" 2>/dev/null || echo "")
+    mode=$(yq_get '.profile.strategy' "$PROFILE_FILE" 2>/dev/null || echo "")
     assert_equals "canary" "$mode" "Profile strategy detected as canary"
 
     # Extract phases count
-    phases_count=$(yq eval '.canary.phases | length' "$PROFILE_FILE" 2>/dev/null || echo "0")
+    phases_count=$(yq_get '.canary.phases | length' "$PROFILE_FILE" 2>/dev/null || echo "0")
     assert_true "[[ $phases_count -gt 0 ]]" "Canary phases defined"
 
     # Extract first phase percentage
-    phase0_pct=$(yq eval '.canary.phases[0].percentage' "$PROFILE_FILE" 2>/dev/null || echo "0")
+    phase0_pct=$(yq_get '.canary.phases[0].percentage' "$PROFILE_FILE" 2>/dev/null || echo "0")
     assert_equals "10" "$phase0_pct" "Phase 0 percentage is 10%"
 
     # Extract traffic router type
-    router_type=$(yq eval '.canary.traffic_router.type' "$PROFILE_FILE" 2>/dev/null || echo "")
+    router_type=$(yq_get '.canary.traffic_router.type' "$PROFILE_FILE" 2>/dev/null || echo "")
     assert_equals "istio" "$router_type" "Traffic router is Istio"
 else
     assert_true "true" "Profile file not found (skip profile tests)"
@@ -138,17 +138,17 @@ EOF
 export PROFILE_FILE="$mock_profile"
 
 # Test phase count
-phases_count=$(yq eval '.canary.phases | length' "$PROFILE_FILE" 2>/dev/null || echo "0")
+phases_count=$(yq_get '.canary.phases | length' "$PROFILE_FILE" 2>/dev/null || echo "0")
 assert_equals "3" "$phases_count" "3 phases defined in mock profile"
 
 # Test phase 2 (index 1) configuration
-phase1_name=$(yq eval '.canary.phases[1].name' "$PROFILE_FILE" 2>/dev/null || echo "")
+phase1_name=$(yq_get '.canary.phases[1].name' "$PROFILE_FILE" 2>/dev/null || echo "")
 assert_equals "phase-2" "$phase1_name" "Phase 1 name is 'phase-2'"
 
-phase1_pct=$(yq eval '.canary.phases[1].percentage' "$PROFILE_FILE" 2>/dev/null || echo "0")
+phase1_pct=$(yq_get '.canary.phases[1].percentage' "$PROFILE_FILE" 2>/dev/null || echo "0")
 assert_equals "50" "$phase1_pct" "Phase 1 percentage is 50%"
 
-phase1_replicas=$(yq eval '.canary.phases[1].replicas' "$PROFILE_FILE" 2>/dev/null || echo "0")
+phase1_replicas=$(yq_get '.canary.phases[1].replicas' "$PROFILE_FILE" 2>/dev/null || echo "0")
 assert_equals "5" "$phase1_replicas" "Phase 1 has 5 replicas"
 
 # ============================================================================
@@ -158,13 +158,13 @@ assert_equals "5" "$phase1_replicas" "Phase 1 has 5 replicas"
 test_report "Test Suite 4: Validation Threshold Parsing"
 
 # Extract validation thresholds from phase 0
-error_threshold=$(yq eval '.canary.phases[0].validation.error_rate_threshold' "$PROFILE_FILE" 2>/dev/null || echo "")
+error_threshold=$(yq_get '.canary.phases[0].validation.error_rate_threshold' "$PROFILE_FILE" 2>/dev/null || echo "")
 assert_equals "0.01" "$error_threshold" "Error rate threshold is 0.01"
 
-latency_threshold=$(yq eval '.canary.phases[0].validation.latency_p99_threshold' "$PROFILE_FILE" 2>/dev/null || echo "")
+latency_threshold=$(yq_get '.canary.phases[0].validation.latency_p99_threshold' "$PROFILE_FILE" 2>/dev/null || echo "")
 assert_equals "500" "$latency_threshold" "Latency p99 threshold is 500ms"
 
-min_requests=$(yq eval '.canary.phases[0].validation.min_requests' "$PROFILE_FILE" 2>/dev/null || echo "")
+min_requests=$(yq_get '.canary.phases[0].validation.min_requests' "$PROFILE_FILE" 2>/dev/null || echo "")
 assert_equals "100" "$min_requests" "Minimum requests is 100"
 
 # ============================================================================

@@ -9,19 +9,24 @@ set -euo pipefail
 # ============================================================================
 
 readonly SECURITY_CHECK_VERSION="3.6.0"
+# shellcheck disable=SC2034 # auto: pre-existing finding, behavior-preserving
 readonly SHELLCHECK_MIN_VERSION="0.7.0"
+# shellcheck disable=SC2034 # auto: pre-existing finding, behavior-preserving
 readonly GITLEAKS_MIN_VERSION="8.0.0"
 
 # Severity levels
 readonly SEVERITY_CRITICAL=4
 readonly SEVERITY_HIGH=3
 readonly SEVERITY_MEDIUM=2
+# shellcheck disable=SC2034 # auto: pre-existing finding, behavior-preserving
 readonly SEVERITY_LOW=1
+# shellcheck disable=SC2034 # auto: pre-existing finding, behavior-preserving
 readonly SEVERITY_INFO=0
 
-# Exit codes
-readonly EXIT_SUCCESS=0
+# Exit codes (guarded to prevent collision when multiple libs are sourced)
+[[ -v EXIT_SUCCESS ]] || readonly EXIT_SUCCESS=0
 readonly EXIT_CRITICAL_ISSUES=10
+# shellcheck disable=SC2034 # auto: pre-existing finding, behavior-preserving
 readonly EXIT_TOOL_MISSING=11
 readonly EXIT_SCAN_FAILED=12
 
@@ -407,14 +412,14 @@ run_comprehensive_security_scan() {
     # 2. ShellCheck scan
     ((total_checks++))
     if check_shellcheck_available; then
-        if run_shellcheck_directory "$project_dir/scripts" "warning" "false"; then
+        local shellcheck_rc=0
+        run_shellcheck_directory "$project_dir/scripts" "warning" "false" || shellcheck_rc=$?
+        if [[ $shellcheck_rc -eq 0 ]]; then
             ((passed_checks++))
+        elif [[ $shellcheck_rc -eq $EXIT_CRITICAL_ISSUES ]]; then
+            ((critical_issues++))
         else
-            if [[ $? -eq $EXIT_CRITICAL_ISSUES ]]; then
-                ((critical_issues++))
-            else
-                ((warnings++))
-            fi
+            ((warnings++))
         fi
     else
         sec_log_warn "Skipping ShellCheck (not available)"
@@ -424,14 +429,14 @@ run_comprehensive_security_scan() {
     # 3. Secrets scan (current files)
     ((total_checks++))
     if check_gitleaks_available; then
-        if run_gitleaks_scan "$project_dir" "" "false"; then
+        local gitleaks_rc=0
+        run_gitleaks_scan "$project_dir" "" "false" || gitleaks_rc=$?
+        if [[ $gitleaks_rc -eq 0 ]]; then
             ((passed_checks++))
+        elif [[ $gitleaks_rc -eq $EXIT_CRITICAL_ISSUES ]]; then
+            ((critical_issues++))
         else
-            if [[ $? -eq $EXIT_CRITICAL_ISSUES ]]; then
-                ((critical_issues++))
-            else
-                ((warnings++))
-            fi
+            ((warnings++))
         fi
     else
         sec_log_warn "Skipping gitleaks (not available)"

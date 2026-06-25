@@ -98,7 +98,9 @@ main() {
     echo -e "${NC}"
 
     # Check for discovery output
-    local discovery_dirs=($(ls -d "${SCRIPT_DIR}"/../discovery_* 2>/dev/null | sort -r))
+    local discovery_dirs
+    # shellcheck disable=SC2012 # ls+sort preserves existing ordering; find would change behavior
+    mapfile -t discovery_dirs < <(ls -d "${SCRIPT_DIR}"/../discovery_* 2>/dev/null | sort -r)
 
     if [[ ${#discovery_dirs[@]} -eq 0 ]]; then
         log_error "No discovery output found. Run kc_discovery.sh first."

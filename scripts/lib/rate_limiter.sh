@@ -265,7 +265,7 @@ circuit_breaker_failure() {
     failure_count=$(echo "$circuit_state" | awk '{print $2}')
 
     # Increment failure count
-    ((failure_count++))
+    failure_count=$((failure_count + 1))
 
     local now
     now=$(date +%s)
@@ -360,7 +360,7 @@ rate_limited_execute() {
             return 0
         else
             # Failure
-            ((attempt++))
+            attempt=$((attempt + 1))
             circuit_breaker_failure
 
             if (( attempt < max_retries )); then
@@ -400,7 +400,7 @@ rate_limited_batch() {
 
         for item in "${batch[@]}"; do
             rate_limited_execute "echo 'Processing: $item'" "$rate_strategy" "$ops_per_second"
-            ((processed++))
+            processed=$((processed + 1))
         done
 
         # Progress
@@ -462,6 +462,7 @@ detect_connection_leak() {
     local db_name="${6}"
     local idle_threshold="${7:-300}"  # 5 minutes
 
+    # shellcheck disable=SC2034  # reserved for future leak-collection use; kept to preserve behavior
     local leaked_connections=()
 
     case "$db_type" in

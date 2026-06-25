@@ -68,12 +68,15 @@ jobs:
       - name: Run test suite
         run: |
           chmod +x tests/run_all_tests.sh
-          ./tests/run_all_tests.sh
+          ./tests/run_all_tests.sh | tee /tmp/test_results.txt
+          exit "${PIPESTATUS[0]}"
 
       - name: Verify test results
         run: |
-          if grep -q "ALL TESTS PASSED" /tmp/test_results.txt 2>/dev/null; then
-            echo "✓ All 137 tests passed"
+          # run_all_tests.sh exits non-zero with the count of failed suites (gated above).
+          # Double-check the summary line reports zero failed suites.
+          if grep -qE 'SUITES:.*FAILED: 0' /tmp/test_results.txt; then
+            echo "✓ All test suites passed"
           else
             echo "✗ Tests failed"
             exit 1

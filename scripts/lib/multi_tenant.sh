@@ -247,7 +247,9 @@ mt_lb_haproxy_get_connections() {
 mt_lb_nginx_drain() {
     # Mark Nginx upstream server as down
     local node="$1"
+    # shellcheck disable=SC2034  # placeholder for future Nginx Plus API call (see commented curl below)
     local upstream="${CLUSTER_LB_BACKEND:-keycloak_upstream}"
+    # shellcheck disable=SC2034  # placeholder for future Nginx Plus API call (see commented curl below)
     local api_url="${CLUSTER_LB_API_URL:-http://localhost:8080/api}"
 
     # Nginx Plus API: PATCH /api/*/http/upstreams/<upstream>/servers/<id>
@@ -519,6 +521,7 @@ cluster_update_node() {
     local version="$2"
 
     # Download and install new version
+    # shellcheck disable=SC2087  # ${version} must expand client-side to inject target version into remote script
     ssh "${NODE_SSH_USER}@${host}" "bash -s" <<EOF
         cd /opt
         wget https://github.com/keycloak/keycloak/releases/download/${version}/keycloak-${version}.tar.gz

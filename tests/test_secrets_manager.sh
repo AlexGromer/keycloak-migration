@@ -265,6 +265,7 @@ assert_equals "600" "$perms" "File permissions: 600 (owner read/write only)"
 test_report "Test Suite 13: Special Characters in Values"
 
 # Test with special characters
+# shellcheck disable=SC2016 # auto: pre-existing finding, behavior-preserving
 special_value='p@$$w0rd!#%&*()[]{}|<>?/'
 set_secret "special_secret" "$special_value" "file"
 

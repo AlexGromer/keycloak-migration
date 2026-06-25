@@ -8,7 +8,8 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 # Find latest discovery
-discovery_dirs=($(ls -d "${SCRIPT_DIR}"/../discovery_* 2>/dev/null | sort -r))
+# shellcheck disable=SC2012  # ls intentionally matches files+dirs as original glob did; find -type d would change behavior
+mapfile -t discovery_dirs < <(ls -d "${SCRIPT_DIR}"/../discovery_* 2>/dev/null | sort -r)
 
 if [[ ${#discovery_dirs[@]} -eq 0 ]]; then
     echo "ERROR: No discovery output found. Run kc_discovery.sh first."

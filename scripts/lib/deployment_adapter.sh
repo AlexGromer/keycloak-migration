@@ -4,13 +4,29 @@
 
 set -euo pipefail
 
+# Locate library directory (mirrors keycloak_discovery.sh)
+SCRIPT_DIR="${SCRIPT_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)}"
+LIB_DIR="${LIB_DIR:-$SCRIPT_DIR}"
+
+# Container runtime abstraction (podman/docker) — provides cr, cr_compose, cr_detect
+if [[ -f "$LIB_DIR/container_runtime.sh" ]]; then
+    # shellcheck source=/dev/null
+    source "$LIB_DIR/container_runtime.sh"
+fi
+
+# Detect available container runtime (exports CONTAINER_RUNTIME); non-fatal if none
+# shellcheck disable=SC2015 # auto: shellcheck 0.10 (CI) finding, behavior-preserving
+declare -F cr_detect >/dev/null 2>&1 && cr_detect || true
+
 # Deployment mode registry
 declare -A DEPLOY_MODES=(
     [standalone]="Standalone (systemd/filesystem)"
     [docker]="Docker (single container)"
+    [podman]="Podman single container"
     [docker-compose]="Docker Compose (multi-service stack)"
     [kubernetes]="Kubernetes (native)"
     [deckhouse]="Deckhouse (K8s + modules)"
+    [run]="Single-host transient migrating container"
 )
 
 # ============================================================================
@@ -38,8 +54,8 @@ deploy_detect_mode() {
         return 0
     fi
 
-    # Check for Docker (process running in Docker)
-    if docker ps &>/dev/null; then
+    # Check for a container runtime (process running in a container)
+    if cr ps &>/dev/null; then
         # Check if Keycloak is running in Docker
         if pgrep -f "keycloak" | xargs -I {} cat /proc/{}/cgroup 2>/dev/null | grep -q docker; then
             echo "docker"
@@ -79,14 +95,15 @@ kc_start() {
             systemctl start "$service_name"
             ;;
 
-        docker)
+        docker|podman)
             local container_name="${args[0]:-keycloak}"
-            docker start "$container_name"
+            cr start "$container_name"
             ;;
 
         docker-compose)
             local compose_file="${args[0]:-docker-compose.yml}"
-            docker-compose -f "$compose_file" up -d
+            # shellcheck disable=SC2046  # cr_compose returns command words
+            $(cr_compose) -f "$compose_file" up -d
             ;;
 
         kubernetes)
@@ -119,14 +136,15 @@ kc_stop() {
             systemctl stop "$service_name"
             ;;
 
-        docker)
+        docker|podman)
             local container_name="${args[0]:-keycloak}"
-            docker stop "$container_name"
+            cr stop "$container_name"
             ;;
 
         docker-compose)
             local compose_file="${args[0]:-docker-compose.yml}"
-            docker-compose -f "$compose_file" down
+            # shellcheck disable=SC2046  # cr_compose returns command words
+            $(cr_compose) -f "$compose_file" down
             ;;
 
         kubernetes)
@@ -158,14 +176,15 @@ kc_status() {
             systemctl status "$service_name" --no-pager
             ;;
 
-        docker)
+        docker|podman)
             local container_name="${args[0]:-keycloak}"
-            docker ps -f name="$container_name"
+            cr ps -f name="$container_name"
             ;;
 
         docker-compose)
             local compose_file="${args[0]:-docker-compose.yml}"
-            docker-compose -f "$compose_file" ps
+            # shellcheck disable=SC2046  # cr_compose returns command words
+            $(cr_compose) -f "$compose_file" ps
             ;;
 
         kubernetes)
@@ -213,15 +232,16 @@ kc_exec() {
             bash -c "$cmd"
             ;;
 
-        docker)
+        docker|podman|run)
             local container_name="${exec_args[0]:-keycloak}"
-            docker exec "$container_name" bash -c "$cmd"
+            cr exec "$container_name" bash -c "$cmd"
             ;;
 
         docker-compose)
             local service_name="${exec_args[0]:-keycloak}"
             local compose_file="${exec_args[1]:-docker-compose.yml}"
-            docker-compose -f "$compose_file" exec "$service_name" bash -c "$cmd"
+            # shellcheck disable=SC2046  # cr_compose returns command words
+            $(cr_compose) -f "$compose_file" exec "$service_name" bash -c "$cmd"
             ;;
 
         kubernetes)
@@ -260,15 +280,17 @@ kc_logs() {
             journalctl -u "$service_name" $log_opts
             ;;
 
-        docker)
+        docker|podman|run)
             local container_name="${args[0]:-keycloak}"
-            docker logs $log_opts "$container_name"
+            # shellcheck disable=SC2086  # $log_opts is an intentional optional flag
+            cr logs $log_opts "$container_name"
             ;;
 
         docker-compose)
             local service_name="${args[0]:-keycloak}"
             local compose_file="${args[1]:-docker-compose.yml}"
-            docker-compose -f "$compose_file" logs $log_opts "$service_name"
+            # shellcheck disable=SC2046,SC2086  # cr_compose words + optional $log_opts
+            $(cr_compose) -f "$compose_file" logs $log_opts "$service_name"
             ;;
 
         kubernetes)
@@ -303,15 +325,16 @@ kc_health_check() {
             curl -sf --max-time 10 "$endpoint" >/dev/null
             ;;
 
-        docker)
+        docker|podman|run)
             local container_name="${args[0]:-keycloak}"
-            docker exec "$container_name" curl -sf --max-time 10 "$endpoint" >/dev/null
+            cr exec "$container_name" curl -sf --max-time 10 "$endpoint" >/dev/null
             ;;
 
         docker-compose)
             local service_name="${args[0]:-keycloak}"
             local compose_file="${args[1]:-docker-compose.yml}"
-            docker-compose -f "$compose_file" exec "$service_name" \
+            # shellcheck disable=SC2046  # cr_compose returns command words
+            $(cr_compose) -f "$compose_file" exec "$service_name" \
                 curl -sf --max-time 10 "$endpoint" >/dev/null
             ;;
 
@@ -356,7 +379,7 @@ kc_get_config_path() {
             echo "$kc_home/conf/keycloak.conf"
             ;;
 
-        docker|docker-compose)
+        docker|docker-compose|podman|run)
             echo "/opt/keycloak/conf/keycloak.conf"
             ;;
 
@@ -385,14 +408,29 @@ kc_read_config() {
             grep "^${config_key}=" "$config_path" | cut -d'=' -f2
             ;;
 
-        docker)
+        docker|podman|run)
             local container_name="${args[0]:-keycloak}"
-            docker exec "$container_name" \
+            cr exec "$container_name" \
+                grep "^${config_key}=" "$config_path" | cut -d'=' -f2
+            ;;
+
+        docker-compose)
+            local svc="${args[0]:-keycloak}"
+            local compose_file="${args[1]:-docker-compose.yml}"
+            # shellcheck disable=SC2046  # cr_compose returns command words
+            $(cr_compose) -f "$compose_file" exec -T "$svc" \
                 grep "^${config_key}=" "$config_path" | cut -d'=' -f2
             ;;
 
         kubernetes)
             local namespace="${args[0]:-keycloak}"
+            kubectl get configmap keycloak-config -n "$namespace" \
+                -o jsonpath="{.data.keycloak\.conf}" | \
+                grep "^${config_key}=" | cut -d'=' -f2
+            ;;
+
+        deckhouse)
+            local namespace="${args[0]:-d8-keycloak}"
             kubectl get configmap keycloak-config -n "$namespace" \
                 -o jsonpath="{.data.keycloak\.conf}" | \
                 grep "^${config_key}=" | cut -d'=' -f2
@@ -421,11 +459,19 @@ kc_get_version() {
                 "$kc_home/bin/standalone.sh" --version 2>/dev/null | grep -oP 'Keycloak \K[\d.]+'
             ;;
 
-        docker)
+        docker|podman|run)
             local container_name="${args[0]:-keycloak}"
-            docker exec "$container_name" /opt/keycloak/bin/kc.sh --version 2>/dev/null || \
-                docker exec "$container_name" /opt/keycloak/bin/standalone.sh --version 2>/dev/null | \
+            cr exec "$container_name" /opt/keycloak/bin/kc.sh --version 2>/dev/null || \
+                cr exec "$container_name" /opt/keycloak/bin/standalone.sh --version 2>/dev/null | \
                 grep -oP 'Keycloak \K[\d.]+'
+            ;;
+
+        docker-compose)
+            local svc="${args[0]:-keycloak}"
+            local compose_file="${args[1]:-docker-compose.yml}"
+            # shellcheck disable=SC2046  # cr_compose returns command words
+            $(cr_compose) -f "$compose_file" exec -T "$svc" \
+                /opt/keycloak/bin/kc.sh --version 2>/dev/null | grep -oP '[\d.]+'
             ;;
 
         kubernetes)
@@ -438,11 +484,67 @@ kc_get_version() {
                 /opt/keycloak/bin/kc.sh --version 2>/dev/null | grep -oP '[\d.]+'
             ;;
 
+        deckhouse)
+            local pod=$(kubectl get pods -l app=keycloak -n d8-keycloak \
+                -o jsonpath='{.items[0].metadata.name}' 2>/dev/null)
+            [[ -z "$pod" ]] && return 1
+
+            kubectl exec "$pod" -n d8-keycloak -- \
+                /opt/keycloak/bin/kc.sh --version 2>/dev/null | grep -oP '[\d.]+'
+            ;;
+
         *)
             echo "ERROR: Version detection not implemented for mode: $mode" >&2
             return 1
             ;;
     esac
+}
+
+# ============================================================================
+# Transient Migrating Container (run mode)
+# ============================================================================
+
+kc_run_migrating_container() {
+    # Boot a transient Keycloak container of <version> against the configured
+    # PostgreSQL. Keycloak runs Liquibase + RealmMigration on startup.
+    # Network: host networking by default so the container reaches a host-local
+    # database; override with PROFILE_KC_RUN_NETWORK (e.g. a user-defined bridge).
+    # Usage: kc_run_migrating_container <version>
+    local version="$1"
+    local container_name="${PROFILE_KC_RUN_CONTAINER_NAME:-kc-migrate-${version}}"
+    local network_opt="--network=${PROFILE_KC_RUN_NETWORK:-host}"
+
+    local db_host="${PROFILE_DB_HOST:-localhost}"
+    local db_port="${PROFILE_DB_PORT:-5432}"
+    local db_name="${PROFILE_DB_NAME:-keycloak}"
+    local db_user="${PROFILE_DB_USER:-keycloak}"
+    local db_pass="${PROFILE_DB_PASSWORD:-${KC_DB_PASSWORD:-}}"
+    local jdbc_url="jdbc:postgresql://${db_host}:${db_port}/${db_name}"
+
+    local image_ref
+    image_ref=$(dist_image_ref "$version")
+
+    if [[ "${DRY_RUN:-false}" == "true" || "${KC_VERBOSE:-false}" == "true" ]]; then
+        echo "DRY-RUN: cr run -d --name $container_name $network_opt -e KC_DB=postgres -e KC_DB_URL=$jdbc_url -e KC_DB_USERNAME=$db_user -e KC_DB_PASSWORD=*** $image_ref start --optimized" >&2
+        [[ "${DRY_RUN:-false}" == "true" ]] && return 0
+    fi
+
+    cr run -d --name "$container_name" \
+        "$network_opt" \
+        -e KC_DB=postgres \
+        -e KC_DB_URL="$jdbc_url" \
+        -e KC_DB_USERNAME="$db_user" \
+        -e KC_DB_PASSWORD="$db_pass" \
+        "$image_ref" \
+        start --optimized
+}
+
+kc_run_stop_container() {
+    # Stop and remove a transient migrating container (errors ignored).
+    # Usage: kc_run_stop_container [container_name]
+    local container_name="${1:-${PROFILE_KC_RUN_CONTAINER_NAME:-keycloak}}"
+    cr stop "$container_name" 2>/dev/null || true
+    cr rm "$container_name" 2>/dev/null || true
 }
 
 # ============================================================================

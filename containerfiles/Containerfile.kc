@@ -1,0 +1,71 @@
+# Containerfile.kc — Build a Keycloak runtime image FROM an Astra/RedOS base.
+#
+# The migration tool boots a real Keycloak container of each hop version; on
+# startup Keycloak runs Liquibase + RealmMigration against PostgreSQL. This image
+# layers a chosen Keycloak distribution on top of an organisation base image.
+#
+# !!! JDK_VERSION MUST be 21 for Keycloak 26.x (KC 26 requires Java 21).        !!!
+# !!! Use 17 for Keycloak <= 25.x. See "hop facts" in distribution_handler.sh.  !!!
+#
+# Build args:
+#   KC_BASE_IMAGE     base image (Astra Linux / RedOS), e.g. registry.local/astra:1.7
+#   KC_VERSION        Keycloak version to stage, e.g. 24.0.5 / 25.0.6 / 26.6.3
+#   JDK_VERSION       OpenJDK major version (17 for <=25.x, 21 for 26.x)
+#   KC_DIST_BASE_URL  where to fetch the Keycloak dist tarball (default: GitHub
+#                     releases; quay.io hosts the prebuilt *container images*,
+#                     the dist tgz lives on GitHub releases / a mirror)
+#
+# Example:
+#   cr build --build-arg KC_BASE_IMAGE=registry.local/redos:7.3 \
+#            --build-arg KC_VERSION=26.6.3 --build-arg JDK_VERSION=21 \
+#            -t quay.io/keycloak/keycloak:26.6.3 -f containerfiles/Containerfile.kc .
+
+ARG KC_BASE_IMAGE
+ARG KC_VERSION
+ARG JDK_VERSION=17
+
+FROM ${KC_BASE_IMAGE}
+
+# Re-declare build args needed after FROM (Containerfile scoping rule).
+ARG KC_VERSION
+ARG JDK_VERSION
+ARG KC_DIST_BASE_URL=https://github.com/keycloak/keycloak/releases/download
+
+# Base images are Astra Linux (apt) OR RedOS (dnf/yum). Install OpenJDK on
+# whichever package manager is present. JDK install is best-effort: if the base
+# already ships a suitable JDK, the build still proceeds. Adjust package names
+# for your local mirrors as required.
+RUN set -eux; \
+    if command -v apt-get >/dev/null 2>&1; then \
+        apt-get update; \
+        (apt-get install -y --no-install-recommends "openjdk-${JDK_VERSION}-jdk" tar gzip curl \
+         || apt-get install -y --no-install-recommends default-jdk tar gzip curl); \
+        rm -rf /var/lib/apt/lists/*; \
+    elif command -v dnf >/dev/null 2>&1; then \
+        (dnf install -y "java-${JDK_VERSION}-openjdk-devel" tar gzip curl \
+         || dnf install -y java-latest-openjdk-devel tar gzip curl); \
+        dnf clean all; \
+    elif command -v yum >/dev/null 2>&1; then \
+        (yum install -y "java-${JDK_VERSION}-openjdk-devel" tar gzip curl \
+         || yum install -y java-latest-openjdk-devel tar gzip curl); \
+        yum clean all; \
+    else \
+        echo "WARN: no apt/dnf/yum found; base image must already provide JDK ${JDK_VERSION}" >&2; \
+    fi
+
+# Stage the Keycloak distribution into /opt/keycloak.
+RUN set -eux; \
+    mkdir -p /opt/keycloak; \
+    curl -fsSL "${KC_DIST_BASE_URL}/${KC_VERSION}/keycloak-${KC_VERSION}.tar.gz" -o /tmp/keycloak.tar.gz; \
+    tar -xzf /tmp/keycloak.tar.gz -C /opt/keycloak --strip-components=1; \
+    rm -f /tmp/keycloak.tar.gz
+
+ENV KC_HOME=/opt/keycloak
+WORKDIR /opt/keycloak
+
+# Pre-build the server for optimized startup. The actual schema/realm migration
+# (Liquibase + RealmMigration) runs at container boot, not here.
+RUN /opt/keycloak/bin/kc.sh build
+
+ENTRYPOINT ["/opt/keycloak/bin/kc.sh"]
+CMD ["start-dev"]
