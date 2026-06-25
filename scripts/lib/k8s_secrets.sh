@@ -8,6 +8,7 @@ set -euo pipefail
 # CONSTANTS
 # ============================================================================
 
+# shellcheck disable=SC2034 # auto: pre-existing finding, behavior-preserving
 readonly K8S_SECRETS_VERSION="3.6.0"
 
 # Kubernetes configuration
