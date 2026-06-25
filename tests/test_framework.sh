@@ -23,6 +23,21 @@ NC='\033[0m'
 BOLD='\033[1m'
 
 # ============================================================================
+# YAML helper — yq flavor-agnostic (mikefarah/Go-yq OR kislyuk/python-yq)
+# ============================================================================
+yq_get() {
+    # yq_get '<jq-path>' <file>  -> raw value on stdout; non-zero if absent
+    local path="$1" file="$2" out
+    if out=$(yq eval "$path" "$file" 2>/dev/null) && [[ -n "$out" && "$out" != "null" ]]; then
+        printf '%s' "$out"; return 0
+    fi
+    if out=$(yq -r "$path" "$file" 2>/dev/null) && [[ -n "$out" && "$out" != "null" ]]; then
+        printf '%s' "$out"; return 0
+    fi
+    return 1
+}
+
+# ============================================================================
 # Assertions
 # ============================================================================
 

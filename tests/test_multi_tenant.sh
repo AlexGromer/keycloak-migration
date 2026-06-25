@@ -148,12 +148,12 @@ describe "Profile Examples YAML Validation"
 
 # Test: Multi-tenant profile YAML structure
 if command -v yq &>/dev/null && [[ -f "$PROFILE_DIR/multi-tenant-example.yaml" ]]; then
-    tenant_count=$(yq eval '.tenants | length' "$PROFILE_DIR/multi-tenant-example.yaml" 2>/dev/null || echo "0")
+    tenant_count=$(yq_get '.tenants | length' "$PROFILE_DIR/multi-tenant-example.yaml" 2>/dev/null || echo "0")
 
     assert_true "[[ $tenant_count -gt 0 ]]" \
         "Multi-tenant profile has tenants defined"
 
-    rollout_type=$(yq eval '.rollout.type' "$PROFILE_DIR/multi-tenant-example.yaml" 2>/dev/null || echo "")
+    rollout_type=$(yq_get '.rollout.type' "$PROFILE_DIR/multi-tenant-example.yaml" 2>/dev/null || echo "")
 
     assert_not_empty "$rollout_type" \
         "Rollout type defined in multi-tenant profile"
@@ -161,12 +161,12 @@ fi
 
 # Test: Clustered profile YAML structure
 if command -v yq &>/dev/null && [[ -f "$PROFILE_DIR/clustered-bare-metal-example.yaml" ]]; then
-    node_count=$(yq eval '.cluster.nodes | length' "$PROFILE_DIR/clustered-bare-metal-example.yaml" 2>/dev/null || echo "0")
+    node_count=$(yq_get '.cluster.nodes | length' "$PROFILE_DIR/clustered-bare-metal-example.yaml" 2>/dev/null || echo "0")
 
     assert_true "[[ $node_count -gt 0 ]]" \
         "Clustered profile has nodes defined"
 
-    lb_type=$(yq eval '.cluster.load_balancer.type' "$PROFILE_DIR/clustered-bare-metal-example.yaml" 2>/dev/null || echo "")
+    lb_type=$(yq_get '.cluster.load_balancer.type' "$PROFILE_DIR/clustered-bare-metal-example.yaml" 2>/dev/null || echo "")
 
     assert_not_empty "$lb_type" \
         "Load balancer type defined in clustered profile"
