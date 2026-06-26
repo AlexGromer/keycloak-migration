@@ -121,9 +121,9 @@ _bm_cell() {
     echo ""
     if [[ -n "$use_ref" ]]; then
         log_info "== CELL ${os}/${version}  mode=USE  branded=${use_ref}  ->  ${ghcr_ref}"
-        _bm_run "$EXECUTE" "cr pull ${use_ref}"               -- cr pull "$use_ref"
-        _bm_run "$EXECUTE" "cr tag ${use_ref} ${ghcr_ref}"    -- cr tag "$use_ref" "$ghcr_ref"
-        _bm_run "$EXECUTE" "cr save -o ${tar} ${ghcr_ref}"    -- cr save -o "$tar" "$ghcr_ref"
+        _bm_run "$EXECUTE" "cr pull ${use_ref}"            -- cr pull "$use_ref"            || return 1
+        _bm_run "$EXECUTE" "cr tag ${use_ref} ${ghcr_ref}" -- cr tag "$use_ref" "$ghcr_ref" || return 1
+        _bm_run "$EXECUTE" "cr save -o ${tar} ${ghcr_ref}" -- cr save -o "$tar" "$ghcr_ref" || return 1
     else
         local cf="containerfiles/Containerfile.kc" jdk
         jdk="$(_bm_jdk "$os" "$version")"
@@ -134,12 +134,13 @@ _bm_cell() {
         _bm_run "$EXECUTE" "build_kc_image.sh --version ${version} --base-image ${base} --jdk ${jdk} --containerfile ${cf} --save ${tar}  (PROFILE_CONTAINER_IMAGE_REF=${ghcr_ref})" -- \
             env PROFILE_CONTAINER_IMAGE_REF="$ghcr_ref" "$SCRIPT_DIR/build_kc_image.sh" \
                 --version "$version" --base-image "$base" --jdk "$jdk" \
-                --containerfile "$cf" --save "$tar"
+                --containerfile "$cf" --save "$tar" \
+            || { log_error "build failed: ${os}/${version}"; return 1; }
     fi
 
-    _bm_run "$EXECUTE" "sha256sum ${tar} > ${tar}.sha256" -- _bm_sha256 "$tar"
+    _bm_run "$EXECUTE" "sha256sum ${tar} > ${tar}.sha256" -- _bm_sha256 "$tar" || return 1
     if [[ "$PUBLISH" == "true" ]]; then
-        _bm_run "$EXECUTE" "cr push ${ghcr_ref}" -- cr push "$ghcr_ref"
+        _bm_run "$EXECUTE" "cr push ${ghcr_ref}" -- cr push "$ghcr_ref" || return 1
     fi
 }
 
@@ -201,13 +202,18 @@ build_matrix_main() {
     fi
 
     local os version
+    local -a failed=()
     for os in "${oses[@]}"; do
         for version in "${verarr[@]}"; do
-            _bm_cell "$os" "$version" || return 1
+            _bm_cell "$os" "$version" || failed+=("${os}/${version}")
         done
     done
 
     echo ""
+    if [[ ${#failed[@]} -gt 0 ]]; then
+        log_error "matrix INCOMPLETE — failed cells: ${failed[*]}"
+        return 1
+    fi
     log_success "matrix complete (mode=$mode)"
 }
 

@@ -35,19 +35,22 @@ ARG KC_DIST_BASE_URL=https://github.com/keycloak/keycloak/releases/download
 # whichever package manager is present. JDK install is best-effort: if the base
 # already ships a suitable JDK, the build still proceeds. Adjust package names
 # for your local mirrors as required.
+# Use HEADLESS JDK: kc.sh build/start only needs a JRE-level runtime, and the
+# full -devel/headful packages pull a GUI dependency graph that fails the dnf
+# transaction test on RED OS (and is heavier on Astra).
 RUN set -eux; \
     if command -v apt-get >/dev/null 2>&1; then \
         apt-get update; \
-        (apt-get install -y --no-install-recommends "openjdk-${JDK_VERSION}-jdk" tar gzip curl \
-         || apt-get install -y --no-install-recommends default-jdk tar gzip curl); \
+        (apt-get install -y --no-install-recommends "openjdk-${JDK_VERSION}-jdk-headless" tar gzip curl \
+         || apt-get install -y --no-install-recommends default-jdk-headless tar gzip curl); \
         rm -rf /var/lib/apt/lists/*; \
     elif command -v dnf >/dev/null 2>&1; then \
-        (dnf install -y "java-${JDK_VERSION}-openjdk-devel" tar gzip curl \
-         || dnf install -y java-latest-openjdk-devel tar gzip curl); \
+        (dnf install -y "java-${JDK_VERSION}-openjdk-headless" tar gzip curl \
+         || dnf install -y "java-${JDK_VERSION}-openjdk" tar gzip curl); \
         dnf clean all; \
     elif command -v yum >/dev/null 2>&1; then \
-        (yum install -y "java-${JDK_VERSION}-openjdk-devel" tar gzip curl \
-         || yum install -y java-latest-openjdk-devel tar gzip curl); \
+        (yum install -y "java-${JDK_VERSION}-openjdk-headless" tar gzip curl \
+         || yum install -y "java-${JDK_VERSION}-openjdk" tar gzip curl); \
         yum clean all; \
     else \
         echo "WARN: no apt/dnf/yum found; base image must already provide JDK ${JDK_VERSION}" >&2; \

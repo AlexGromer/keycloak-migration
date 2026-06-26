@@ -97,6 +97,23 @@ assert_contains "$USE" "mode=USE  branded=registry.local/kk-branded:26.6.3-astra
 assert_contains "$USE" "DRY-RUN: cr pull registry.local/kk-branded:26.6.3-astra"  "USE cell consumes branded ref"
 
 # ============================================================================
+describe "build failure propagates (no silent success)"
+# ============================================================================
+cat > "$WORK/fail.conf" <<EOF
+OUT_DIR="$WORK/dist"
+USE_IMAGE_astra_26_6_3="registry.local/x:1"
+EOF
+# Subshell with an engine that always fails, so it does NOT taint the global
+# CALL_LOG (non-mutation assertion below stays valid).
+prop_rc=0
+(
+  # shellcheck disable=SC2329  # cr is invoked indirectly by build_matrix_main
+  cr() { return 1; }
+  build_matrix_main --build --os astra --versions 26.6.3 --config "$WORK/fail.conf" >/dev/null 2>&1
+) || prop_rc=$?
+assert_equals "1" "$prop_rc" "EXECUTE build with a failing engine returns non-zero (no silent success)"
+
+# ============================================================================
 describe "non-mutation guarantee"
 # ============================================================================
 assert_true "[[ ! -s '$CALL_LOG' ]]" "dry-run invoked ZERO real cr/sha256sum calls"
