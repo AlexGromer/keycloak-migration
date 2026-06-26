@@ -1,74 +1,82 @@
-# Containerfile.kc — Build a Keycloak runtime image FROM an Astra/RedOS base.
+# Containerfile.kc — Multistage, non-root Keycloak (Quarkus) image FROM Astra/RedOS base.
 #
-# The migration tool boots a real Keycloak container of each hop version; on
-# startup Keycloak runs Liquibase + RealmMigration against PostgreSQL. This image
-# layers a chosen Keycloak distribution on top of an organisation base image.
+# The migration tool boots a real Keycloak container of each hop version; on startup
+# Keycloak runs Liquibase + RealmMigration against PostgreSQL.
 #
-# !!! JDK_VERSION MUST be 21 for Keycloak 26.x (KC 26 requires Java 21).        !!!
-# !!! Use 17 for Keycloak <= 25.x. See "hop facts" in distribution_handler.sh.  !!!
+# Builder stage installs a JDK and runs `kc.sh build --db=postgres` (KC_DB is a
+# BUILD-TIME option in KC 26 — `start --optimized` against postgres only works if it
+# was baked at build time). The runtime stage keeps only a JRE-headless + the built
+# /opt/keycloak and runs as a NON-ROOT user (uid 1000).
 #
 # Build args:
-#   KC_BASE_IMAGE     base image (Astra Linux / RedOS), e.g. registry.local/astra:1.7
+#   KC_BASE_IMAGE     base image (Astra Linux / RED OS), e.g. registry.local/astra:1.7
 #   KC_VERSION        Keycloak version to stage, e.g. 24.0.5 / 25.0.6 / 26.6.3
-#   JDK_VERSION       OpenJDK major version (17 for <=25.x, 21 for 26.x)
-#   KC_DIST_BASE_URL  where to fetch the Keycloak dist tarball (default: GitHub
-#                     releases; quay.io hosts the prebuilt *container images*,
-#                     the dist tgz lives on GitHub releases / a mirror)
-#
-# Example:
-#   cr build --build-arg KC_BASE_IMAGE=registry.local/redos:7.3 \
-#            --build-arg KC_VERSION=26.6.3 --build-arg JDK_VERSION=21 \
-#            -t quay.io/keycloak/keycloak:26.6.3 -f containerfiles/Containerfile.kc .
+#   JDK_VERSION       OpenJDK major (17 for <=25.x, 21 for 26.x)
+#   KC_DIST_BASE_URL  Keycloak dist tarball source (default GitHub releases / a mirror)
 
 ARG KC_BASE_IMAGE
 ARG KC_VERSION
 ARG JDK_VERSION=17
 
-FROM ${KC_BASE_IMAGE}
-
-# Re-declare build args needed after FROM (Containerfile scoping rule).
+# ============================================================================
+# Stage 1 — builder: JDK + download dist + `kc.sh build --db=postgres`
+# ============================================================================
+FROM ${KC_BASE_IMAGE} AS builder
 ARG KC_VERSION
 ARG JDK_VERSION
 ARG KC_DIST_BASE_URL=https://github.com/keycloak/keycloak/releases/download
 
-# Base images are Astra Linux (apt) OR RedOS (dnf/yum). Install OpenJDK on
-# whichever package manager is present. JDK install is best-effort: if the base
-# already ships a suitable JDK, the build still proceeds. Adjust package names
-# for your local mirrors as required.
-# Use HEADLESS JDK: kc.sh build/start only needs a JRE-level runtime, and the
-# full -devel/headful packages pull a GUI dependency graph that fails the dnf
-# transaction test on RED OS (and is heavier on Astra).
+# Headless JDK (kc.sh build needs a JVM; -devel/headful pulls a GUI dep graph that
+# fails the dnf transaction on RED OS). apt (Astra) / dnf|yum (RED OS) autodetect.
 RUN set -eux; \
     if command -v apt-get >/dev/null 2>&1; then \
         apt-get update; \
-        (apt-get install -y --no-install-recommends "openjdk-${JDK_VERSION}-jdk-headless" tar gzip curl \
-         || apt-get install -y --no-install-recommends default-jdk-headless tar gzip curl); \
-        rm -rf /var/lib/apt/lists/*; \
+        (apt-get install -y --no-install-recommends "openjdk-${JDK_VERSION}-jdk-headless" tar gzip curl ca-certificates \
+         || apt-get install -y --no-install-recommends default-jdk-headless tar gzip curl ca-certificates); \
     elif command -v dnf >/dev/null 2>&1; then \
         (dnf install -y "java-${JDK_VERSION}-openjdk-headless" tar gzip curl \
          || dnf install -y "java-${JDK_VERSION}-openjdk" tar gzip curl); \
-        dnf clean all; \
     elif command -v yum >/dev/null 2>&1; then \
         (yum install -y "java-${JDK_VERSION}-openjdk-headless" tar gzip curl \
          || yum install -y "java-${JDK_VERSION}-openjdk" tar gzip curl); \
-        yum clean all; \
-    else \
-        echo "WARN: no apt/dnf/yum found; base image must already provide JDK ${JDK_VERSION}" >&2; \
-    fi
+    else echo "WARN: no apt/dnf/yum found; base must provide JDK ${JDK_VERSION}" >&2; fi
 
-# Stage the Keycloak distribution into /opt/keycloak.
 RUN set -eux; \
     mkdir -p /opt/keycloak; \
     curl -fsSL "${KC_DIST_BASE_URL}/${KC_VERSION}/keycloak-${KC_VERSION}.tar.gz" -o /tmp/keycloak.tar.gz; \
     tar -xzf /tmp/keycloak.tar.gz -C /opt/keycloak --strip-components=1; \
-    rm -f /tmp/keycloak.tar.gz
+    rm -f /tmp/keycloak.tar.gz; \
+    /opt/keycloak/bin/kc.sh build --db=postgres
+
+# ============================================================================
+# Stage 2 — runtime: JRE-headless only + non-root, copy the built server
+# ============================================================================
+FROM ${KC_BASE_IMAGE}
+ARG JDK_VERSION
+
+RUN set -eux; \
+    if command -v apt-get >/dev/null 2>&1; then \
+        apt-get update; \
+        (apt-get install -y --no-install-recommends "openjdk-${JDK_VERSION}-jre-headless" \
+         || apt-get install -y --no-install-recommends default-jre-headless); \
+        rm -rf /var/lib/apt/lists/*; \
+    elif command -v dnf >/dev/null 2>&1; then \
+        (dnf install -y "java-${JDK_VERSION}-openjdk-headless" \
+         || dnf install -y "java-${JDK_VERSION}-openjdk"); \
+        dnf clean all; \
+    elif command -v yum >/dev/null 2>&1; then \
+        (yum install -y "java-${JDK_VERSION}-openjdk-headless" || yum install -y "java-${JDK_VERSION}-openjdk"); \
+        yum clean all; \
+    else echo "WARN: no apt/dnf/yum found; base must provide a JRE ${JDK_VERSION}" >&2; fi; \
+    (groupadd -r -g 1000 keycloak 2>/dev/null || true); \
+    (useradd -u 1000 -r -g keycloak -d /opt/keycloak -s /sbin/nologin keycloak 2>/dev/null || true)
+
+COPY --from=builder /opt/keycloak /opt/keycloak
+RUN chown -R 1000:1000 /opt/keycloak
 
 ENV KC_HOME=/opt/keycloak
 WORKDIR /opt/keycloak
-
-# Pre-build the server for optimized startup. The actual schema/realm migration
-# (Liquibase + RealmMigration) runs at container boot, not here.
-RUN /opt/keycloak/bin/kc.sh build
-
+USER 1000
+EXPOSE 8080 8443
 ENTRYPOINT ["/opt/keycloak/bin/kc.sh"]
-CMD ["start-dev"]
+CMD ["start", "--optimized"]

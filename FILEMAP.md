@@ -58,7 +58,7 @@
 
 | FILEMAP.md | Documentation | — |
 | scripts/lib/container_runtime.sh | Container runtime abstraction (podman/docker autodetect) | cr(), cr_compose(), cr_detect(), cr_available() |
-| containerfiles/Containerfile.kc | Build template: KK image FROM Astra/RedOS base (ARG KC_BASE_IMAGE/KC_VERSION/JDK_VERSION) | — |
+| containerfiles/Containerfile.kc | Multistage non-root (uid 1000) Quarkus KC image FROM Astra/RedOS base; builder runs `kc.sh build --db=postgres`, runtime = JRE-headless only | — |
 | scripts/lib/image_builder.sh | Build KK-on-base images + save to tar | img_build(), img_save() |
 | scripts/build_kc_image.sh | CLI helper to build/save a KK image (operator pre-step) | — |
 | scripts/lib/migration_verify.sh | Layer-2 verification (MIGRATION_MODEL) + skipped-index recovery | kc_verify_migration_model(), kc_check_skipped_indexes() |
