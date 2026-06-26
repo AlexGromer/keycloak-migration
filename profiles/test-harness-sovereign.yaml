@@ -1,0 +1,44 @@
+# Keycloak Migration Profile v3.0
+# Test harness: run-topology + build acquisition from a sovereign base OS.
+# Used by scripts/harness/run_migration_harness.sh (default dry-run).
+# base_image / image_ref below are PLACEHOLDERS — override at runtime with
+#   --os-base-image <ref>  (latest official Astra SE / RedOS) and
+#   --image-ref / --final-ref  (final built image). DB/admin secrets come from
+# the environment only (HARNESS_DB_PASSWORD / HARNESS_KC_ADMIN_PASSWORD).
+
+profile:
+  name: test-harness-sovereign
+  environment: run
+
+database:
+  type: postgresql
+  location: standalone
+  host: kc-harness-pg
+  port: 5432
+  name: keycloak
+  user: keycloak
+  credentials_source: env  # env | file | secret | vault
+
+keycloak:
+  deployment_mode: run        # transient migrating container per hop
+  distribution_mode: container
+  cluster_mode: standalone
+
+  current_version: 16.1.1     # clean-base start of the hop chain
+  target_version: 26.6.3      # 16.1.1 -> 24.0.5 -> 26.6.3
+
+  run_container_name: kc-migrate
+
+  container:
+    runtime: podman           # autodetect podman -> docker if unset
+    acquisition: build        # build the hop image FROM the sovereign base
+    # base_image and image_ref are set at runtime (env/CLI), NOT here: the flat
+    # YAML parser cannot represent registry refs containing ':'. Override with
+    # --os-base-image (Astra SE / RedOS) and --image-ref / --final-ref.
+
+migration:
+  strategy: inplace
+  parallel_jobs: 2
+  timeout_per_version: 900
+  run_smoke_tests: false
+  backup_before_step: false
