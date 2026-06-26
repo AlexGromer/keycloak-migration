@@ -37,10 +37,15 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Install ShellCheck
+      - name: Install ShellCheck (pinned static binary v0.11.0)
         run: |
-          sudo apt-get update
-          sudo apt-get install -y shellcheck
+          set -euo pipefail
+          SC_VERSION="v0.11.0"
+          curl -fsSL "https://github.com/koalaman/shellcheck/releases/download/${SC_VERSION}/shellcheck-${SC_VERSION}.linux.x86_64.tar.xz" -o /tmp/shellcheck.tar.xz
+          tar -xJf /tmp/shellcheck.tar.xz -C /tmp
+          sudo install -m 0755 "/tmp/shellcheck-${SC_VERSION}/shellcheck" /usr/local/bin/shellcheck
+          shellcheck --version
+          shellcheck --version | grep -q "version: 0.11.0"
 
       - name: Run ShellCheck
         run: |
