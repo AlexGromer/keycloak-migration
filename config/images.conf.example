@@ -26,6 +26,13 @@ GHCR_IMAGE="ghcr.io/AlexGromer/keycloak-migration"
 # Where saved image tars (+ .sha256) are written. Default dist/ is gitignored.
 OUT_DIR="dist"
 
+# Build JDK per OS for the Quarkus hops (24/25/26). Sovereign bases differ:
+# Astra ubi18 (Debian 12) ships openjdk-17 (NOT 21) — and KC 24/25/26 all support 17;
+# RED OS ubi8 has 17 and 21. KC16 (WildFly) always uses JDK 11.
+# ASTRA_JDK="17"
+# REDOS_JDK="21"
+# JDK_KC16="11"
+
 # Optionally restrict the matrix (defaults shown). Comma-separated.
 # VERSIONS_CSV="16.1.1,24.0.5,25.0.6,26.6.3"
 # OSES_CSV="astra,redos"

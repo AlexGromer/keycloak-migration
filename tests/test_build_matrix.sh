@@ -10,6 +10,9 @@ source "$SCRIPT_DIR/test_framework.sh"
 
 WORK="$(mktemp -d)"
 
+# Isolate from any operator config/images.conf so assertions test script defaults.
+export CONFIG_FILE="$WORK/no-such.conf"
+
 # Source the driver (its main is guarded -> not executed on source). This also
 # sources container_runtime.sh (defining cr). Define record-and-fail stubs AFTER,
 # so they shadow the real engines: any real call in dry-run fails the suite.
@@ -49,9 +52,11 @@ assert_contains "$PUB" "DRY-RUN (incl. publish)" "mode reflects publish scope, s
 # ============================================================================
 describe "migration-safety guard"
 # ============================================================================
-assert_false "build_matrix_main --versions 26.6.0 >/dev/null 2>&1" "26.6.0 FORBIDDEN -> non-zero"
-assert_false "build_matrix_main --versions 26.6.1 >/dev/null 2>&1" "26.6.1 FORBIDDEN -> non-zero"
-assert_true  "build_matrix_main --versions 26.6.3 >/dev/null 2>&1" "26.6.3 allowed"
+# Subshell each call: assert_* run via eval in THIS shell, so an unsubshelled
+# build_matrix_main would leak --versions into VERSIONS_CSV for later assertions.
+assert_false "(build_matrix_main --versions 26.6.0) >/dev/null 2>&1" "26.6.0 FORBIDDEN -> non-zero"
+assert_false "(build_matrix_main --versions 26.6.1) >/dev/null 2>&1" "26.6.1 FORBIDDEN -> non-zero"
+assert_true  "(build_matrix_main --versions 26.6.3) >/dev/null 2>&1" "26.6.3 allowed"
 
 # ============================================================================
 describe "config file overrides base; CLI overrides config"
@@ -63,6 +68,23 @@ CFG="$(build_matrix_main --config "$WORK/i.conf" 2>&1)"
 assert_contains "$CFG" "registry.custom/astra:9.9" "config ASTRA_BASE applied"
 CLI="$(build_matrix_main --config "$WORK/i.conf" --astra-base registry.cli/astra:1.0 2>&1)"
 assert_contains "$CLI" "registry.cli/astra:1.0" "CLI --astra-base overrides config"
+
+# ============================================================================
+describe "per-OS build JDK (sovereign bases differ)"
+# ============================================================================
+cat > "$WORK/jdk.conf" <<'EOF'
+ASTRA_JDK="17"
+REDOS_JDK="21"
+EOF
+# shellcheck disable=SC2034  # JDK is used inside the escaped assert_true conditions below
+JDK="$(build_matrix_main --config "$WORK/jdk.conf" 2>&1)"
+assert_true  "echo \"\$JDK\" | grep 'astra/26.6.3' | grep -q 'jdk=17'" "astra Quarkus uses ASTRA_JDK=17"
+assert_true  "echo \"\$JDK\" | grep 'redos/26.6.3' | grep -q 'jdk=21'" "redos Quarkus uses REDOS_JDK=21"
+assert_true  "echo \"\$JDK\" | grep 'astra/16.1.1' | grep -q 'jdk=11'" "KC16 always JDK 11"
+
+# GHCR repo name forced lowercase even if owner has caps
+LC="$(build_matrix_main --ghcr-image ghcr.io/AlexGromer/Repo 2>&1)"
+assert_contains "$LC" "ghcr.io/alexgromer/repo:" "GHCR image is lowercased"
 
 # ============================================================================
 describe "USE_IMAGE override switches a cell to branded consume"

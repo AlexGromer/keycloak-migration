@@ -44,6 +44,11 @@ ASTRA_BASE="${ASTRA_BASE:-registry.astralinux.ru/library/astra/ubi18:1.8}"
 ASTRA_BASE_KC16="${ASTRA_BASE_KC16:-registry.astralinux.ru/library/astra/ubi17:1.7}"
 REDOS_BASE="${REDOS_BASE:-registry.red-soft.ru/ubi8/ubi}"
 REDOS_BASE_KC16="${REDOS_BASE_KC16:-registry.red-soft.ru/ubi8/ubi}"
+# Build JDK per OS for the Quarkus hops (sovereign bases differ: Astra ubi18/Debian12
+# ships openjdk-17 not 21; RED OS ubi8 has 17/21). KC16 (WildFly) needs JDK 11.
+ASTRA_JDK="${ASTRA_JDK:-21}"
+REDOS_JDK="${REDOS_JDK:-21}"
+JDK_KC16="${JDK_KC16:-11}"
 
 _bm_usage() { sed -n '2,21p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; }
 
@@ -71,6 +76,17 @@ _bm_base_ref() {
         *) log_error "unknown OS: $os (expected astra|redos)"; return 1 ;;
     esac
     printf '%s' "$ref"
+}
+
+# Build JDK for a cell: KC16->JDK_KC16; else per-OS (ASTRA_JDK / REDOS_JDK).
+_bm_jdk() {
+    local os="$1" version="$2"
+    if [[ "$version" == 16.* ]]; then printf '%s' "$JDK_KC16"; return; fi
+    case "$os" in
+        astra) printf '%s' "$ASTRA_JDK" ;;
+        redos) printf '%s' "$REDOS_JDK" ;;
+        *)     printf '%s' "21" ;;
+    esac
 }
 
 # Per-cell branded/pre-built override: USE_IMAGE_<os>_<ver_underscored>.
@@ -109,8 +125,9 @@ _bm_cell() {
         _bm_run "$EXECUTE" "cr tag ${use_ref} ${ghcr_ref}"    -- cr tag "$use_ref" "$ghcr_ref"
         _bm_run "$EXECUTE" "cr save -o ${tar} ${ghcr_ref}"    -- cr save -o "$tar" "$ghcr_ref"
     else
-        local jdk=21 cf="containerfiles/Containerfile.kc"
-        if [[ "$version" == 16.* ]]; then jdk=11; cf="containerfiles/Containerfile.kc16"; fi
+        local cf="containerfiles/Containerfile.kc" jdk
+        jdk="$(_bm_jdk "$os" "$version")"
+        if [[ "$version" == 16.* ]]; then cf="containerfiles/Containerfile.kc16"; fi
         local base
         base="$(_bm_base_ref "$os" "$version")" || return 1
         log_info "== CELL ${os}/${version}  mode=BUILD  base=${base}  jdk=${jdk}  cf=${cf}  ->  ${ghcr_ref}"
@@ -155,6 +172,9 @@ build_matrix_main() {
             *) log_error "unknown argument: $1"; _bm_usage; return 2 ;;
         esac
     done
+
+    # OCI repository names must be lowercase (e.g. owner "AlexGromer" -> "alexgromer").
+    GHCR_IMAGE="$(printf '%s' "$GHCR_IMAGE" | tr '[:upper:]' '[:lower:]')"
 
     local mode="DRY-RUN (plan only)"
     if [[ "$EXECUTE" == "true" && "$PUBLISH" == "true" ]]; then mode="LIVE BUILD + PUBLISH"
