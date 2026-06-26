@@ -1,0 +1,76 @@
+# Containerfile.kc16 — Keycloak 16.1.1 (WildFly) FROM a sovereign OS base.
+#
+# KC16 is the WildFly distribution (NOT Quarkus): install dir /opt/jboss/keycloak,
+# standalone.sh, Java 11, env DB_VENDOR/DB_ADDR/... + KEYCLOAK_USER/PASSWORD, and
+# NO `kc.sh build`. This diverges fundamentally from Containerfile.kc (Quarkus 24+).
+#
+# Build args:
+#   KC_BASE_IMAGE   sovereign base (Astra SE ubi17 / RED OS ubi8) — operator-supplied
+#   KC_VERSION      16.1.1
+#   JDK_VERSION     11 (WildFly KC16 runs on Java 8/11, NOT 17+)
+#   KC_DIST_BASE_URL  Keycloak release mirror (default GitHub releases)
+#
+# NOTE (Phase A): this is a recipe SCAFFOLD. The plain server tarball is not the
+# full container image — the official image also wires a postgres JDBC module +
+# DB CLIs + add-user. The datasource/module wiring is a Phase-B hardening item;
+# this Containerfile is never built in CI and is validated at Phase B against a
+# real licensed base (then optionally fully vendored for offline builds).
+
+ARG KC_BASE_IMAGE
+ARG KC_VERSION=16.1.1
+ARG JDK_VERSION=11
+FROM ${KC_BASE_IMAGE}
+
+ARG KC_VERSION
+ARG JDK_VERSION
+ARG KC_DIST_BASE_URL=https://github.com/keycloak/keycloak/releases/download
+
+# OpenJDK 11 + tooling — apt (Astra) / dnf|yum (RED OS) autodetect.
+RUN set -eux; \
+    if command -v apt-get >/dev/null 2>&1; then \
+        apt-get update; \
+        apt-get install -y --no-install-recommends "openjdk-${JDK_VERSION}-jdk" tar gzip curl ca-certificates \
+          || apt-get install -y --no-install-recommends default-jdk tar gzip curl ca-certificates; \
+        rm -rf /var/lib/apt/lists/*; \
+    elif command -v dnf >/dev/null 2>&1; then \
+        dnf install -y "java-${JDK_VERSION}-openjdk-devel" tar gzip curl \
+          || dnf install -y java-11-openjdk-devel tar gzip curl; \
+        dnf clean all; \
+    elif command -v yum >/dev/null 2>&1; then \
+        yum install -y "java-${JDK_VERSION}-openjdk-devel" tar gzip curl; \
+        yum clean all; \
+    else echo "WARN: no apt/dnf/yum found; base image must already provide JDK ${JDK_VERSION}"; fi
+
+# Fail loudly if the wrong JDK major landed (the || fallback above can pick another).
+RUN java -version 2>&1 | grep -qE "version \"(1\.)?${JDK_VERSION}" \
+    || { echo "ERROR: expected JDK ${JDK_VERSION}, got:"; java -version; exit 1; }
+
+# jboss user/group (uid/gid 1000), matching the official image layout.
+RUN groupadd -r -g 1000 jboss 2>/dev/null || true; \
+    useradd -u 1000 -r -g jboss -m -d /opt/jboss -s /sbin/nologin jboss 2>/dev/null || true; \
+    mkdir -p /opt/jboss/keycloak /opt/jboss/tools
+
+# WildFly server distribution -> /opt/jboss/keycloak (same release URL scheme as 24+).
+RUN set -eux; \
+    curl -fsSL "${KC_DIST_BASE_URL}/${KC_VERSION}/keycloak-${KC_VERSION}.tar.gz" -o /tmp/keycloak.tar.gz; \
+    tar -xzf /tmp/keycloak.tar.gz -C /opt/jboss/keycloak --strip-components=1; \
+    rm -f /tmp/keycloak.tar.gz
+
+# Vendored WildFly entrypoint scaffold (see containerfiles/kc16/). Build context = repo root.
+COPY containerfiles/kc16/docker-entrypoint.sh /opt/jboss/tools/docker-entrypoint.sh
+RUN chmod +x /opt/jboss/tools/docker-entrypoint.sh && chown -R jboss:jboss /opt/jboss
+
+ENV KEYCLOAK_VERSION=${KC_VERSION} \
+    JBOSS_HOME=/opt/jboss/keycloak \
+    LAUNCH_JBOSS_IN_BACKGROUND=1 \
+    PROXY_ADDRESS_FORWARDING=false \
+    DB_VENDOR=postgres \
+    DB_PORT=5432 \
+    DB_DATABASE=keycloak \
+    DB_SCHEMA=public
+
+EXPOSE 8080 8443
+USER jboss
+WORKDIR /opt/jboss/keycloak
+ENTRYPOINT ["/opt/jboss/tools/docker-entrypoint.sh"]
+CMD ["-b", "0.0.0.0"]

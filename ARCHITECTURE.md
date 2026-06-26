@@ -49,6 +49,7 @@
 | ADR-003 | 2026-06-24 | KK images built FROM Astra/RedOS base; overridable image ref; offline tar load | Accepted | Sovereign OS requirement, air-gapped/banking delivery, branded images |
 | ADR-004 | 2026-06-24 | CONTAINER_RUNTIME abstraction (podman/docker autodetect); single-host `run` topology added | Accepted | Astra/RedOS ship podman; tool was docker-hardcoded |
 | ADR-005 | 2026-06-24 | Authoritative success gate = MIGRATION_MODEL advance (Layer 2), tightened wait + fail-closed | Accepted | "Container started" ≠ "migration applied"; old regex too loose |
+| ADR-006 | 2026-06-26 | Air-gap bundle (extends ADR-003): build 8 images (16.1.1/24.0.5/25.0.6/26.6.3 × Astra SE/RED OS) FROM operator-supplied licensed bases → PRIVATE GHCR + PRIVATE Release tar; recipes/tooling PUBLIC, bases NEVER in repo; file-config (config/images.conf) for build/use/branded images | Accepted | Sovereign air-gap delivery + licence boundary; images can't live in git (size/licence) |
 <!-- | ADR-001 | 2026-01-15 | Use PostgreSQL for persistence | Accepted | Need ACID, complex queries | -->
 
 ### ADR Template
@@ -86,6 +87,7 @@
 | Date | Change | ADR | Author |
 |------|--------|-----|--------|
 | 2026-06-24 | v3.7 container-hop migration: runtime abstraction, image acquisition (pull/load/preloaded/build), build helper, run topology, Layer-2 verification | ADR-001..005 | @AlexGromer |
+| 2026-06-26 | Air-gap packaging Phase A: Containerfile.kc16 (WildFly), build_matrix.sh (dry-run/build/publish + config/images.conf + USE-branded), build-images.yml (dispatch/self-hosted GHCR+Release), AIRGAP.md | ADR-006 | @AlexGromer |
 <!-- | 2026-01-15 | Initial architecture | ADR-001 | @user | -->
 
 ---

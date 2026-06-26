@@ -1,0 +1,86 @@
+name: Build Images (Sovereign, Air-gapped)
+
+# Manual-only. Builds the Keycloak × sovereign-OS image matrix on a SELF-HOSTED
+# runner (operator infra) — GitHub-hosted runners cannot reach Astra SE / RED OS
+# registries and the licence forbids building sovereign images on shared cloud.
+# Never runs on push/PR, so ci.yml stays the sole PR gate.
+on:
+  workflow_dispatch:
+    inputs:
+      oses:
+        description: "Comma-separated OS list"
+        default: "astra,redos"
+      versions:
+        description: "Comma-separated KC versions"
+        default: "16.1.1,24.0.5,25.0.6,26.6.3"
+      astra_base:
+        description: "Astra SE base (Quarkus 24/25/26)"
+        required: false
+      astra_base_kc16:
+        description: "Astra SE base for KC16 (openjdk-11)"
+        required: false
+      redos_base:
+        description: "RED OS base"
+        required: false
+      ghcr_image:
+        description: "GHCR namespace (private)"
+        default: "ghcr.io/${{ github.repository }}"
+      publish:
+        description: "Push to GHCR + attach Release tarballs"
+        type: boolean
+        default: false
+
+permissions:
+  contents: write   # Release upload
+  packages: write   # GHCR push
+
+jobs:
+  build:
+    runs-on: [self-hosted, sovereign]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: GHCR login (publish only)
+        if: ${{ inputs.publish }}
+        run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+
+      - name: Build (+publish) matrix
+        env:
+          ASTRA_BASE: ${{ inputs.astra_base }}
+          ASTRA_BASE_KC16: ${{ inputs.astra_base_kc16 }}
+          REDOS_BASE: ${{ inputs.redos_base }}
+          REDOS_BASE_KC16: ${{ inputs.redos_base }}
+          GHCR_IMAGE: ${{ inputs.ghcr_image }}
+        run: |
+          set -euo pipefail
+          chmod +x scripts/build_matrix.sh scripts/build_kc_image.sh
+          args=(--build --os "${{ inputs.oses }}" --versions "${{ inputs.versions }}" --out-dir dist)
+          if [ "${{ inputs.publish }}" = "true" ]; then args+=(--publish); fi
+          scripts/build_matrix.sh "${args[@]}"
+
+      - name: Compress + checksum tars
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          for t in dist/*.tar; do
+            xz -T0 -f "$t"
+            sha256sum "${t}.xz" > "${t}.xz.sha256"
+          done
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: kc-sovereign-images
+          path: dist/*.tar.xz*
+          if-no-files-found: error
+
+      - name: Attach to PRIVATE Release (publish only)
+        if: ${{ inputs.publish }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          gh release create "images-${{ github.run_id }}" dist/*.tar.xz dist/*.tar.xz.sha256 \
+            --prerelease --title "Sovereign image bundle (run ${{ github.run_id }})" \
+            --notes "Air-gapped Keycloak × Astra SE / RED OS image bundle. Private repo -> private assets."

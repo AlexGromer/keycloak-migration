@@ -71,6 +71,14 @@
 | scripts/harness/lib/harness_integrity.sh | Harness: per-hop row-count data-integrity gate | _harness_integrity_eval(), harness_baseline(), harness_integrity_check() |
 | profiles/test-harness-sovereign.yaml | Profile: run+build topology for the migration harness | — |
 | tests/test_migration_harness.sh | Tests: harness dry-run plan + non-mutation + integrity policy | — |
+| config/images.conf.example | Operator-editable image config template (build bases, GHCR, USE/branded overrides); real images.conf gitignored | — |
+| scripts/build_matrix.sh | Build/save/sha256/GHCR-publish the 4×2 KC×sovereign-OS matrix; default dry-run; reads config/images.conf | build_matrix_main() |
+| tests/test_build_matrix.sh | Tests: build_matrix dry-run plan + config/USE override + non-mutation | — |
+| containerfiles/Containerfile.kc16 | WildFly 16.1.1 image FROM sovereign base (JDK 11, /opt/jboss/keycloak, no kc.sh; Phase-B validated) | — |
+| containerfiles/kc16/docker-entrypoint.sh | WildFly KC16 entrypoint scaffold (add-user + standalone; DB datasource = Phase-B) | — |
+| .github/workflows/build-images.yml | workflow_dispatch self-hosted build+publish (private GHCR + Release tar.xz) | — |
+| docs/AIRGAP.md | Air-gap runbook: configure → plan → build/export → transfer → consume (load/pull/preloaded) | — |
+| docs/AIRGAP.md | Documentation | — |
 ## Directory Structure
 
 ```

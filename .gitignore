@@ -11,6 +11,10 @@
 *.env
 .env.local
 
+# Operator-supplied image config (licensed/internal registry refs) — keep .example
+config/images.conf
+*.local.conf
+
 # Credentials & keys
 *_key
 *_key.*
