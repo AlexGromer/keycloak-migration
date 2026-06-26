@@ -1,12 +1,13 @@
-# Keycloak Migration Tool v3.6
+# Keycloak Migration Tool v3.8
 
-**One-command Keycloak migration utility** with auto-detection, multi-tenant support, clustered deployments, real-time monitoring, production hardening, **security hardening** (SAST, secrets scanning, input validation, audit logging), and support for all Keycloak-supported databases.
+**One-command Keycloak migration utility** with auto-detection, multi-tenant support, clustered deployments, real-time monitoring, production hardening, **security hardening** (SAST, secrets scanning, input validation, audit logging), **container-hop migration** (boots a real Keycloak container per hop and verifies the MIGRATION_MODEL Layer-2 advance), **sovereign-OS images** (Astra Linux SE / RED OS) with **air-gapped** offline distribution, and support for all Keycloak-supported databases.
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Tests](https://img.shields.io/badge/tests-428%20total-success)](tests/)
 [![Bash](https://img.shields.io/badge/bash-5.0%2B-green.svg)](scripts/)
 [![Databases](https://img.shields.io/badge/databases-7-blue.svg)](scripts/lib/database_adapter.sh)
-[![Version](https://img.shields.io/badge/version-v3.6-blue.svg)](ROADMAP.md)
+[![Version](https://img.shields.io/badge/version-v3.8-blue.svg)](CHANGELOG.md)
+[![Images](https://img.shields.io/badge/sovereign%20images-Astra%20SE%20%7C%20RED%20OS-blue.svg)](docs/AIRGAP.md)
 
 ---
 
@@ -41,6 +42,27 @@ If you already have a profile:
 ```
 
 **That's it!** The tool handles everything automatically.
+
+---
+
+## 📦 Sovereign Container Images (GHCR + Air-gap)
+
+Keycloak hop images built FROM sovereign OS bases (**Astra Linux SE / RED OS**), published to **private GHCR** and shippable as **air-gapped tarballs**. Multistage + non-root (uid 1000); the Quarkus images bake `--db=postgres` at build time.
+
+| Image tag | KC version | OS |
+|---|---|---|
+| `ghcr.io/<owner>/keycloak-migration:astra-26.6.3` | 26.6.3 (Quarkus) | Astra SE |
+| `…:redos-26.6.3` | 26.6.3 (Quarkus) | RED OS |
+| `…:{astra,redos}-{16.1.1,24.0.5,25.0.6}` | hop chain (16→24→26 / 16→25) | both |
+
+```bash
+# Online (private GHCR — Connect the package to this repo in Package settings):
+docker login ghcr.io && docker pull ghcr.io/<owner>/keycloak-migration:redos-26.6.3
+# Offline (air-gap):
+docker load -i kc-redos-26.6.3.tar.xz
+```
+
+**Build the matrix yourself** (operator-supplied licensed bases): edit `config/images.conf` → `scripts/build_matrix.sh --build [--publish]`. Full build → export → transfer → consume runbook: **[docs/AIRGAP.md](docs/AIRGAP.md)**.
 
 ---
 
