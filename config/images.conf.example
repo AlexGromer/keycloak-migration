@@ -1,0 +1,40 @@
+# config/images.conf.example — copy to config/images.conf and edit.
+#
+# Sourced by scripts/build_matrix.sh (plain KEY=value bash, like kc_discovery.sh
+# --config migration.conf). The real config/images.conf is gitignored because it
+# may carry licensed / internal registry refs. Precedence: ambient env < this
+# config file < CLI flags (a CLI flag always wins; the file overrides ambient env).
+#
+# This is THE single place to change which images are built or used, without
+# touching any script.
+
+# ── Build base images (acquisition = build): which sovereign OS each cell builds FROM ──
+# Astra Linux SE (apt-based; openjdk packages). ubi18 = SE 1.8 (for Quarkus 24/25/26),
+# ubi17 = SE 1.7 (carries openjdk-11 for the WildFly KC16 build).
+ASTRA_BASE="registry.astralinux.ru/library/astra/ubi18:1.8"
+ASTRA_BASE_KC16="registry.astralinux.ru/library/astra/ubi17:1.7"
+
+# RED OS (RED SOFT, dnf-based; java-*-openjdk packages). RED OS 8.0.x base.
+# NOTE: java-11 availability on RED OS is UNVERIFIED — the RedOS KC16 cell may
+# fail to build until you confirm an openjdk-11 package in your RED OS repo.
+REDOS_BASE="registry.red-soft.ru/ubi8/ubi"
+REDOS_BASE_KC16="registry.red-soft.ru/ubi8/ubi"
+
+# ── Publish / output ──
+# Private GHCR namespace the built/retagged images are pushed to under --publish.
+GHCR_IMAGE="ghcr.io/AlexGromer/keycloak-migration"
+# Where saved image tars (+ .sha256) are written. Default dist/ is gitignored.
+OUT_DIR="dist"
+
+# Optionally restrict the matrix (defaults shown). Comma-separated.
+# VERSIONS_CSV="16.1.1,24.0.5,25.0.6,26.6.3"
+# OSES_CSV="astra,redos"
+
+# ── Per-cell USE / branded image override (optional) ──
+# When set for a cell, build_matrix SKIPS build-from-base and instead CONSUMES a
+# pre-built / already-branded Keycloak image (cr pull -> retag -> save/push). No
+# base image is needed for that cell. Key form:
+#   USE_IMAGE_<os>_<version-with-dots-as-underscores>="<image ref>"
+# Examples (uncomment + edit):
+# USE_IMAGE_astra_26_6_3="registry.local/keycloak-branded:26.6.3-astra"
+# USE_IMAGE_redos_25_0_6="registry.local/keycloak-branded:25.0.6-redos"
