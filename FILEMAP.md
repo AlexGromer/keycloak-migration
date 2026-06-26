@@ -65,6 +65,12 @@
 | tests/test_migration_verify.sh | Tests: Layer-2 verify + skipped indexes | — |
 | tests/test_container_runtime.sh | Tests: runtime abstraction | — |
 | tests/test_dist_image_ref.sh | Tests: image-ref resolution + override | — |
+| scripts/harness/run_migration_harness.sh | Harness orchestrator: fresh PG → KC16 → seed → full hop chain (default dry-run) | harness_main(), harness_run_hop() |
+| scripts/harness/lib/harness_runtime.sh | Harness: _step dry-run/live chokepoint + PG/KC16/network lifecycle | _step(), harness_pg_up(), harness_boot_base16() |
+| scripts/harness/lib/harness_seed.sh | Harness: random kcadm seeder (realms/users/clients) | harness_seed() |
+| scripts/harness/lib/harness_integrity.sh | Harness: per-hop row-count data-integrity gate | _harness_integrity_eval(), harness_baseline(), harness_integrity_check() |
+| profiles/test-harness-sovereign.yaml | Profile: run+build topology for the migration harness | — |
+| tests/test_migration_harness.sh | Tests: harness dry-run plan + non-mutation + integrity policy | — |
 ## Directory Structure
 
 ```
