@@ -106,11 +106,15 @@ profile_load() {
 
     # Container runtime / image acquisition settings (v3.6 — podman/run support)
     export PROFILE_CONTAINER_RUNTIME=$(parse_yaml_value "runtime" "$profile_file")
-    export PROFILE_CONTAINER_IMAGE_REF=$(parse_yaml_value "image_ref" "$profile_file")
-    export PROFILE_CONTAINER_IMAGE_TAR=$(parse_yaml_value "image_tar" "$profile_file")
+    # v3.9: image_ref / image_tar / base_image carry a ':' (registry refs) or a filesystem
+    # path that the flat YAML parser CANNOT represent (parse_yaml_value truncates at the
+    # last ':'). So a value pre-set in the ENVIRONMENT WINS over the YAML value — this lets
+    # wrappers/CI drive the exact image ref without re-tagging. Empty env => YAML as before.
+    export PROFILE_CONTAINER_IMAGE_REF="${PROFILE_CONTAINER_IMAGE_REF:-$(parse_yaml_value "image_ref" "$profile_file")}"
+    export PROFILE_CONTAINER_IMAGE_TAR="${PROFILE_CONTAINER_IMAGE_TAR:-$(parse_yaml_value "image_tar" "$profile_file")}"
     export PROFILE_CONTAINER_ACQUISITION=$(parse_yaml_value "acquisition" "$profile_file")
     export PROFILE_CONTAINER_ACQUISITION="${PROFILE_CONTAINER_ACQUISITION:-pull}"
-    export PROFILE_CONTAINER_BASE_IMAGE=$(parse_yaml_value "base_image" "$profile_file")
+    export PROFILE_CONTAINER_BASE_IMAGE="${PROFILE_CONTAINER_BASE_IMAGE:-$(parse_yaml_value "base_image" "$profile_file")}"
 
     # Docker Compose settings (if applicable)
     export PROFILE_KC_COMPOSE_FILE=$(parse_yaml_section_value "docker_compose" "compose_file" "$profile_file")
@@ -212,8 +216,14 @@ EOF
     registry: ${PROFILE_CONTAINER_REGISTRY:-docker.io}
     image: ${PROFILE_CONTAINER_IMAGE:-keycloak/keycloak}
     pull_policy: ${PROFILE_CONTAINER_PULL_POLICY:-IfNotPresent}
-
+    runtime: ${PROFILE_CONTAINER_RUNTIME:-}
+    acquisition: ${PROFILE_CONTAINER_ACQUISITION:-pull}
 EOF
+        # NOTE: image_ref carries ':' and CANNOT be stored in this flat YAML — pass it via
+        # the PROFILE_CONTAINER_IMAGE_REF env var (profile_load honors a pre-set value).
+        [[ -n "${PROFILE_CONTAINER_IMAGE_TAR:-}" ]] && \
+            printf '    image_tar: %s\n' "${PROFILE_CONTAINER_IMAGE_TAR}" >> "$profile_file"
+        printf '\n' >> "$profile_file"
     fi
 
     # Add migration settings

@@ -78,6 +78,13 @@
 | .github/workflows/build-images.yml | workflow_dispatch self-hosted build+publish (private GHCR + Release tar.xz) | — |
 | docs/AIRGAP.md | Air-gap runbook: configure → plan → build/export → transfer → consume (load/pull/preloaded) | — |
 | docs/AIRGAP.md | Documentation | — |
+| docs/MIGRATION_GUIDE.md | Documentation | — |
+| scripts/migrate_oneshot.sh | Shell script | — |
+| tests/test_profile_env_precedence.sh | Tests | — |
+| tests/test_profile_save_container.sh | Tests | — |
+| tests/test_noninteractive.sh | Tests | — |
+| tests/test_config_wizard_run.sh | Tests | — |
+| tests/test_migrate_oneshot.sh | Tests | — |
 ## Directory Structure
 
 ```

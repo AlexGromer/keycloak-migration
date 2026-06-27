@@ -41,6 +41,23 @@ If you already have a profile:
 ./scripts/migrate_keycloak_v3.sh migrate --profile=my-profile.yaml
 ```
 
+### 4. Container-hop in one command (sovereign images, v3.9)
+
+For the `16→24.0.5→26.6.3` (target 26) or `16→25.0.6` (target 25) container-hop migration,
+`migrate_oneshot.sh` does everything — acquire images → generate a run+container profile → migrate
+— non-interactively. Default dry-run; `--go` for live:
+
+```bash
+export CONTAINER_RUNTIME=docker
+# Plan only (mutates nothing):
+scripts/migrate_oneshot.sh --target 26 --os astra --db-host <pg-host> --dry-run
+# Live (target 26 = 16.1.1 → 24.0.5 → 26.6.3):
+export PROFILE_DB_PASSWORD=...
+scripts/migrate_oneshot.sh --target 26 --os astra --db-host <pg-host> --source pull --go
+```
+
+See **`docs/MIGRATION_GUIDE.md`** for the full runbook (both paths, air-gap, verification, rollback).
+
 **That's it!** The tool handles everything automatically.
 
 ---

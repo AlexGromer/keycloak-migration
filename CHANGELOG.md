@@ -16,6 +16,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [3.9.0] - 2026-06-27
+
+### Added
+- **One-shot migration wrapper** `scripts/migrate_oneshot.sh`: acquire images (pull/bundle/preloaded)
+  → generate a run+container profile → run the full migration non-interactively. Default dry-run;
+  `--go` for live. Path A (target 25) / Path B (target 26). (ADR-007)
+- **Non-interactive mode** for `migrate_keycloak_v3.sh`: `--yes`/`-y` flag + `ASSUME_DEFAULTS` env +
+  a `_confirm` helper across confirmation prompts. The main gate is **fail-closed**: no TTY and no
+  `--yes` → refuse (never migrate a real DB silently). Interactive behaviour unchanged. (ADR-007)
+- `config_wizard.sh`: deployment-mode **Run (container-hop)**, image **acquisition** choice
+  (pull/load/preloaded/build), target presets (25.0.6 / 26.6.3), env-honoring non-interactive mode.
+- Tests: env-precedence, profile_save container block, non-interactive `_confirm`/gate, wizard
+  run-profile, and `migrate_oneshot` dry-run/validation suites (24 suites total, all green).
+
+### Changed
+- **`profile_load` env precedence (ADR-007):** a pre-set `PROFILE_CONTAINER_IMAGE_REF` /
+  `PROFILE_CONTAINER_IMAGE_TAR` / `PROFILE_CONTAINER_BASE_IMAGE` now WINS over YAML (the flat parser
+  cannot store ':' refs). Real migrations consume the `<os>-<version>` sovereign tags **directly —
+  no re-tag**. Backward compatible (empty env → YAML as before; harness unaffected).
+- `profile_save` now emits `acquisition` and `runtime` in the container block.
+- `docs/MIGRATION_GUIDE.md`: one-shot path, env-driven image ref (re-tag no longer required),
+  `--yes`, wizard run support.
+
+---
+
 ## [3.8.0] - 2026-06-26
 
 ### Added
