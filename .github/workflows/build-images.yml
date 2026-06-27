@@ -23,8 +23,8 @@ on:
         description: "RED OS base"
         required: false
       ghcr_image:
-        description: "GHCR namespace (private)"
-        default: "ghcr.io/${{ github.repository }}"
+        description: "GHCR namespace (private; blank = ghcr.io/<owner>/<repo>)"
+        required: false
       publish:
         description: "Push to GHCR + attach Release tarballs"
         type: boolean
@@ -51,7 +51,7 @@ jobs:
           ASTRA_BASE_KC16: ${{ inputs.astra_base_kc16 }}
           REDOS_BASE: ${{ inputs.redos_base }}
           REDOS_BASE_KC16: ${{ inputs.redos_base }}
-          GHCR_IMAGE: ${{ inputs.ghcr_image }}
+          GHCR_IMAGE: ${{ inputs.ghcr_image || format('ghcr.io/{0}', github.repository) }}
         run: |
           set -euo pipefail
           chmod +x scripts/build_matrix.sh scripts/build_kc_image.sh
