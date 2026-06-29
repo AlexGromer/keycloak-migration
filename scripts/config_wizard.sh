@@ -26,8 +26,8 @@ MAGENTA='\033[0;35m'
 NC='\033[0m'
 BOLD='\033[1m'
 
-# Profile directory
-PROFILE_DIR="$(cd "$SCRIPT_DIR/.." && pwd)/profiles"
+# Profile directory (honor a pre-set PROFILE_DIR for tests/automation).
+PROFILE_DIR="${PROFILE_DIR:-$(cd "$SCRIPT_DIR/.." && pwd)/profiles}"
 mkdir -p "$PROFILE_DIR"
 
 # Non-interactive mode (for CI/CD, Ansible, automation)
@@ -288,7 +288,8 @@ step_deployment_mode() {
         "Docker (single container)" \
         "Docker Compose (multi-service stack)" \
         "Kubernetes (native)" \
-        "Deckhouse (K8s + Deckhouse modules)")
+        "Deckhouse (K8s + Deckhouse modules)" \
+        "Run (transient container per hop — container-hop migration)")
 
     case "$choice" in
         "Standalone"*) PROFILE_KC_DEPLOYMENT_MODE="standalone" ;;
@@ -296,6 +297,7 @@ step_deployment_mode() {
         "Docker Compose"*) PROFILE_KC_DEPLOYMENT_MODE="docker-compose" ;;
         "Kubernetes"*) PROFILE_KC_DEPLOYMENT_MODE="kubernetes" ;;
         "Deckhouse"*) PROFILE_KC_DEPLOYMENT_MODE="deckhouse" ;;
+        "Run"*) PROFILE_KC_DEPLOYMENT_MODE="run" ;;
     esac
 
     log_success "Deployment mode: $PROFILE_KC_DEPLOYMENT_MODE"
@@ -308,35 +310,64 @@ step_distribution_mode() {
     log_section "[4/8] Keycloak Distribution"
 
     echo ""
-    local choice=$(ask_choice "How to obtain Keycloak distributions?" \
-        "Download from GitHub (always latest)" \
-        "Use pre-downloaded archives (faster, offline)" \
-        "Container images (docker.io/keycloak)" \
-        "Helm charts (for Kubernetes)")
+    # Honor a pre-set distribution mode (non-interactive / env-driven); else ask.
+    if [[ -n "${PROFILE_KC_DISTRIBUTION_MODE:-}" ]] && \
+       { [[ "$NON_INTERACTIVE" == "true" ]] || ask_yes_no "Keep preset distribution mode ($PROFILE_KC_DISTRIBUTION_MODE)?" "y"; }; then
+        log_info "Using preset distribution mode: $PROFILE_KC_DISTRIBUTION_MODE"
+    else
+        local choice=$(ask_choice "How to obtain Keycloak distributions?" \
+            "Download from GitHub (always latest)" \
+            "Use pre-downloaded archives (faster, offline)" \
+            "Container images (docker.io/keycloak)" \
+            "Helm charts (for Kubernetes)")
 
-    case "$choice" in
-        "Download"*) PROFILE_KC_DISTRIBUTION_MODE="download" ;;
-        "Use pre-downloaded"*) PROFILE_KC_DISTRIBUTION_MODE="predownloaded" ;;
-        "Container"*) PROFILE_KC_DISTRIBUTION_MODE="container" ;;
-        "Helm"*) PROFILE_KC_DISTRIBUTION_MODE="helm" ;;
-    esac
+        case "$choice" in
+            "Download"*) PROFILE_KC_DISTRIBUTION_MODE="download" ;;
+            "Use pre-downloaded"*) PROFILE_KC_DISTRIBUTION_MODE="predownloaded" ;;
+            "Container"*) PROFILE_KC_DISTRIBUTION_MODE="container" ;;
+            "Helm"*) PROFILE_KC_DISTRIBUTION_MODE="helm" ;;
+        esac
+    fi
 
-    # Container-specific settings
+    # Container-specific settings (honor pre-set env values; only ask for what's unset).
     if [[ "$PROFILE_KC_DISTRIBUTION_MODE" == "container" ]]; then
         # shellcheck disable=SC2034  # consumed externally by profile_save (profile_manager.sh)
-        PROFILE_CONTAINER_REGISTRY=$(ask_text "Container registry" "docker.io")
+        PROFILE_CONTAINER_REGISTRY="${PROFILE_CONTAINER_REGISTRY:-$(ask_text "Container registry" "ghcr.io/alexgromer")}"
         # shellcheck disable=SC2034  # consumed externally by profile_save (profile_manager.sh)
-        PROFILE_CONTAINER_IMAGE=$(ask_text "Image name" "keycloak/keycloak")
-        PROFILE_CONTAINER_PULL_POLICY=$(ask_choice "Image pull policy?" \
-            "IfNotPresent (default)" \
-            "Always (always pull latest)" \
-            "Never (use local only)") || echo "IfNotPresent"
+        PROFILE_CONTAINER_IMAGE="${PROFILE_CONTAINER_IMAGE:-$(ask_text "Image name" "keycloak-migration")}"
 
-        case "$PROFILE_CONTAINER_PULL_POLICY" in
-            "IfNotPresent"*) PROFILE_CONTAINER_PULL_POLICY="IfNotPresent" ;;
-            "Always"*) PROFILE_CONTAINER_PULL_POLICY="Always" ;;
-            "Never"*) PROFILE_CONTAINER_PULL_POLICY="Never" ;;
-        esac
+        if [[ -z "${PROFILE_CONTAINER_PULL_POLICY:-}" ]]; then
+            PROFILE_CONTAINER_PULL_POLICY=$(ask_choice "Image pull policy?" \
+                "IfNotPresent (default)" \
+                "Always (always pull latest)" \
+                "Never (use local only)") || echo "IfNotPresent"
+            case "$PROFILE_CONTAINER_PULL_POLICY" in
+                "IfNotPresent"*) PROFILE_CONTAINER_PULL_POLICY="IfNotPresent" ;;
+                "Always"*) PROFILE_CONTAINER_PULL_POLICY="Always" ;;
+                "Never"*) PROFILE_CONTAINER_PULL_POLICY="Never" ;;
+            esac
+        fi
+
+        # Image acquisition mode (v3.9 — container-hop: pull/load/preloaded/build)
+        if [[ -z "${PROFILE_CONTAINER_ACQUISITION:-}" ]]; then
+            # shellcheck disable=SC2034  # consumed externally by profile_save (profile_manager.sh)
+            PROFILE_CONTAINER_ACQUISITION=$(ask_choice "Image acquisition mode?" \
+                "pull (from registry)" \
+                "preloaded (already loaded locally)" \
+                "load (from a saved tar)" \
+                "build (from a sovereign base image)") || echo "pull"
+            case "$PROFILE_CONTAINER_ACQUISITION" in
+                pull*)      PROFILE_CONTAINER_ACQUISITION="pull" ;;
+                preloaded*) PROFILE_CONTAINER_ACQUISITION="preloaded" ;;
+                load*)      PROFILE_CONTAINER_ACQUISITION="load" ;;
+                build*)     PROFILE_CONTAINER_ACQUISITION="build" ;;
+            esac
+        fi
+
+        echo ""
+        log_info "Note: an image tag containing ':' (e.g. astra-26.6.3) cannot be stored in the"
+        log_info "flat YAML. Set the full ref via env before migrating (honored by profile_load):"
+        log_info "  export PROFILE_CONTAINER_IMAGE_REF='${PROFILE_CONTAINER_REGISTRY}/${PROFILE_CONTAINER_IMAGE}:<os>-{version}'"
     fi
 
     log_success "Distribution mode: $PROFILE_KC_DISTRIBUTION_MODE"
@@ -429,7 +460,7 @@ step_versions() {
         PROFILE_KC_CURRENT_VERSION=$(ask_text "Current Keycloak version" "16.1.1")
     fi
 
-    PROFILE_KC_TARGET_VERSION=$(ask_text "Target Keycloak version" "26.0.7")
+    PROFILE_KC_TARGET_VERSION=$(ask_text "Target Keycloak version (Path A=25.0.6 / Path B=26.6.3)" "26.6.3")
 
     log_success "Migration: $PROFILE_KC_CURRENT_VERSION → $PROFILE_KC_TARGET_VERSION"
 }

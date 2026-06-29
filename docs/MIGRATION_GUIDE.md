@@ -248,38 +248,67 @@ TARGET_MAJOR=25 scripts/harness/run_migration_harness.sh --go \
 В отличие от harness, сидинга нет — данные уже в БД, нужен только **пароль БД** (admin-пароль не
 требуется).
 
-### 2.1. Как инструмент находит образы (важно — прочитайте до создания профиля)
+### 2.0. Самый простой способ — `migrate_oneshot.sh` (одна команда, v3.9)
 
-Полный ref образа инструмент строит так:
-`<registry>/<image>:<version>` (из YAML-ключей `registry:` и `image:`), напр.
-`ghcr.io/alexgromer/keycloak-migration:26.6.3`.
+Обёртка делает всё сама: получает образы → генерирует run+container профиль → запускает миграцию
+неинтерактивно. **Ни re-tag, ни ручной профиль не нужны** — env-ref `PROFILE_CONTAINER_IMAGE_REF`
+теперь переживает загрузку профиля. По умолчанию — dry-run; живой прогон через `--go`.
 
-> **Подводный камень (проверено по коду).** Тег вида `<os>-<version>` (`astra-26.6.3`) задаётся
-> только через `PROFILE_CONTAINER_IMAGE_REF`, но плоский YAML-парсер инструмента **не умеет хранить
-> значения с `:`**, а `migrate` при загрузке профиля **затирает** эту env-переменную. Поэтому для
-> реальной миграции используется надёжная схема: **получить образы → перетегировать в
-> `<registry>/<image>:<version>` → `acquisition: preloaded`.** (Стенд-harness — единственный, кто
-> работает с `<os>-`-тегами, т.к. ставит ref после загрузки профиля и всегда `build`.)
+```bash
+cd /opt/kk_migration
+export CONTAINER_RUNTIME=docker
 
-Переименуйте уже полученные (раздел 0.3) образы в версионную схему:
+# 1) Безопасный план (ничего не мутирует)
+scripts/migrate_oneshot.sh --target 26 --os astra --db-host <pg-host> --db-name keycloak --dry-run
+
+# 2) Живая миграция Path B (target 26): pull из GHCR -> 16.1.1 -> 24.0.5 -> 26.6.3
+export PROFILE_DB_PASSWORD='<пароль-PostgreSQL>'
+scripts/migrate_oneshot.sh --target 26 --os astra --db-host <pg-host> --source pull --go
+
+# Path A (target 25): 16.1.1 -> 25.0.6
+scripts/migrate_oneshot.sh --target 25 --os astra --db-host <pg-host> --source pull --go
+
+# Air-gap (загрузка из бандла) вместо pull:
+scripts/migrate_oneshot.sh --target 26 --os astra --db-host <pg-host> \
+  --source bundle --bundle dist/kc-astra-bundle.tar.xz --go
+
+# Только сгенерировать профиль (без запуска):
+scripts/migrate_oneshot.sh --target 26 --os astra --db-host <pg-host> --gen-profile-only
+```
+
+Флаги: `--target 25|26`, `--os astra|redos`, `--source pull|bundle|preloaded`, `--image-ns <ref>`
+(дефолт `ghcr.io/alexgromer/keycloak-migration`), `--bundle <file>`, `--db-host/-port/-name/-user`,
+`--network`, `--profile-name`, `--gen-profile-only`, `--dry-run` (дефолт) / `--go`.
+
+Разделы **2.1–2.5** ниже — тот же процесс **вручную, по шагам**, если нужен контроль/кастомизация.
+
+### 2.1. Как инструмент находит образы
+
+Полный ref образа берётся из env `PROFILE_CONTAINER_IMAGE_REF` (с подстановкой `{version}`); если он
+не задан — из YAML-ключей `<registry>/<image>:<version>`.
+
+> **v3.9:** заданный в окружении `PROFILE_CONTAINER_IMAGE_REF` теперь **переживает** загрузку профиля
+> (env важнее YAML), поэтому `<os>-<version>`-теги (`astra-26.6.3`) используются **напрямую — re-tag
+> больше НЕ нужен**. (Раньше `profile_load` затирал эту переменную, и требовалось перетегирование.)
+
+Просто экспортируйте ref с плейсхолдером `{version}` — инструмент подставит версию каждого хопа:
 
 ```bash
 export CONTAINER_RUNTIME=docker
-NS=ghcr.io/alexgromer/keycloak-migration      # ваш registry/image (можно любой локальный)
-
-# Path B (target 26)
-docker tag $NS:astra-24.0.5 $NS:24.0.5
-docker tag $NS:astra-26.6.3 $NS:26.6.3
-# Path A (target 25)
-docker tag $NS:astra-25.0.6 $NS:25.0.6
-
-docker images | grep keycloak-migration       # убедитесь, что есть теги :24.0.5 / :26.6.3 (или :25.0.6)
+export PROFILE_CONTAINER_IMAGE_REF='ghcr.io/alexgromer/keycloak-migration:astra-{version}'
+# (для RED OS: ...:redos-{version})
 ```
+
+Образы должны быть доступны для выбранного `acquisition`: `pull` (логин в GHCR), `preloaded`
+(уже загружены локально — раздел 0.3) или `load` (из tar). Перетегирование в `:<version>` всё ещё
+работает как запасной вариант, но больше не требуется.
 
 ### 2.2. Создать профиль `profiles/<name>.yaml`
 
 Профиль должен быть **run + container** (по образцу `test-harness-sovereign.yaml`), а **не**
-standalone-download. Создайте файл (Path B — target 26):
+standalone-download. Можно сгенерировать интерактивно — `scripts/config_wizard.sh` (выберите
+deployment **Run** + distribution **Container** + acquisition), — либо создать файл вручную
+(Path B — target 26):
 
 ```yaml
 # profiles/kc-prod-26.yaml — реальная миграция KC16 -> 26.6.3 (Path B)
@@ -305,11 +334,11 @@ keycloak:
   target_version: 26.6.3       # <-- Path B. Для Path A поставьте 25.0.6
   run_container_name: kc-migrate
 
-  registry: ghcr.io/alexgromer       # <registry> для <registry>/<image>:<version>
-  image: keycloak-migration          # <image>
+  registry: ghcr.io/alexgromer       # запасной вариант, если PROFILE_CONTAINER_IMAGE_REF не задан
+  image: keycloak-migration
   container:
     runtime: docker
-    acquisition: preloaded           # образы уже загружены и перетегированы (раздел 2.1)
+    acquisition: pull                # pull | preloaded | load (раздел 2.1); ref берётся из env
 
 migration:
   strategy: inplace
@@ -326,6 +355,7 @@ migration:
 ```bash
 cd /opt/kk_migration
 export CONTAINER_RUNTIME=docker
+export PROFILE_CONTAINER_IMAGE_REF='ghcr.io/alexgromer/keycloak-migration:astra-{version}'  # <os>-тег напрямую (v3.9)
 export PROFILE_DB_PASSWORD='<пароль-вашей-PostgreSQL>'   # единственный обязательный секрет
 
 # Если PostgreSQL запущена В КОНТЕЙНЕРЕ на bridge-сети:
@@ -352,7 +382,7 @@ scripts/migrate_keycloak_v3.sh migrate --profile kc-prod-26 --dry-run
 ```
 DRY-RUN: cr run -d --name kc-migrate-24.0.5 --network=host -e KC_DB=postgres \
   -e KC_DB_URL=jdbc:postgresql://<host>:5432/keycloak -e KC_DB_USERNAME=keycloak \
-  -e KC_DB_PASSWORD=*** ghcr.io/alexgromer/keycloak-migration:24.0.5 start --optimized
+  -e KC_DB_PASSWORD=*** ghcr.io/alexgromer/keycloak-migration:astra-24.0.5 start --optimized
 ```
 
 ### 2.5. Живая миграция
@@ -363,7 +393,8 @@ scripts/migrate_keycloak_v3.sh migrate --profile kc-prod-26
 ```
 
 > `migrate` спрашивает **интерактивное подтверждение `[y/N]`** перед мутацией — введите `y`.
-> Флага `--yes` нет (есть только `--force` у `rollback`).
+> Для неинтерактивного запуска (CI/скрипты) добавьте **`--yes`** (или `export ASSUME_DEFAULTS=true`).
+> Без TTY и без `--yes` миграция **отказывается стартовать** (fail-closed) — прод не мигрируется молча.
 
 ```bash
 # Path A (target 25): 16.1.1 -> 25.0.6
@@ -383,7 +414,7 @@ Target major берётся из `target_version` профиля (`26.6.3` → m
 | `target_version` в профиле | `25.0.6` | `26.6.3` |
 | Цепочка хопов | `16.x → 25.0.6` | `16.x → 24.0.5 → 26.6.3` |
 | Кол-во загружаемых контейнеров | 1 | 2 |
-| Переименовать/загрузить образы | `:25.0.6` | `:24.0.5` и `:26.6.3` |
+| Образы (теги, без re-tag) | `astra-25.0.6` | `astra-24.0.5` и `astra-26.6.3` |
 | PG ≥ 14 | не требуется | **обязательно** |
 | Статус мажора | EOL (warn-but-allow) | поддерживаемый, дефолт |
 | Итог `MIGRATION_MODEL` (major.minor) | `25.0` | `26.6` |
@@ -399,9 +430,10 @@ Target major берётся из `target_version` профиля (`26.6.3` → m
 | `--airgap` | режим без сети (`AIRGAP_MODE=true`) |
 | `--auto-rollback` | авто-откат при сбое хопа |
 | `--monitor` | живой монитор миграции (если доступен) |
+| `--yes`, `-y` | неинтерактивно подтвердить миграцию (или `ASSUME_DEFAULTS=true`) — v3.9 |
 
-Команды: `plan` | `migrate` | `rollback` (у `rollback` есть `--force`). `--target-major`,
-`--yes`, `--profile-name` — **не существуют**.
+Команды: `plan` | `migrate` | `rollback` (у `rollback` есть `--force`).
+`--target-major` и `--profile-name` — **не существуют** (target — через `target_version` / env `TARGET_MAJOR`).
 
 ---
 
@@ -454,7 +486,8 @@ PGPASSWORD="$PROFILE_DB_PASSWORD" psql -h <pg-host> -U keycloak -d keycloak -tAc
 | `forbidden`/отказ на `26.6.0` или `26.6.1` | запрещённые патчи (баги `#48438` / `#47908`) | используйте `26.6.3` (цепочка Path B уже это делает) |
 | Блок миграции на target 26 | PG major < 14 (`MIN_PG_FOR_26=14`) | обновите PostgreSQL до ≥ 14, либо мигрируйте сначала на Path A (25) |
 | Команды идут через podman, а нужен docker | оба движка стоят, podman выбирается первым | `export CONTAINER_RUNTIME=docker` в текущей сессии |
-| `image not present locally` при `preloaded` | образ не загружен или тег не совпал с `<registry>/<image>:<version>` | перетегируйте (раздел 2.1); проверьте `docker images` |
+| `image not present locally` при `preloaded` | образ не загружен, или `PROFILE_CONTAINER_IMAGE_REF` не совпал с локальным тегом | `export PROFILE_CONTAINER_IMAGE_REF='<ns>:<os>-{version}'` (раздел 2.1), проверьте `docker images`; или `migrate_oneshot.sh --source pull` |
+| `Refusing to proceed non-interactively` | live `migrate` без TTY и без `--yes` (fail-closed, v3.9) | добавьте `--yes` (или `ASSUME_DEFAULTS=true`); в интерактиве ответьте `y` |
 | `docker load` падает на `*.tar.xz` бандле | бандл = tar из 4 image-тарболлов, не single save | сначала `tar -xJf`, затем `docker load -i` каждого (раздел 0.3, способ 2) |
 | Нет места в `/var` или `/tmp` | образы крупные (~0.7–1 ГБ), диск тесный | чистите неиспользуемые образы (`docker image prune`), распаковывайте в `/var/tmp` |
 | GHCR pull → `denied`/`unauthorized` | приватный GHCR, нет логина | `docker login ghcr.io` (PAT c `read:packages`) |
@@ -530,7 +563,8 @@ PGPASSWORD="$PROFILE_DB_PASSWORD" psql -h <pg-host> -U keycloak -d keycloak -tAc
 - `scripts/lib/distribution_handler.sh` — `dist_image_ref` (`:29-42`), `dist_container`/acquisition
   (`:276-409`).
 - `scripts/lib/profile_manager.sh` — парсер YAML/`profile_load` (`:35-127`), `PROFILE_DIR=./profiles`
-  (`:8`), затирание `IMAGE_REF` (`:109`), `credentials_source` (`:84`).
+  (`:8`), **env-precedence** для `IMAGE_REF`/`IMAGE_TAR`/`BASE_IMAGE` (v3.9), `profile_save` пишет
+  `acquisition`/`runtime` (v3.9), `credentials_source` (`:84`).
 - `scripts/lib/container_runtime.sh` — выбор движка `CONTAINER_RUNTIME→…→podman→docker` (`:14-44`).
 - `scripts/lib/migration_verify.sh` — `kc_verify_migration_model` / SQL `MIGRATION_MODEL` (`:110-147`),
   `_mv_psql` (`:46-54`).
@@ -540,5 +574,7 @@ PGPASSWORD="$PROFILE_DB_PASSWORD" psql -h <pg-host> -U keycloak -d keycloak -tAc
   `harness_runtime.sh` (`:40-72`).
 - `scripts/build_matrix.sh` — матрица/JDK/`GHCR_IMAGE`/`cr save` (`:39-51,116-126,178`),
   `config/images.conf.example`, `docs/AIRGAP.md`.
-- `ARCHITECTURE.md` — ADR-001/002/005/006 (`:47-52`); `CHANGELOG.md` — v3.8.0.
+- `scripts/migrate_oneshot.sh` (v3.9) — one-shot обёртка: acquire → профиль → `migrate --yes`.
+- `scripts/config_wizard.sh` (v3.9) — deployment `run` + выбор `acquisition` + target presets 25.0.6/26.6.3.
+- `ARCHITECTURE.md` — ADR-001/002/005/006/007 (`:47-53`); `CHANGELOG.md` — v3.9.0.
 - Структура бандла (`tar` из 4 image-тарболлов) проверена через `tar -tJf dist/kc-astra-bundle.tar.xz`.

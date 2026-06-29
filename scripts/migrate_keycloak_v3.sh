@@ -100,6 +100,8 @@ PROFILE_NAME="${PROFILE_NAME:-}"
 DRY_RUN="${DRY_RUN:-false}"
 SKIP_TESTS="${SKIP_TESTS:-false}"
 ENABLE_MONITOR="${ENABLE_MONITOR:-false}"
+# v3.9: non-interactive confirmation. --yes/-y sets this; env ASSUME_DEFAULTS also honored.
+AUTO_CONFIRM="${AUTO_CONFIRM:-false}"
 
 # Migration settings
 TIMEOUT_BUILD="${TIMEOUT_BUILD:-600}"
@@ -144,6 +146,23 @@ log_error() {
 log_section() {
     local msg="$1"
     echo -e "\n${CYAN}${BOLD}═══ $msg ═══${NC}\n" | tee -a "$LOG_FILE"
+}
+
+# v3.9: confirmation prompt that auto-answers in non-interactive contexts.
+#   _confirm "Question?" "Y"|"N"   — the 2nd arg is the default AND the auto-answer.
+# Auto-answers (no prompt) when --yes (AUTO_CONFIRM), ASSUME_DEFAULTS=true, or stdin is
+# not a TTY. Returns 0 = yes, 1 = no. Interactive behaviour (a TTY, no flags) is unchanged.
+_confirm() {
+    local prompt="$1" def="${2:-N}" ans
+    if [[ "${AUTO_CONFIRM:-false}" == "true" || "${ASSUME_DEFAULTS:-false}" == "true" || ! -t 0 ]]; then
+        log_info "$prompt — auto-answer '${def}' (non-interactive)"
+        [[ "$def" =~ ^[Yy]$ ]]
+        return
+    fi
+    local hint="[y/N]"; [[ "$def" =~ ^[Yy]$ ]] && hint="[Y/n]"
+    read -r -p "$prompt $hint: " ans
+    ans="${ans:-$def}"
+    [[ "$ans" =~ ^[Yy]$ ]]
 }
 
 # ============================================================================
@@ -288,7 +307,7 @@ kc_select_target_version() {
     IFS=$'\n' read -r -d '' -a majors < <(printf '%s\n' "${majors[@]}" | sort -rn && printf '\0')
 
     local chosen_major="${TARGET_MAJOR:-}"
-    if [[ -z "$chosen_major" ]] && { [[ ! -t 0 ]] || [[ "${ASSUME_DEFAULTS:-false}" == "true" ]]; }; then
+    if [[ -z "$chosen_major" ]] && { [[ ! -t 0 ]] || [[ "${ASSUME_DEFAULTS:-false}" == "true" ]] || [[ "${AUTO_CONFIRM:-false}" == "true" ]]; }; then
         chosen_major="$DEFAULT_TARGET_MAJOR"
         echo "Non-interactive: defaulting target major to $chosen_major" >&2
     fi
@@ -421,8 +440,7 @@ check_resume() {
             log_warn "Detected interrupted migration"
             log_info "Last successful step: $last_step"
             echo ""
-            read -r -p "Resume from last successful step? [y/N]: " resume
-            if [[ "$resume" =~ ^[Yy]$ ]]; then
+            if _confirm "Resume from last successful step?" "N"; then
                 log_info "Resuming migration from step: $last_step"
                 return 0
             else
@@ -601,8 +619,7 @@ load_profile_or_discover() {
         if kc_auto_discover_profile; then
             log_success "Auto-discovery complete"
             echo ""
-            read -r -p "Use auto-discovered configuration? [Y/n]: " confirm
-            if [[ ! "$confirm" =~ ^[Nn]$ ]]; then
+            if _confirm "Use auto-discovered configuration?" "Y"; then
                 log_info "Using auto-discovered configuration"
             else
                 log_error "Auto-discovery rejected. Please specify a profile with --profile"
@@ -967,8 +984,7 @@ build_keycloak() {
         log_success "Build validation: SUCCESS markers found"
     else
         log_warn "Build validation: No success marker found in log"
-        read -r -p "Build may have failed. Continue anyway? [y/N]: " continue_build
-        if [[ ! "$continue_build" =~ ^[Yy]$ ]]; then
+        if ! _confirm "Build may have failed. Continue anyway?" "N"; then
             return 1
         fi
     fi
@@ -1118,8 +1134,7 @@ migrate_rolling_update() {
         log_error "Rollout failed or timed out"
 
         # Offer rollback
-        read -r -p "Rollback to previous version? [y/N]: " do_rollback
-        if [[ "$do_rollback" =~ ^[Yy]$ ]]; then
+        if _confirm "Rollback to previous version?" "N"; then
             log_warn "Rolling back deployment..."
             kubectl rollout undo deployment/"$deployment" -n "$namespace"
             kubectl rollout status deployment/"$deployment" -n "$namespace" --timeout=300s
@@ -1289,8 +1304,7 @@ migrate_blue_green() {
             log_error "Green deployment smoke tests failed"
             kill $pf_pid 2>/dev/null || true
 
-            read -r -p "Delete green deployment? [Y/n]: " delete_green
-            if [[ ! "$delete_green" =~ ^[Nn]$ ]]; then
+            if _confirm "Delete green deployment?" "Y"; then
                 kubectl delete deployment/"${deployment}-green" -n "$namespace"
             fi
 
@@ -1312,9 +1326,7 @@ migrate_blue_green() {
     sleep 30
 
     # Step 8: Delete blue deployment
-    read -r -p "Delete blue deployment (old version)? [Y/n]: " delete_blue
-
-    if [[ ! "$delete_blue" =~ ^[Nn]$ ]]; then
+    if _confirm "Delete blue deployment (old version)?" "Y"; then
         log_info "Deleting blue deployment..."
         kubectl delete deployment/"$deployment" -n "$namespace"
         log_success "Blue deployment deleted"
@@ -1458,8 +1470,7 @@ migrate_to_version() {
                 cmd_rollback_auto
                 return 1
             else
-                read -r -p "Rollback to last backup? [Y/n]: " do_rollback
-                if [[ ! "$do_rollback" =~ ^[Nn]$ ]]; then
+                if _confirm "Rollback to last backup?" "Y"; then
                     cmd_rollback_auto
                 fi
                 return 1
@@ -1515,8 +1526,7 @@ run_smoke_tests() {
     else
         log_error "Smoke tests failed for Keycloak $version"
 
-        read -r -p "Continue migration despite test failures? [y/N]: " continue_migration
-        if [[ "$continue_migration" =~ ^[Yy]$ ]]; then
+        if _confirm "Continue migration despite test failures?" "N"; then
             log_warn "Continuing migration (tests failed)"
             return 0
         else
@@ -1637,11 +1647,22 @@ execute_migration() {
         }
     fi
 
-    read -r -p "Proceed with migration? [y/N]: " proceed
-    if [[ ! "$proceed" =~ ^[Yy]$ ]]; then
-        log_info "Migration cancelled by user"
-        audit_info "migration_cancelled" "User cancelled migration"
-        exit 0
+    # Main confirmation gate (v3.9, fail-closed non-interactive policy):
+    #   --yes / ASSUME_DEFAULTS -> proceed; no TTY and no flag -> refuse (never migrate a
+    #   real DB silently); otherwise prompt interactively as before.
+    if [[ "${AUTO_CONFIRM:-false}" == "true" || "${ASSUME_DEFAULTS:-false}" == "true" ]]; then
+        log_info "Proceeding with migration (non-interactive: --yes/ASSUME_DEFAULTS)"
+    elif [[ ! -t 0 ]]; then
+        log_error "Refusing to proceed non-interactively without --yes (fail-closed)"
+        audit_info "migration_cancelled" "Refused: non-interactive without --yes"
+        exit 1
+    else
+        read -r -p "Proceed with migration? [y/N]: " proceed
+        if [[ ! "$proceed" =~ ^[Yy]$ ]]; then
+            log_info "Migration cancelled by user"
+            audit_info "migration_cancelled" "User cancelled migration"
+            exit 0
+        fi
     fi
 
     # Audit: migration start
@@ -1857,8 +1878,7 @@ mt_execute_clustered() {
     # Execute based on rollout type
     if [[ "$rollout_type" == "parallel" ]]; then
         log_warn "Parallel rollout for clustered deployment may cause downtime"
-        read -r -p "Continue with parallel migration? [y/N]: " confirm
-        if [[ ! "$confirm" =~ ^[Yy]$ ]]; then
+        if ! _confirm "Continue with parallel migration?" "N"; then
             log_info "Migration cancelled"
             return 1
         fi
@@ -1999,12 +2019,9 @@ cmd_rollback() {
 
     if [[ "${ROLLBACK_FORCE:-false}" == "true" ]]; then
         log_warn "Force mode: skipping confirmation"
-    else
-        read -r -p "Proceed with rollback? [y/N]: " proceed
-        if [[ ! "$proceed" =~ ^[Yy]$ ]]; then
-            log_info "Rollback cancelled"
-            exit 0
-        fi
+    elif ! _confirm "Proceed with rollback?" "N"; then
+        log_info "Rollback cancelled"
+        exit 0
     fi
 
     cmd_rollback_auto
@@ -2031,6 +2048,7 @@ OPTIONS:
     --profile <name>        Use specified profile from profiles/ directory
     --dry-run               Show what would be done without executing
     --skip-tests            Skip smoke tests after each migration step
+    --yes, -y               Assume "yes" for confirmation prompts (non-interactive)
     --monitor               Enable live migration monitor (if available)
     -h, --help              Show this help message
 
@@ -2049,6 +2067,9 @@ EXAMPLES:
 
     # Skip smoke tests
     $0 migrate --profile standalone-mysql --skip-tests
+
+    # Non-interactive (CI/automation): assume yes, no prompts
+    $0 migrate --profile standalone-postgresql --yes
 
 PROFILES:
     Profiles are YAML files in the profiles/ directory.
@@ -2071,6 +2092,7 @@ ENVIRONMENT VARIABLES:
     PGPASSWORD              PostgreSQL password (if using PostgreSQL)
     DB_PASSWORD             Database password (generic)
     WORK_DIR                Workspace directory (default: ./migration_workspace)
+    ASSUME_DEFAULTS         If "true": run non-interactively with safe defaults (like --yes)
 
 EOF
 }
@@ -2116,6 +2138,10 @@ main() {
                 ;;
             --monitor)
                 ENABLE_MONITOR=true
+                shift
+                ;;
+            --yes|-y)
+                AUTO_CONFIRM=true
                 shift
                 ;;
             -h|--help)
