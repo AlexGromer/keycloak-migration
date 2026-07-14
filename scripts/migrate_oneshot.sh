@@ -20,7 +20,12 @@
 #                      [--db-host H] [--db-port P] [--db-name N] [--db-user U]
 #                      [--source pull|bundle|preloaded] [--image-ns REF]
 #                      [--bundle FILE] [--network NET] [--current VER]
+#                      [--work-dir DIR] [--skip-preflight]
 #                      [--profile-name NAME] [--gen-profile-only] [--yes] [-h]
+#
+# DISK: the migration preflight needs free space on the WORK_DIR filesystem (default 15GB,
+#       override with MIN_DISK_GB) — it is for the pre-hop DB dumps, NOT for images. Point it
+#       somewhere roomy with --work-dir /path. A caller-supplied work dir is NEVER deleted.
 #
 # Examples:
 #   # Safe plan for Path B (target 26): 16.1.1 -> 24.0.5 -> 26.6.3
@@ -28,21 +33,38 @@
 #   # Live Path A (target 25) from a private GHCR pull:
 #   export PROFILE_DB_PASSWORD=...; \
 #   scripts/migrate_oneshot.sh --target 25 --os astra --db-host db --go
-#   # Air-gap (load from bundle) then migrate:
-#   scripts/migrate_oneshot.sh --target 26 --source bundle --bundle dist/kc-astra-bundle.tar.xz --go
+#   # Air-gap (load from bundle) + roomy work dir:
+#   scripts/migrate_oneshot.sh --target 26 --source bundle --bundle dist/kc-astra-bundle.tar.xz \
+#       --work-dir /var/lib/kcwork --go
 
 set -euo pipefail
 
 ONESHOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "$ONESHOT_DIR/.." && pwd)"
 
-# Contain source-time writes of migrate_keycloak_v3.sh (it mkdir's WORK_DIR at source time).
-ONESHOT_WORK_DIR="${ONESHOT_WORK_DIR:-$(mktemp -d)}"
+# WORK_DIR must be set BEFORE sourcing migrate_keycloak_v3.sh (it mkdir's WORK_DIR at source
+# time), so pre-scan the args for --work-dir here.
+_os_args=("$@")
+for ((_i = 0; _i < ${#_os_args[@]}; _i++)); do
+    if [[ "${_os_args[_i]}" == "--work-dir" ]]; then
+        ONESHOT_WORK_DIR="${_os_args[_i+1]:-}"
+        [[ -n "$ONESHOT_WORK_DIR" ]] || { echo "ERROR: --work-dir requires a path" >&2; exit 2; }
+        break
+    fi
+done
+
+# SAFETY: only a scratch dir THIS SCRIPT creates is ever removed. A caller-supplied work dir
+# (--work-dir or ONESHOT_WORK_DIR) is NEVER deleted — it may hold DB backups from a previous
+# run, or be a real data directory. (Regression guard: an earlier version rm -rf'd it.)
+if [[ -n "${ONESHOT_WORK_DIR:-}" ]]; then
+    ONESHOT_WORK_DIR_OWNED="false"
+    mkdir -p "$ONESHOT_WORK_DIR"
+else
+    ONESHOT_WORK_DIR="$(mktemp -d)"
+    ONESHOT_WORK_DIR_OWNED="true"
+fi
 export WORK_DIR="$ONESHOT_WORK_DIR"
-# Best-effort cleanup of the scratch dir on non-exec exits (gen-profile-only / validation
-# errors). The live/dry-run paths end in `exec`, which intentionally keeps WORK_DIR (the live
-# migrate writes backups/logs there); those temp dirs live under $TMPDIR and are OS-reclaimed.
-trap 'rm -rf "$ONESHOT_WORK_DIR" 2>/dev/null || true' EXIT
+trap '[[ "${ONESHOT_WORK_DIR_OWNED:-false}" == "true" ]] && rm -rf "$ONESHOT_WORK_DIR" 2>/dev/null; true' EXIT
 
 # Profiles live in the repo by default (overridable for tests).
 export PROFILE_DIR="${PROFILE_DIR:-$PROJECT_ROOT/profiles}"
@@ -70,8 +92,9 @@ DB_USER="keycloak"
 PROFILE_NAME_OPT=""
 GEN_ONLY="false"
 ONESHOT_DRY="true"                 # default dry-run; --go flips to live
+SKIP_PREFLIGHT_PASS="false"        # --skip-preflight -> passed through to migrate
 
-oneshot_usage() { sed -n '2,32p' "${BASH_SOURCE[0]}" | sed 's/^#\{0,1\} \{0,1\}//'; }
+oneshot_usage() { sed -n '2,38p' "${BASH_SOURCE[0]}" | sed 's/^#\{0,1\} \{0,1\}//'; }
 
 # Dry/live execution chokepoint (secrets must be pre-masked by the caller).
 _os_run() {
@@ -102,6 +125,8 @@ while [[ $# -gt 0 ]]; do
         --db-name)          DB_NAME="${2:-}"; shift 2 ;;
         --db-user)          DB_USER="${2:-}"; shift 2 ;;
         --profile-name)     PROFILE_NAME_OPT="${2:-}"; shift 2 ;;
+        --work-dir)         shift 2 ;;   # already consumed by the pre-scan above
+        --skip-preflight)   SKIP_PREFLIGHT_PASS="true"; shift ;;
         --gen-profile-only) GEN_ONLY="true"; shift ;;
         --dry-run)          ONESHOT_DRY="true"; shift ;;
         --go)               ONESHOT_DRY="false"; shift ;;
@@ -155,6 +180,8 @@ echo "   chain       : ${CURRENT} -> ${HOPS// / -> }"
 echo "   image ref   : ${PROFILE_CONTAINER_IMAGE_REF}"
 echo "   acquisition : ${SRC}"
 echo "   database    : ${DB_USER}@${DB_HOST}:${DB_PORT}/${DB_NAME}"
+echo "   work dir    : ${ONESHOT_WORK_DIR} $([[ "$ONESHOT_WORK_DIR_OWNED" == "true" ]] && echo '(temp, auto-removed)' || echo '(yours — never deleted)')"
+echo "   free space  : $(df -BG "$ONESHOT_WORK_DIR" 2>/dev/null | tail -1 | awk '{print $4}') (preflight needs ${MIN_DISK_GB:-15}G)"
 echo "   profile     : ${PROFILE_NAME} (in ${PROFILE_DIR})"
 echo "=============================================================="
 
@@ -256,6 +283,8 @@ MIGRATE_ARGS=(migrate --profile "$PROFILE_NAME" --yes)
 if [[ "$ONESHOT_DRY" == "true" ]]; then
     # dry-run is a PLAN: skip env preflight (disk/tools) so the plan prints on any host.
     MIGRATE_ARGS+=(--dry-run --skip-preflight)
+elif [[ "$SKIP_PREFLIGHT_PASS" == "true" ]]; then
+    MIGRATE_ARGS+=(--skip-preflight)
 fi
 
 log_info "Handing off: migrate_keycloak_v3.sh ${MIGRATE_ARGS[*]}"

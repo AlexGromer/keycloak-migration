@@ -469,16 +469,23 @@ run_preflight_checks() {
 
     local errors=0
 
-    # 1. Disk space (15 GB minimum)
+    # 1. Free space on the WORK_DIR filesystem (default 15 GB; override with MIN_DISK_GB).
+    #    This space is for the pre-hop DB dumps (backup ~ DB size x3) — NOT for container
+    #    images (those live in the container-runtime store).
     local target_path="$WORK_DIR"
     [[ ! -d "$target_path" ]] && target_path="$(dirname "$target_path")"
     local available_gb=$(df -BG "$target_path" 2>/dev/null | tail -1 | awk '{print $4}' | tr -d 'G' || echo "0")
-    local required_gb=15
+    local required_gb="${MIN_DISK_GB:-15}"
 
     if [[ "${available_gb:-0}" -ge "$required_gb" ]]; then
-        log_success "Disk space: ${available_gb}GB available (need ${required_gb}GB)"
+        log_success "Disk space: ${available_gb}GB available on ${target_path} (need ${required_gb}GB)"
     else
-        log_error "Disk space: ${available_gb}GB < ${required_gb}GB required"
+        log_error "Disk space: ${available_gb}GB < ${required_gb}GB required on ${target_path} (WORK_DIR)"
+        log_info "  Space is for pre-hop DB dumps (backup ~ DB size x3), not for images."
+        log_info "  Point WORK_DIR at a filesystem with more free space:"
+        log_info "    export WORK_DIR=/path/on/bigger/fs             # migrate_keycloak_v3.sh"
+        log_info "    scripts/migrate_oneshot.sh --work-dir /path/on/bigger/fs"
+        log_info "  Or adjust: export MIN_DISK_GB=<N>   |   skip checks: --skip-preflight"
         errors=$((errors + 1))
     fi
 
@@ -2091,7 +2098,10 @@ PROFILES:
 ENVIRONMENT VARIABLES:
     PGPASSWORD              PostgreSQL password (if using PostgreSQL)
     DB_PASSWORD             Database password (generic)
-    WORK_DIR                Workspace directory (default: ./migration_workspace)
+    WORK_DIR                Workspace directory (default: ./migration_workspace).
+                            Preflight checks FREE SPACE on this path's filesystem.
+    MIN_DISK_GB             Preflight free-space threshold on WORK_DIR's fs (default: 15).
+                            Space is for pre-hop DB dumps, not for container images.
     ASSUME_DEFAULTS         If "true": run non-interactively with safe defaults (like --yes)
 
 EOF

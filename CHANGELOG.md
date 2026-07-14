@@ -16,6 +16,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [3.9.1] - 2026-06-29
+
+### Fixed
+- **CRITICAL — `migrate_oneshot.sh` could delete a caller-supplied work dir.** The EXIT trap ran
+  `rm -rf "$ONESHOT_WORK_DIR"` unconditionally, so e.g. `ONESHOT_WORK_DIR=/data migrate_oneshot.sh
+  --help` would wipe `/data`. Now only a scratch dir the script itself created (`mktemp`) is ever
+  removed; a caller-supplied `--work-dir` / `ONESHOT_WORK_DIR` is **never** deleted. Regression
+  tests added.
+
+### Added
+- `migrate_oneshot.sh --work-dir DIR` (safe — never deleted) and `--skip-preflight` passthrough.
+  The banner now prints the work dir, its free space, and the preflight threshold.
+- `MIN_DISK_GB` env override for the preflight free-space threshold (was hardcoded 15GB).
+
+### Changed
+- Preflight disk failure now reports **which** path was checked (`WORK_DIR`), **why** the space is
+  needed (pre-hop DB dumps ≈ DB size × 3 — not container images), and **how** to fix it
+  (`--work-dir` / `WORK_DIR` / `MIN_DISK_GB` / `--skip-preflight`). Previously it printed only
+  "Disk space: NGB < 15GB required" with no path and no remedy.
+- `docs/MIGRATION_GUIDE.md`: new "Свободное место на диске" section in the prerequisites.
+
+---
+
 ## [3.9.0] - 2026-06-27
 
 ### Added
