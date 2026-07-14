@@ -131,18 +131,21 @@ check_network_connectivity() {
 
     preflight_log_info "Testing connectivity to: $host:$port"
 
-    # Test using timeout and nc (netcat) or bash built-in
-    if command -v nc >/dev/null 2>&1; then
-        if timeout "$NETWORK_TIMEOUT" nc -zv "$host" "$port" 2>&1 | grep -q "succeeded\|open"; then
-            preflight_log_success "Network: $host:$port (reachable)"
-            return 0
-        fi
-    else
-        # Fallback: bash TCP test
-        if timeout "$NETWORK_TIMEOUT" bash -c "echo > /dev/tcp/$host/$port" 2>/dev/null; then
-            preflight_log_success "Network: $host:$port (reachable)"
-            return 0
-        fi
+    # Probe with bash's own TCP redirection FIRST — it is implementation-independent.
+    # NEVER parse nc's output: the wording differs per flavour (netcat-openbsd prints
+    # "succeeded", ncat/nmap prints "Connected to", netcat-traditional prints nothing), which
+    # produced FALSE "UNREACHABLE" verdicts on hosts where nc is ncat — even though psql
+    # connected to the very same host:port.
+    if timeout "$NETWORK_TIMEOUT" bash -c "exec 3<>/dev/tcp/${host}/${port}" 2>/dev/null; then
+        preflight_log_success "Network: $host:$port (reachable)"
+        return 0
+    fi
+
+    # Fallback: nc, judged by its EXIT CODE only (never by its message).
+    if command -v nc >/dev/null 2>&1 &&
+       timeout "$NETWORK_TIMEOUT" nc -z "$host" "$port" >/dev/null 2>&1; then
+        preflight_log_success "Network: $host:$port (reachable)"
+        return 0
     fi
 
     preflight_log_error "Network: $host:$port (UNREACHABLE)"
@@ -422,25 +425,27 @@ check_backup_space() {
     local backup_dir="${1}"
     local db_size_gb="${PREFLIGHT_DB_SIZE_GB:-10}"
 
-    # Calculate required backup space (DB size × 3 for safety)
-    local required_space_gb
-    required_space_gb=$(echo "scale=0; $db_size_gb * $MIN_BACKUP_SPACE_MULTIPLIER" | bc -l 2>/dev/null || echo "30")
+    # Compare in MEGABYTES. The DB size is fractional (e.g. ".01" GB) and bash arithmetic is
+    # integer-only, so the old `(( available < .03 ))` raised:
+    #   ((: .03: arithmetic syntax error: operand expected
+    # awk does the float math; bash only ever sees integers.
+    local db_size_mb required_mb available_mb
+    db_size_mb=$(awk -v g="${db_size_gb:-0}" 'BEGIN { printf "%d", (g * 1024) + 0.5 }' 2>/dev/null || echo 0)
+    required_mb=$(( ${db_size_mb:-0} * MIN_BACKUP_SPACE_MULTIPLIER ))
+    (( required_mb < 1 )) && required_mb=1
+    available_mb=$(df -BM "$backup_dir" 2>/dev/null | awk 'NR==2 { gsub(/M/, "", $4); print $4 + 0 }')
+    : "${available_mb:=0}"
 
-    preflight_log_info "Database size: ${db_size_gb}GB"
-    preflight_log_info "Required backup space: ${required_space_gb}GB (3x DB size)"
+    preflight_log_info "Database size: ${db_size_gb}GB (${db_size_mb}MB)"
+    preflight_log_info "Required backup space: ${required_mb}MB (${MIN_BACKUP_SPACE_MULTIPLIER}x DB size)"
+    preflight_log_info "Available space: ${available_mb}MB"
 
-    # Check available space
-    local available_space_gb
-    available_space_gb=$(df -BG "$backup_dir" | awk 'NR==2 {gsub(/G/, "", $4); print $4}')
-
-    preflight_log_info "Available space: ${available_space_gb}GB"
-
-    if (( available_space_gb < required_space_gb )); then
-        preflight_log_error "Insufficient backup space: ${available_space_gb}GB < ${required_space_gb}GB"
+    if (( available_mb < required_mb )); then
+        preflight_log_error "Insufficient backup space: ${available_mb}MB < ${required_mb}MB"
         return $EXIT_DISK_SPACE
     fi
 
-    preflight_log_success "Backup space: ${available_space_gb}GB (OK)"
+    preflight_log_success "Backup space: ${available_mb}MB (OK)"
     return 0
 }
 

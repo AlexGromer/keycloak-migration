@@ -25,6 +25,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   removed; a caller-supplied `--work-dir` / `ONESHOT_WORK_DIR` is **never** deleted. Regression
   tests added.
 
+- **Preflight NETWORK check gave a FALSE "UNREACHABLE".** It grepped `nc`'s *message* for
+  `succeeded|open`, but ncat (nmap) prints `Ncat: Connected to ...` — so on any host where `nc`
+  is ncat/netcat-traditional the check failed even though `psql` connected to the very same
+  `host:port` (the next check over). Now probes with bash's own `/dev/tcp` redirection
+  (implementation-independent) and falls back to `nc -z` judged purely by **exit code**.
+- **Preflight BACKUP SPACE crashed on a fractional DB size:**
+  `((: .03: arithmetic syntax error: operand expected` — a small DB reports `.01` GB and bash
+  arithmetic is integer-only. The comparison is now done in **megabytes** (awk does the float math).
+
 ### Added
 - `migrate_oneshot.sh --work-dir DIR` (safe — never deleted) and `--skip-preflight` passthrough.
   The banner now prints the work dir, its free space, and the preflight threshold.

@@ -159,6 +159,43 @@ else
 fi
 
 # ============================================================================
+describe "REGRESSION: network probe must not parse nc's message"
+# ============================================================================
+# The old code grepped nc's output for 'succeeded|open'. ncat (nmap) prints
+# "Ncat: Connected to ..." instead -> FALSE "UNREACHABLE" even though psql connected to the
+# very same host:port. The probe must judge by TCP, not by wording.
+
+assert_false "check_network_connectivity 127.0.0.1 1 >/dev/null 2>&1" \
+    "closed port -> UNREACHABLE"
+
+if command -v python3 >/dev/null 2>&1; then
+    python3 -m http.server 18099 --bind 127.0.0.1 >/dev/null 2>&1 &
+    _pf_lp=$!
+    sleep 1
+    assert_true "check_network_connectivity 127.0.0.1 18099 >/dev/null 2>&1" \
+        "open port -> reachable (independent of the nc flavour)"
+    kill "$_pf_lp" 2>/dev/null || true
+else
+    skip_test "python3 not available for the open-port probe"
+fi
+
+# ============================================================================
+describe "REGRESSION: backup space must handle a fractional DB size"
+# ============================================================================
+# A small DB reports e.g. ".01" GB; ".01" * 3 = ".03" and bash arithmetic is integer-only, so
+# `(( available < .03 ))` raised: ((: .03: arithmetic syntax error: operand expected
+
+_bs_rc=0
+_bs_out="$(PREFLIGHT_DB_SIZE_GB=.01 check_backup_space "$WORK_DIR" 2>&1)" || _bs_rc=$?
+assert_equals "0" "$_bs_rc" "fractional DB size: check passes"
+if printf '%s' "$_bs_out" | grep -q 'arithmetic syntax error'; then
+    assert_true "false" "fractional DB size: no arithmetic syntax error"
+else
+    assert_true "true" "fractional DB size: no arithmetic syntax error"
+fi
+assert_contains "$_bs_out" "30MB" "fractional DB size: required = 3x DB size, in MB"
+
+# ============================================================================
 # Cleanup
 # ============================================================================
 
