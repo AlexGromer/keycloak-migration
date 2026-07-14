@@ -89,6 +89,7 @@
 | tests/test_health_not_a_gate.sh | Tests | — |
 | scripts/lib/data_integrity.sh | Shell script | — |
 | tests/test_data_integrity.sh | Tests | — |
+| tests/test_config_entrypoints.sh | Tests | — |
 ## Directory Structure
 
 ```

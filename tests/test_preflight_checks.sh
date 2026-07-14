@@ -49,12 +49,19 @@ declare -F run_all_preflight_checks >/dev/null && \
 
 test_report "Test Suite 2: Disk Space Check"
 
-# Test with /tmp (should have space)
+# check_disk_space is now a FLOOR in MB (logs/state/temp), not a budget in GB. The backup
+# requirement is measured from the database in check_backup_space — an arbitrary 10GB gate that
+# fired BEFORE the database was even sized used to refuse a 50MB migration on an 8GB host.
 if check_disk_space "/tmp" 1; then
-    assert_true "true" "Disk space check: /tmp has >= 1GB"
+    assert_true "true" "Disk floor check: /tmp has >= 1MB"
 else
-    assert_true "false" "Disk space check: /tmp insufficient space"
+    assert_true "false" "Disk floor check: /tmp insufficient space"
 fi
+
+assert_equals "512" "$MIN_DISK_FREE_MB" \
+    "the floor is 512MB of working space — not a made-up backup budget"
+assert_true "[[ -z \"\${MIN_DISK_SPACE_GB:-}\" ]]" \
+    "the hardcoded 10GB gate is gone"
 
 # ============================================================================
 # TEST SUITE 3: Memory Check
@@ -186,14 +193,60 @@ describe "REGRESSION: backup space must handle a fractional DB size"
 # `(( available < .03 ))` raised: ((: .03: arithmetic syntax error: operand expected
 
 _bs_rc=0
-_bs_out="$(PREFLIGHT_DB_SIZE_GB=.01 check_backup_space "$WORK_DIR" 2>&1)" || _bs_rc=$?
+_bs_out="$(PREFLIGHT_DB_SIZE_GB=.01 PREFLIGHT_DUMP_HEAP_MB="" PREFLIGHT_HOP_COUNT=1 \
+    check_backup_space "$WORK_DIR" 2>&1)" || _bs_rc=$?
 assert_equals "0" "$_bs_rc" "fractional DB size: check passes"
 if printf '%s' "$_bs_out" | grep -q 'arithmetic syntax error'; then
     assert_true "false" "fractional DB size: no arithmetic syntax error"
 else
     assert_true "true" "fractional DB size: no arithmetic syntax error"
 fi
-assert_contains "$_bs_out" "30MB" "fractional DB size: required = 3x DB size, in MB"
+
+# ============================================================================
+describe "backup space is MEASURED, not guessed"
+# ============================================================================
+# It was `pg_database_size x 3`. pg_database_size INCLUDES indexes; pg_dump does not dump indexes,
+# only the CREATE INDEX statements. For a 200GB database with 80GB of indexes that demanded 600GB
+# for a dump that would have been ~30GB — refusing a migration there was room for.
+
+# Sizing comes from the table data (heap) when it could be measured.
+_bs_out="$(PREFLIGHT_DUMP_HEAP_MB=1000 PREFLIGHT_HOP_COUNT=1 check_backup_space "$WORK_DIR" 2>&1)"
+assert_contains "$_bs_out" "table data" \
+    "the basis is the heap — what pg_dump actually writes"
+assert_contains "$_bs_out" "1200MB" \
+    "1000MB of table data -> 1200MB required (x1.2 cushion), not 3x the database"
+
+# And it multiplies by the number of hops. One backup is taken before EACH hop and they all stay
+# on disk: 16 -> 24 -> 25 -> 26 is THREE dumps. This factor did not exist at all — the check sized
+# for one dump and the migration then wrote three, filling the disk on exactly the large databases
+# where the check mattered.
+_bs_out="$(PREFLIGHT_DUMP_HEAP_MB=1000 PREFLIGHT_HOP_COUNT=3 check_backup_space "$WORK_DIR" 2>&1)"
+assert_contains "$_bs_out" "3600MB" \
+    "3 hops -> 3 backups -> 3x the space (1000 x 1.2 x 3)"
+assert_contains "$_bs_out" "Hops in this migration: 3" \
+    "the hop count is stated, not hidden"
+
+# Falls back to total DB size when the heap could not be measured — overestimating beats guessing
+# low when the cost of guessing low is a disk full mid-migration.
+_bs_out="$(PREFLIGHT_DB_SIZE_GB=1 PREFLIGHT_DUMP_HEAP_MB="" PREFLIGHT_HOP_COUNT=1 \
+    check_backup_space "$WORK_DIR" 2>&1)"
+assert_contains "$_bs_out" "conservative" \
+    "an unmeasurable heap falls back to the total DB size, and says so"
+
+# A requirement that does not fit must fail, not warn.
+_bs_rc=0
+PREFLIGHT_DUMP_HEAP_MB=999999999 PREFLIGHT_HOP_COUNT=3 \
+    check_backup_space "$WORK_DIR" >/dev/null 2>&1 || _bs_rc=$?
+assert_true "[[ $_bs_rc -ne 0 ]]" "not enough space for the backups -> the check FAILS"
+
+# ============================================================================
+describe "large tables are flagged BEFORE the migration, not after"
+# ============================================================================
+# Above ~300k rows Keycloak SKIPS CREATE INDEX at startup and logs the DDL instead. The migration
+# then succeeds with indexes missing: nothing goes bang, the database is simply slow, and the cause
+# is a log line nobody read. Say it while turning --apply-indexes on is still a decision.
+assert_true "declare -F check_large_tables" "check_large_tables exists"
+assert_equals "120" "$BACKUP_HEAP_MULTIPLIER_PCT" "the heap cushion is 1.2x, and it is named"
 
 # ============================================================================
 # Cleanup

@@ -2127,6 +2127,11 @@ execute_migration() {
         local backup_dir="$(kc_backup_dir)"
         mkdir -p "$backup_dir"
 
+        # One backup is taken before EACH hop and they all stay on disk. The space check has to know
+        # how many there will be — sizing for one and then writing three is how a large migration
+        # fills the disk halfway through.
+        export PREFLIGHT_HOP_COUNT="${#migration_steps[@]}"
+
         # Get Keycloak URL if available
         local kc_url=""
         if [[ -n "${PROFILE_KC_URL:-}" ]]; then
@@ -2748,6 +2753,9 @@ OPTIONS:
     --no-resume             Ignore checkpoints from a previous (failed) attempt and redo each step
     --force-unlock          Release a stale Liquibase changelog lock left by a crashed migration
     --kill-stale            Terminate competing/hung migration processes instead of refusing to run
+    --apply-indexes         Create the indexes Keycloak SKIPS on tables above ~300k rows (it logs
+                            the DDL instead of blocking the boot, so the migration succeeds with
+                            indexes missing). Applied CONCURRENTLY, so no table is locked.
     --monitor               Enable live migration monitor (if available)
     -h, --help              Show this help message
 
@@ -2864,6 +2872,13 @@ main() {
                 ;;
             --kill-stale)
                 KILL_STALE=true
+                shift
+                ;;
+            --apply-indexes)
+                # Keycloak skips CREATE INDEX on tables above ~300k rows and only logs the DDL. The
+                # migration then reports success with indexes missing. This creates them (CONCURRENTLY,
+                # so it does not lock the table) after each hop.
+                export PROFILE_APPLY_SKIPPED_INDEXES=true
                 shift
                 ;;
             -h|--help)

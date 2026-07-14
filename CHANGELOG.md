@@ -7,7 +7,47 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **Backup space is now MEASURED, not guessed.** Two checks disagreed with each other: a hardcoded
+  `MIN_DISK_SPACE_GB=10` gate that fired *before* the database had even been sized (so an 8 GB host
+  refused to migrate a 50 MB database), and a `db_size × 3` calculation where `db_size` was
+  `pg_database_size()` — which **includes indexes**. `pg_dump` does not dump indexes; it dumps the
+  `CREATE INDEX` statements (kilobytes) and the heap, then compresses it. For a 200 GB database with
+  80 GB of indexes that demanded 600 GB for a dump that would have been ~30 GB. Sizing now comes
+  from the table data (`sum(pg_relation_size)` over ordinary tables) with a 1.2× cushion, **times
+  the number of hops** — a factor that did not exist at all, so the check sized for one dump while
+  the migration wrote three, filling the disk on exactly the large databases where it mattered. The
+  hardcoded number survives only as a 512 MB floor for logs and temp files.
+- **Large tables are flagged before the migration, not after.** Above roughly 300k rows Keycloak
+  skips `CREATE INDEX` at startup and logs the DDL instead. The migration then succeeds *with
+  indexes missing*: nothing goes bang, the database is simply slow, and the cause is a log line
+  nobody read. Preflight now names the tables over the threshold and tells you to pass
+  `--apply-indexes`.
+
 ### Added
+
+- **`--apply-indexes`** (`migrate_keycloak_v3.sh` and `migrate_oneshot.sh`) — creates the indexes
+  Keycloak skipped, `CONCURRENTLY`, so no table is locked. The capture machinery already existed
+  (`kc_check_skipped_indexes` wrote `skipped_indexes_<version>.sql`) but only *applied* it when
+  `PROFILE_APPLY_SKIPPED_INDEXES=true`, which nothing set — so the one-shot path's effective default
+  was "silently degrade the database".
+- **Three ways to configure a migration**, where there was one (flags, and only flags):
+  - **`--env-file FILE`** — `KEY=VALUE` lines, so the database password is not in your shell history
+    or the process table. Refused unless the file is mode 0600 — a world-readable secrets file
+    defeats its own purpose. Template: `config/kc-migration.env.example`.
+  - **`--profile NAME`** — reuse a profile written earlier. Hands straight over to the migration and
+    regenerates nothing; image acquisition stays the profile's own business (`acquisition:`), so
+    there is one source of truth for it rather than two.
+  - **`--wizard`** — `config_wizard.sh` has existed all along, fully written, 8 steps with
+    auto-discovery, and was wired to nothing. It now writes the profile and the migration runs with
+    it.
+- **`--image-ref-template 'registry/image:{version}'`** — images from your own registry under your
+  own names. The default remains `<image-ns>:<os>-<version>` (our convention), and `--image-ns`
+  points that convention at a private registry; but a company whose registry already holds Keycloak
+  images named some other way should not have to re-tag it to satisfy this tool. `{version}` is
+  substituted per hop, and image *acquisition* resolves the same ref the migration will — otherwise
+  the tool pulls one image and runs another.
 
 - **Layer 3 — data integrity on every hop (ADR-010).** L1 (`DATABASECHANGELOG`) proves the
   changesets ran; L2 (`MIGRATION_MODEL`) proves the realm migration ran. Neither says a word about
