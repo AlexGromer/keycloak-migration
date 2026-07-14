@@ -25,6 +25,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   removed; a caller-supplied `--work-dir` / `ONESHOT_WORK_DIR` is **never** deleted. Regression
   tests added.
 
+- **CRITICAL — a FAILED backup was reported as SUCCESS and the migration proceeded anyway.**
+  `db_backup()` ignored `pg_dump`'s exit code and downgraded a **failed** integrity check to a
+  `Backup verification skipped` warning. The live run printed `Backup file is corrupted or invalid
+  format` → `Backup verification skipped` → `[✓] Backup created` → `Backup size: 0`, and then
+  migrated the database **holding a 0-byte backup**. Now the exit code is checked, an empty backup
+  is fatal, and a failed verification is fatal (`ALLOW_UNVERIFIED_BACKUP=true` to override).
+- **CRITICAL — every run-mode migration hung until the 900s timeout.** `wait_for_migration` read
+  the container name from `PROFILE_KC_CONTAINER_NAME` (the YAML `container_name`, used by the
+  docker/compose modes) while the transient container is actually named by
+  `PROFILE_KC_RUN_CONTAINER_NAME` (default `kc-migrate-<version>`). `kc_logs` therefore fell back to
+  the literal `keycloak`, found no container and returned no logs — so the Liquibase marker was
+  never matched. It now derives the run-mode name and, if the container is exited/dead/missing,
+  **fails immediately** with the container's last 30 log lines instead of spinning for 15 minutes.
+- **Ctrl-C did not abort the migration** — there was no signal trap at all. `SIGINT`/`SIGTERM` now
+  stop the transient container and exit 130, prompting the operator to check `MIGRATION_MODEL`.
+- `migrate_oneshot.sh`: each hop now gets its own `kc-migrate-<version>` container.
 - **CRITICAL — the pre-hop DB backup (and the rollback restore) never got the password.**
   `db_backup_keycloak` / `db_restore_keycloak` read only `PGPASSWORD` / `DB_PASSWORD` — **not**
   `PROFILE_DB_PASSWORD`, which is what the rest of the tool (container run, `_mv_psql`, PG-version

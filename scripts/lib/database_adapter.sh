@@ -237,11 +237,32 @@ db_backup() {
             # shellcheck disable=SC2206 # intentional word-split: "-f <path>" -> two array elements
             dump_opts+=($dump_target)
 
-            PGPASSWORD="$pass" pg_dump "${dump_opts[@]}"
+            # pg_dump's exit code MUST be checked. It used to be ignored, and the verification
+            # failure below was downgraded to a "skipped" warning — so a failed dump produced a
+            # 0-byte file, the tool logged "Backup created" and migrated the database ANYWAY,
+            # leaving nothing to roll back to.
+            if ! PGPASSWORD="$pass" pg_dump "${dump_opts[@]}"; then
+                log_error "pg_dump FAILED — refusing to migrate without a valid backup"
+                return 1
+            fi
 
-            # Verify backup integrity
+            # An empty file is not a backup. (-Fd writes a directory instead of a file.)
+            if [[ ! -s "$backup_file" && ! -d "${backup_file%.dump}" ]]; then
+                log_error "Backup is empty: $backup_file — refusing to migrate without a valid backup"
+                return 1
+            fi
+
+            # Verify backup integrity — a FAILED verification is FATAL, not "skipped".
             if command -v pg_verify_backup &>/dev/null; then
-                pg_verify_backup "$backup_file" 2>/dev/null || log_warn "Backup verification skipped"
+                if ! pg_verify_backup "$backup_file"; then
+                    if [[ "${ALLOW_UNVERIFIED_BACKUP:-false}" == "true" ]]; then
+                        log_warn "ALLOW_UNVERIFIED_BACKUP=true — proceeding despite an unverified backup"
+                    else
+                        log_error "Backup verification FAILED: $backup_file"
+                        log_error "Refusing to migrate (override with ALLOW_UNVERIFIED_BACKUP=true)"
+                        return 1
+                    fi
+                fi
             fi
             ;;
 

@@ -155,6 +155,22 @@ log_section() {
 #   _confirm "Question?" "Y"|"N"   — the 2nd arg is the default AND the auto-answer.
 # Auto-answers (no prompt) when --yes (AUTO_CONFIRM), ASSUME_DEFAULTS=true, or stdin is
 # not a TTY. Returns 0 = yes, 1 = no. Interactive behaviour (a TTY, no flags) is unchanged.
+# v3.9.1: Ctrl-C must abort cleanly. There was NO signal trap at all, so an interrupt during
+# wait_for_migration's poll loop did not stop the run and left the transient container behind.
+_kc_on_interrupt() {
+    trap - INT TERM
+    echo "" >&2
+    log_warn "Interrupted — aborting migration."
+    if [[ "${PROFILE_KC_DEPLOYMENT_MODE:-}" == "run" ]] && declare -F kc_run_stop_container >/dev/null 2>&1; then
+        local cname="${PROFILE_KC_RUN_CONTAINER_NAME:-kc-migrate-${KC_HOP_VERSION:-${PROFILE_KC_TARGET_VERSION:-}}}"
+        log_warn "Stopping transient migration container: $cname"
+        kc_run_stop_container "$cname" 2>/dev/null || true
+    fi
+    log_warn "The database may be MID-MIGRATION. Check before retrying:"
+    log_warn "  SELECT version FROM MIGRATION_MODEL ORDER BY update_time DESC LIMIT 1;"
+    exit 130
+}
+
 _confirm() {
     local prompt="$1" def="${2:-N}" ans
     if [[ "${AUTO_CONFIRM:-false}" == "true" || "${ASSUME_DEFAULTS:-false}" == "true" || ! -t 0 ]]; then
@@ -1037,6 +1053,18 @@ wait_for_migration() {
     log_info "Monitoring Keycloak logs for Liquibase migration completion..."
     log_info "Timeout: ${timeout}s"
 
+    # The transient run-mode container is named by PROFILE_KC_RUN_CONTAINER_NAME (default
+    # kc-migrate-<version>) — NOT by PROFILE_KC_CONTAINER_NAME (the YAML `container_name`, used by
+    # the docker/compose modes). Reading the wrong variable made kc_logs fall back to the literal
+    # "keycloak", find no such container, return nothing — so the Liquibase marker was NEVER seen
+    # and every run-mode migration spun until the 900s timeout. (The harness only hid this by
+    # exporting both names.)
+    local log_target="${PROFILE_KC_CONTAINER_NAME:-}"
+    if [[ "${PROFILE_KC_DEPLOYMENT_MODE:-}" == "run" ]]; then
+        log_target="${PROFILE_KC_RUN_CONTAINER_NAME:-kc-migrate-${version}}"
+    fi
+    log_info "Reading migration logs from: ${log_target:-<default>}"
+
     # Initial wait for startup
     sleep 10
 
@@ -1044,9 +1072,23 @@ wait_for_migration() {
     while [[ $elapsed -lt $timeout ]]; do
         elapsed=$(($(date +%s) - start_time))
 
+        # Fail fast if the transient container died / never existed, instead of waiting out the
+        # full timeout on a container that is not running Liquibase at all.
+        if [[ "${PROFILE_KC_DEPLOYMENT_MODE:-}" == "run" ]]; then
+            local cstate
+            cstate=$(cr inspect -f '{{.State.Status}}' "$log_target" 2>/dev/null || echo "missing")
+            if [[ "$cstate" == "exited" || "$cstate" == "dead" || "$cstate" == "missing" ]]; then
+                log_error "Migration container '$log_target' is '${cstate}' — it is not running Liquibase."
+                log_warn "Last 30 log lines:"
+                kc_logs "${PROFILE_KC_DEPLOYMENT_MODE}" "false" "$log_target" 2>/dev/null \
+                    | tail -30 | sed 's/^/  /' || true
+                return 1
+            fi
+        fi
+
         # Check logs for migration markers
         local logs=$(kc_logs "${PROFILE_KC_DEPLOYMENT_MODE}" "false" \
-            "${PROFILE_KC_CONTAINER_NAME:-}" \
+            "$log_target" \
             "${PROFILE_KC_COMPOSE_FILE:-}" 2>/dev/null || echo "")
 
         # Check for migration complete markers (Layer 1 — Liquibase).
@@ -2139,6 +2181,9 @@ EOF
 # ============================================================================
 
 main() {
+    # Installed here (not at source time) so sourcing the script for tests/wrappers is inert.
+    trap _kc_on_interrupt INT TERM
+
     local command="${1:-}"
     shift || true
 

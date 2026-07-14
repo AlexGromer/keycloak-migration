@@ -238,7 +238,8 @@ generate_profile() {
     export PROFILE_KC_CLUSTER_MODE="standalone"
     export PROFILE_KC_CURRENT_VERSION="$CURRENT"
     export PROFILE_KC_TARGET_VERSION="$TARGET_FULL"
-    export PROFILE_KC_RUN_CONTAINER_NAME="kc-migrate"
+    # Leave the run-container name unset so each hop gets its own `kc-migrate-<version>`
+    # (deployment_adapter.sh:514) — easier to inspect, and it matches the harness and the docs.
     # registry/image are cosmetic here (PROFILE_CONTAINER_IMAGE_REF env wins), but keep tidy.
     export PROFILE_CONTAINER_REGISTRY="${IMAGE_NS%/*}"
     export PROFILE_CONTAINER_IMAGE="${IMAGE_NS##*/}"
