@@ -25,6 +25,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   removed; a caller-supplied `--work-dir` / `ONESHOT_WORK_DIR` is **never** deleted. Regression
   tests added.
 
+- **CRITICAL — the pre-hop DB backup (and the rollback restore) never got the password.**
+  `db_backup_keycloak` / `db_restore_keycloak` read only `PGPASSWORD` / `DB_PASSWORD` — **not**
+  `PROFILE_DB_PASSWORD`, which is what the rest of the tool (container run, `_mv_psql`, PG-version
+  gate) and the docs use. So `$pass` arrived empty and `pg_dump` fell back to its interactive
+  `Password:` prompt, **hanging a non-interactive (`--yes`) migration forever** — and the same on
+  the rollback path. Both now honour `PROFILE_DB_PASSWORD`, fail fast with an actionable message
+  when it is unset, and `pg_dump`/`pg_restore` run with `-w` so they can never prompt at all.
+- **The security scan no longer runs on every migration.** It is static analysis of *this tool's
+  own source* (ShellCheck + gitleaks over `scripts/`) — it says nothing about the user's database,
+  took ~20s, flooded the migration log, and reported "17 scripts with CRITICAL issues" that were
+  merely **SC2155** style findings which the project's own CI explicitly excludes. Now **opt-in**:
+  `--security-scan` / `ENABLE_SECURITY_SCAN=true`. When run, it uses CI's exclusion list.
+- `security_checks.sh`: `$(grep -c … || echo "0")` yielded `"0\n0"` (grep -c already prints `0`
+  *and* exits 1), so the next comparison died with
+  `[[: 0\n0: arithmetic syntax error (error token is "0")`. Fixed.
+- `audit_logger_v2.sh`: `jq --argjson` aborted with `invalid JSON text passed to --argjson` when
+  the metadata/details value was empty; it now defaults to `{}`.
+- `database_adapter.sh`: a stray `0` printed before each backup — `pg_estimate_backup_time()` logs
+  to stdout *and* echoes its numeric result, which leaked to the console.
 - **Preflight NETWORK check gave a FALSE "UNREACHABLE".** It grepped `nc`'s *message* for
   `succeeded|open`, but ncat (nmap) prints `Ncat: Connected to ...` — so on any host where `nc`
   is ncat/netcat-traditional the check failed even though `psql` connected to the very same

@@ -210,9 +210,11 @@ db_backup() {
                 log_info "Auto-tuned parallel jobs: $parallel_jobs (based on CPU cores and DB size)"
             fi
 
-            # Estimate backup time
+            # Estimate backup time. pg_estimate_backup_time() logs to stdout AND echoes its
+            # numeric result, so the bare number used to leak onto the console ("0"). Keep the
+            # human-readable log lines, drop the value line.
             if command -v pg_estimate_backup_time &>/dev/null; then
-                pg_estimate_backup_time 2>/dev/null || true
+                pg_estimate_backup_time 2>/dev/null | grep -vE '^[0-9]+$' || true
             fi
 
             # Use pg_dump with appropriate format
@@ -228,7 +230,9 @@ db_backup() {
                 log_info "Using parallel backup with $parallel_jobs jobs (directory format)"
             fi
 
-            local -a dump_opts=(-h "$host" -p "$port" -U "$user" -d "$db_name" "$dump_format")
+            # -w (--no-password): NEVER fall back to an interactive "Password:" prompt. Without
+            # it, an empty $pass makes pg_dump block forever in a non-interactive migration.
+            local -a dump_opts=(-h "$host" -p "$port" -U "$user" -d "$db_name" -w "$dump_format")
             [[ "$parallel_jobs" -gt 1 ]] && dump_opts+=(-j "$parallel_jobs")
             # shellcheck disable=SC2206 # intentional word-split: "-f <path>" -> two array elements
             dump_opts+=($dump_target)
@@ -379,7 +383,8 @@ db_restore() {
 
             # Restore with pg_restore
             local pg_version=$(psql --version | grep -oP '\d+' | head -1)
-            local restore_opts="-h $host -p $port -U $user -d $db_name --clean"
+            # -w: never prompt for a password (see dump_opts) — this is the rollback path.
+            local restore_opts="-h $host -p $port -U $user -d $db_name -w --clean"
 
             if [[ "$pg_version" -ge 9 && "$parallel_jobs" -gt 1 ]]; then
                 restore_opts="$restore_opts -j $parallel_jobs"

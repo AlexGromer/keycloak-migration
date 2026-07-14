@@ -109,6 +109,12 @@ create_log_entry() {
     timestamp=$(date -u +"%Y-%m-%dT%H:%M:%S.%3NZ")
 
     # Build base payload (without signature)
+    # jq --argjson requires VALID JSON. An empty or malformed value aborts the whole call with
+    # "jq: invalid JSON text passed to --argjson" (observed mid-migration). Default to {}.
+    if [[ -z "${metadata:-}" ]] || ! printf '%s' "$metadata" | jq -e . >/dev/null 2>&1; then
+        metadata='{}'
+    fi
+
     local payload
     payload=$(jq -n \
         --arg timestamp "$timestamp" \
@@ -373,6 +379,11 @@ audit_security_event() {
     local resource="$2"
     local result="${3:-success}"  # success, denied, failed
     local details="${4:-{}}"
+
+    # Same guard as audit_log(): --argjson refuses empty/invalid JSON.
+    if [[ -z "${details:-}" ]] || ! printf '%s' "$details" | jq -e . >/dev/null 2>&1; then
+        details='{}'
+    fi
 
     local metadata
     metadata=$(jq -n \

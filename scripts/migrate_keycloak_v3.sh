@@ -102,6 +102,9 @@ SKIP_TESTS="${SKIP_TESTS:-false}"
 ENABLE_MONITOR="${ENABLE_MONITOR:-false}"
 # v3.9: non-interactive confirmation. --yes/-y sets this; env ASSUME_DEFAULTS also honored.
 AUTO_CONFIRM="${AUTO_CONFIRM:-false}"
+# v3.9.1: static analysis of THIS TOOL's own source — irrelevant to a migration, so OFF by
+# default. Enable with --security-scan or ENABLE_SECURITY_SCAN=true.
+ENABLE_SECURITY_SCAN="${ENABLE_SECURITY_SCAN:-false}"
 
 # Migration settings
 TIMEOUT_BUILD="${TIMEOUT_BUILD:-600}"
@@ -753,12 +756,23 @@ db_backup_keycloak() {
     local port="${PROFILE_DB_PORT}"
     local db_name="${PROFILE_DB_NAME}"
     local user="${PROFILE_DB_USER}"
-    local pass="${PGPASSWORD:-${DB_PASSWORD:-}}"
+    # The rest of the tool (kc_run_migrating_container, _mv_psql, the PG-version gate) reads
+    # PROFILE_DB_PASSWORD — the backup MUST honour it too. It used to read only PGPASSWORD /
+    # DB_PASSWORD, so the password arrived EMPTY and pg_dump fell back to its interactive
+    # "Password:" prompt, hanging a non-interactive (--yes) migration forever.
+    local pass="${PROFILE_DB_PASSWORD:-${PGPASSWORD:-${DB_PASSWORD:-}}}"
     local parallel_jobs="${PROFILE_MIGRATION_PARALLEL_JOBS:-4}"
 
     log_info "Database: $db_type @ $host:$port/$db_name"
     log_info "Backup file: $backup_file"
     log_info "Parallel jobs: $parallel_jobs"
+
+    # Fail fast instead of blocking on a password prompt nobody can answer.
+    if [[ "$db_type" == "postgresql" && -z "$pass" ]]; then
+        log_error "Database password is not set — pg_dump would prompt interactively and hang."
+        log_error "  export PROFILE_DB_PASSWORD='<db-password>'    (PGPASSWORD also accepted)"
+        return 1
+    fi
 
     # Create backup using adapter
     if db_backup "$db_type" "$host" "$port" "$db_name" "$user" "$pass" "$backup_file" "$parallel_jobs"; then
@@ -791,12 +805,20 @@ db_restore_keycloak() {
     local port="${PROFILE_DB_PORT}"
     local db_name="${PROFILE_DB_NAME}"
     local user="${PROFILE_DB_USER}"
-    local pass="${PGPASSWORD:-${DB_PASSWORD:-}}"
+    # Same bug as db_backup_keycloak: without PROFILE_DB_PASSWORD, pg_restore would prompt for a
+    # password — and this is the ROLLBACK path, so a failed hop would hang instead of restoring.
+    local pass="${PROFILE_DB_PASSWORD:-${PGPASSWORD:-${DB_PASSWORD:-}}}"
     local parallel_jobs="${PROFILE_MIGRATION_PARALLEL_JOBS:-4}"
 
     log_info "Database: $db_type @ $host:$port/$db_name"
     log_info "Backup file: $backup_file"
     log_info "Parallel jobs: $parallel_jobs"
+
+    if [[ "$db_type" == "postgresql" && -z "$pass" ]]; then
+        log_error "Database password is not set — pg_restore would prompt interactively and hang."
+        log_error "  export PROFILE_DB_PASSWORD='<db-password>'    (PGPASSWORD also accepted)"
+        return 1
+    fi
 
     # Restore using adapter
     if db_restore "$db_type" "$host" "$port" "$db_name" "$user" "$pass" "$backup_file" "$parallel_jobs"; then
@@ -1630,8 +1652,11 @@ execute_migration() {
         log_warn "Preflight checks not available (upgrade to v3.5 for production safety)"
     fi
 
-    # v3.6: Run security checks before migration
-    if declare -F run_comprehensive_security_scan >/dev/null 2>&1; then
+    # v3.6 security scan = STATIC ANALYSIS OF THIS TOOL'S OWN SOURCE (ShellCheck + gitleaks over
+    # scripts/). It says NOTHING about the user's database or environment, takes ~20s and floods
+    # the migration log — so as of v3.9.1 it is OPT-IN: --security-scan / ENABLE_SECURITY_SCAN=true.
+    if [[ "${ENABLE_SECURITY_SCAN:-false}" == "true" ]] &&
+       declare -F run_comprehensive_security_scan >/dev/null 2>&1; then
         log_section "Security Scan (v3.6 Security Hardening)"
 
         # Run comprehensive security scan (ShellCheck, gitleaks, hardcoded secrets)
@@ -2056,6 +2081,8 @@ OPTIONS:
     --dry-run               Show what would be done without executing
     --skip-tests            Skip smoke tests after each migration step
     --yes, -y               Assume "yes" for confirmation prompts (non-interactive)
+    --security-scan         Run ShellCheck/gitleaks over THIS TOOL's own source (off by default;
+                            it analyses the tool, not your database)
     --monitor               Enable live migration monitor (if available)
     -h, --help              Show this help message
 
@@ -2152,6 +2179,10 @@ main() {
                 ;;
             --yes|-y)
                 AUTO_CONFIRM=true
+                shift
+                ;;
+            --security-scan)
+                ENABLE_SECURITY_SCAN=true
                 shift
                 ;;
             -h|--help)
