@@ -98,6 +98,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   arithmetic is integer-only. The comparison is now done in **megabytes** (awk does the float math).
 
 ### Added
+- **State reconciliation (ADR-008) — the state is a FACT, not a journal.** `kc_reconcile_state()`
+  now runs before the hop chain is planned and reads the **actual** system state instead of
+  trusting claims about the past:
+  - the version the database is really at (`SELECT version FROM MIGRATION_MODEL …`) — it **wins**
+    over the profile's `current_version`, so **hops the DB has already passed are skipped** and a
+    restart after a failure is idempotent;
+  - a **stale Liquibase lock** (`DATABASECHANGELOGLOCK`, all of Keycloak's lock ids) left by a
+    crashed migration — previously never checked, and it silently blocks every later Keycloak.
+    Reported with the holder/time; `--force-unlock` releases it;
+  - **leftover `kc-migrate-*` containers** from a failed attempt are listed and removed (they
+    would otherwise clash on name);
+  - if the DB is already at the target, the run is a clean no-op instead of a migration attempt.
+- `--no-resume` (also `migrate_oneshot.sh --no-resume`) — ignore checkpoints entirely.
+- `--force-unlock` (also `migrate_oneshot.sh --force-unlock`).
 - `migrate_oneshot.sh --work-dir DIR` (safe — never deleted) and `--skip-preflight` passthrough.
   The banner now prints the work dir, its free space, and the preflight threshold.
 - `MIN_DISK_GB` env override for the preflight free-space threshold (was hardcoded 15GB).

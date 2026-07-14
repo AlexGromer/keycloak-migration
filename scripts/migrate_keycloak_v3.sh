@@ -107,6 +107,8 @@ AUTO_CONFIRM="${AUTO_CONFIRM:-false}"
 ENABLE_SECURITY_SCAN="${ENABLE_SECURITY_SCAN:-false}"
 # v3.9.1: --no-resume ignores checkpoints from a previous (possibly failed) attempt.
 NO_RESUME="${NO_RESUME:-false}"
+# v3.9.1 (ADR-008): --force-unlock releases a stale Liquibase changelog lock left by a crash.
+FORCE_UNLOCK="${FORCE_UNLOCK:-false}"
 
 # Migration settings
 TIMEOUT_BUILD="${TIMEOUT_BUILD:-600}"
@@ -288,6 +290,101 @@ kc_build_migration_path() {
         return 1
     fi
     echo "${out[*]}"
+}
+
+# major.minor of a version string: 26.6.3 -> 26.6
+_kc_major_minor() { local v="$1"; printf '%s' "${v%.*}"; }
+
+# ============================================================================
+# ADR-008 — STATE RECONCILIATION: the state is a FACT, not a journal.
+#
+# Checkpoints and the profile's `current_version` are CLAIMS about the past. Trusting them caused
+# real damage: a stale checkpoint made the tool "skip the start" of a container that no longer
+# existed, and the profile's claim would have re-run hops the database had already passed.
+#
+# Before deciding anything we now read the ACTUAL state:
+#   1. which Keycloak version really migrated this database (MIGRATION_MODEL),
+#   2. whether a crashed migration left a Liquibase lock held (DATABASECHANGELOGLOCK),
+#   3. which transient migration containers really exist.
+#
+# Returns: 0 = proceed, 1 = abort, 2 = nothing to do (already at target).
+# ============================================================================
+kc_reconcile_state() {
+    local target_major="$1"
+
+    log_section "State Reconciliation (reading the ACTUAL state — ADR-008)"
+
+    # --- 1. Ground truth: which version last migrated THIS database? ---
+    local db_version=""
+    if declare -F kc_db_model_version >/dev/null 2>&1; then
+        db_version="$(kc_db_model_version || true)"
+    fi
+
+    if [[ -n "$db_version" ]]; then
+        log_success "Database (MIGRATION_MODEL) is at: $db_version"
+        local claimed="${PROFILE_KC_CURRENT_VERSION:-}"
+        if [[ -n "$claimed" && "$(_kc_major_minor "$claimed")" != "$(_kc_major_minor "$db_version")" ]]; then
+            log_warn "Profile claims current_version=${claimed}, but the DATABASE says ${db_version}."
+            log_warn "The database is the fact — recomputing the hop chain from ${db_version}."
+        fi
+        export PROFILE_KC_CURRENT_VERSION="$db_version"
+    else
+        log_warn "Cannot read MIGRATION_MODEL (DB not initialised by Keycloak, or unreachable)."
+        log_warn "Falling back to the profile's claim: current_version=${PROFILE_KC_CURRENT_VERSION:-<unset>}"
+    fi
+
+    # --- 2. Stale Liquibase lock: a crashed migration blocks every later Keycloak ---
+    if declare -F kc_db_changelog_locked >/dev/null 2>&1; then
+        local locked
+        if locked="$(kc_db_changelog_locked)"; then
+            log_error "Liquibase changelog lock is HELD (a previous migration crashed mid-flight):"
+            printf '%s\n' "$locked" | sed 's/^/    id|lockedby|since = /'
+            if [[ "${FORCE_UNLOCK:-false}" == "true" ]]; then
+                log_warn "--force-unlock: releasing the stale lock"
+                if kc_db_clear_changelog_lock; then
+                    log_success "Changelog lock released"
+                else
+                    log_error "Failed to release the changelog lock"
+                    return 1
+                fi
+            else
+                log_error "Keycloak would block on this lock. Release it, then retry:"
+                log_error "  UPDATE databasechangeloglock SET locked=false, lockedby=null, lockgranted=null;"
+                log_error "  ...or re-run with --force-unlock"
+                return 1
+            fi
+        else
+            log_success "Liquibase changelog lock: free"
+        fi
+    fi
+
+    # --- 3. Leftover transient containers from a previous attempt ---
+    if [[ "${PROFILE_KC_DEPLOYMENT_MODE:-}" == "run" ]] && declare -F cr >/dev/null 2>&1; then
+        local leftovers
+        leftovers="$(cr ps -a --filter "name=kc-migrate-" --format '{{.Names}} {{.Status}}' 2>/dev/null | sed '/^[[:space:]]*$/d' || true)"
+        if [[ -n "$leftovers" ]]; then
+            log_warn "Leftover migration containers from a previous attempt:"
+            printf '%s\n' "$leftovers" | sed 's/^/    /'
+            local _line
+            while IFS= read -r _line; do
+                [[ -n "$_line" ]] && cr rm -f "${_line%% *}" >/dev/null 2>&1 || true
+            done <<< "$leftovers"
+            log_success "Removed (they are transient and would clash on name)"
+        else
+            log_success "No leftover migration containers"
+        fi
+    fi
+
+    # --- 4. Already at the target? Then there is nothing to do. ---
+    local target_full="${MIGRATION_TARGET_FULL[$target_major]:-}"
+    if [[ -n "$db_version" && -n "$target_full" ]]; then
+        if [[ "$(_kc_major_minor "$db_version")" == "$(_kc_major_minor "$target_full")" ]]; then
+            log_success "Database is ALREADY at the target (${db_version}) — nothing to migrate."
+            return 2
+        fi
+    fi
+
+    return 0
 }
 
 # Gate: target major 26 (26.6) requires PostgreSQL >= MIN_PG_FOR_26 (PG13 dropped).
@@ -1676,6 +1773,20 @@ execute_migration() {
         exit 1
     fi
 
+    # ADR-008: reconcile with REALITY before deciding anything. This may replace the profile's
+    # claimed current_version with the version the database is actually at, so that already-applied
+    # hops are skipped (kc_build_migration_path drops hops <= current) and a stale Liquibase lock or
+    # leftover container is caught here instead of hanging the run later.
+    local _rec_rc=0
+    kc_reconcile_state "$target_major" || _rec_rc=$?
+    case "$_rec_rc" in
+        0) ;;
+        2) log_success "Nothing to migrate — the database is already at the target."; return 0 ;;
+        *) log_error "State reconciliation failed — aborting"; return 1 ;;
+    esac
+    current_version="${PROFILE_KC_CURRENT_VERSION}"
+    log_info "Effective path (from ACTUAL db state): $current_version → $target_version"
+
     local migration_steps=()
     local _path
     if ! _path=$(kc_build_migration_path "$current_version" "$target_major"); then
@@ -2171,6 +2282,7 @@ OPTIONS:
     --security-scan         Run ShellCheck/gitleaks over THIS TOOL's own source (off by default;
                             it analyses the tool, not your database)
     --no-resume             Ignore checkpoints from a previous (failed) attempt and redo each step
+    --force-unlock          Release a stale Liquibase changelog lock left by a crashed migration
     --monitor               Enable live migration monitor (if available)
     -h, --help              Show this help message
 
@@ -2278,6 +2390,10 @@ main() {
                 ;;
             --no-resume)
                 NO_RESUME=true
+                shift
+                ;;
+            --force-unlock)
+                FORCE_UNLOCK=true
                 shift
                 ;;
             -h|--help)

@@ -51,6 +51,7 @@
 | ADR-005 | 2026-06-24 | Authoritative success gate = MIGRATION_MODEL advance (Layer 2), tightened wait + fail-closed | Accepted | "Container started" ≠ "migration applied"; old regex too loose |
 | ADR-006 | 2026-06-26 | Air-gap bundle (extends ADR-003): build 8 images (16.1.1/24.0.5/25.0.6/26.6.3 × Astra SE/RED OS) FROM operator-supplied licensed bases → PRIVATE GHCR + PRIVATE Release tar; recipes/tooling PUBLIC, bases NEVER in repo; file-config (config/images.conf) for build/use/branded images | Accepted | Sovereign air-gap delivery + licence boundary; images can't live in git (size/licence) |
 | ADR-007 | 2026-06-27 | Reduce manual setup: env-precedence for PROFILE_CONTAINER_IMAGE_REF/IMAGE_TAR/BASE_IMAGE in profile_load (use `<os>-<version>` tags directly, no re-tag); non-interactive `--yes`/`ASSUME_DEFAULTS` with a fail-closed main gate; one-shot `migrate_oneshot.sh`; config_wizard gains run+acquisition | Accepted | Real migration should be one command; the ':'-ref clobber forced a brittle re-tag; CI/automation need non-interactive runs without silently migrating prod |
+| ADR-008 | 2026-07-14 | State is a FACT, not a journal: reconcile against reality (MIGRATION_MODEL version + DATABASECHANGELOGLOCK + live containers) BEFORE deciding hops; checkpoints and the profile's current_version are downgraded to claims/audit-trail | Accepted | Trusting the journal caused real damage on a live run: a stale checkpoint made the tool "skip the start" of a container that no longer existed and then wait out a 900s timeout; the profile's claimed current_version would also have re-run hops the DB had already passed |
 <!-- | ADR-001 | 2026-01-15 | Use PostgreSQL for persistence | Accepted | Need ACID, complex queries | -->
 
 ### ADR Template
@@ -90,6 +91,7 @@
 | 2026-06-24 | v3.7 container-hop migration: runtime abstraction, image acquisition (pull/load/preloaded/build), build helper, run topology, Layer-2 verification | ADR-001..005 | @AlexGromer |
 | 2026-06-26 | Air-gap packaging Phase A: Containerfile.kc16 (WildFly), build_matrix.sh (dry-run/build/publish + config/images.conf + USE-branded), build-images.yml (dispatch/self-hosted GHCR+Release), AIRGAP.md | ADR-006 | @AlexGromer |
 | 2026-06-27 | v3.9 automation: IMAGE_REF env-precedence (no re-tag), non-interactive `--yes`/`ASSUME_DEFAULTS` (fail-closed gate), `migrate_oneshot.sh`, config_wizard run+acquisition, profile_save acquisition/runtime, 5 new test suites | ADR-007 | @AlexGromer |
+| 2026-07-14 | v3.9.1 state reconciliation: `kc_reconcile_state()` reads MIGRATION_MODEL / DATABASECHANGELOGLOCK / live containers before planning hops; already-applied hops are skipped; stale Liquibase lock detected (`--force-unlock`); checkpoints verified against reality (`--no-resume`) | ADR-008 | @AlexGromer |
 <!-- | 2026-01-15 | Initial architecture | ADR-001 | @user | -->
 
 ---
