@@ -7,6 +7,44 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+Every fix below is in a deployment mode **other than `run`**. The v3.9.1 work was developed and
+live-tested only on `run`; the other five modes (`standalone`, `docker`/`podman`, `docker-compose`,
+`kubernetes`, `deckhouse`) never received it, and carried the defects live.
+
+- **CRITICAL — a health probe rolled back a migration that had already SUCCEEDED.** The probe
+  hardcoded `http://localhost:8080/health`. Keycloak 24+ serves that only with
+  `KC_HEALTH_ENABLED=true`, and from KC 25 health moved to the management port 9000 — so the probe
+  404'd on *every* supported hop. A 404 counted as "unhealthy", and an unhealthy check restored the
+  pre-hop backup over a migration `MIGRATION_MODEL` had already confirmed. Worse, it did so
+  silently: the prompt `_confirm "Rollback to last backup?" "Y"` auto-answers its **default** in any
+  non-TTY (CI, cron, pipe) and under `--yes`, which `migrate_oneshot.sh` always passes.
+  Health is now diagnostic only (ADR-009): it returns OK / NOT_SERVED / UNCONFIRMED, probes the port
+  the version actually serves, and never gates a hop. The rollback offer moved to the L2 gate — the
+  only place the database itself says the migration failed — and defaults to **N**.
+- **CRITICAL — checkpoints outlived the rollback that undid them.** `CHECKPOINT_<v>=migrated` was
+  written before the health check and survived the restore, so the next run skipped backup/stop/start
+  for a migration the restore had just erased. `cmd_rollback_auto` now derives the hop from the
+  backup filename and clears its checkpoints (`clear_checkpoint`).
+- **CRITICAL — the docker/podman image update destroyed the container it could not rebuild.** On
+  insufficient `inspect` data it ran `cr stop` + `cr rm` on the user's Keycloak, logged "please
+  update your run command manually" over the wreckage, and returned 0. It is now fail-closed:
+  nothing is removed until a full recreate set is in hand. Published ports and networks are captured
+  too (the replacement previously came up with neither, unreachable from host and database alike),
+  and `PROFILE_KC_RUN_CONTAINER_NAME` — the *transient* `run`-mode container — no longer leaks into
+  docker/podman mode and gets the wrong container recreated.
+- **Backup rotation never found a single backup.** Hop backups were written flat into `$WORK_DIR`
+  while rotation swept `$WORK_DIR/backups` — a different directory. Every run logged
+  `Found 0 backup(s)` and deleted nothing; a four-hop migration of a large database left four dumps
+  on disk forever. Both now go through `kc_backup_dir()`. Safety backups stay outside it: rotation
+  globs `*.dump` and would prune the emergency copy taken moments before a restore.
+- **Ctrl-C left production down.** Non-`run` modes stop the real Keycloak at Step 2 and restart it
+  at Step 5. An interrupt in that window exited without undoing the stop — `systemctl stop keycloak`
+  left standing, or `kubectl scale --replicas=0` left standing, i.e. production scaled to zero with
+  nobody putting it back. The interrupt handler now restarts what it stopped, and if it cannot, says
+  so loudly with the exact command to run by hand.
+
 ### Planned
 - AWS RDS / GCP Cloud SQL / Azure Database migration examples
 - Ansible playbook wrapper

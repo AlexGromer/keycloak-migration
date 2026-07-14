@@ -85,6 +85,8 @@
 | tests/test_noninteractive.sh | Tests | — |
 | tests/test_config_wizard_run.sh | Tests | — |
 | tests/test_migrate_oneshot.sh | Tests | — |
+| tests/test_state_reconciliation.sh | Tests | — |
+| tests/test_health_not_a_gate.sh | Tests | — |
 ## Directory Structure
 
 ```

@@ -199,16 +199,45 @@ _kc_release_lock() {
     _KC_LOCK_HELD="false"
 }
 
+# True only while WE hold the user's Keycloak down: set after Step 2's stop, cleared by Step 5's
+# start. Never set in `run` mode — there is no long-lived service there, only a transient container.
+_KC_SERVICE_STOPPED_BY_US="false"
+
 _kc_on_interrupt() {
     trap - INT TERM
     echo "" >&2
     log_warn "Interrupted — aborting migration."
     _kc_release_lock
-    if [[ "${PROFILE_KC_DEPLOYMENT_MODE:-}" == "run" ]] && declare -F kc_run_stop_container >/dev/null 2>&1; then
+
+    local mode="${PROFILE_KC_DEPLOYMENT_MODE:-}"
+
+    if [[ "$mode" == "run" ]] && declare -F kc_run_stop_container >/dev/null 2>&1; then
         local cname="${PROFILE_KC_RUN_CONTAINER_NAME:-kc-migrate-${KC_HOP_VERSION:-${PROFILE_KC_TARGET_VERSION:-}}}"
         log_warn "Stopping transient migration container: $cname"
         kc_run_stop_container "$cname" 2>/dev/null || true
     fi
+
+    # Every other mode stops the user's REAL Keycloak at Step 2 and restarts it at Step 5. A
+    # Ctrl-C in that window used to just exit — leaving `systemctl stop keycloak` un-done, or a
+    # `kubectl scale --replicas=0` un-done, i.e. production scaled to zero and nobody putting it
+    # back. Whatever else has gone wrong, we do not walk away from a service we took down.
+    if [[ "${_KC_SERVICE_STOPPED_BY_US:-false}" == "true" ]] && declare -F kc_service_start >/dev/null 2>&1; then
+        log_warn "Keycloak was stopped by this run ($mode) — bringing it back up."
+        # shellcheck disable=SC2119 # optional args: service identity comes from the profile
+        if kc_service_start 2>/dev/null; then
+            log_success "Keycloak restarted."
+        else
+            log_error "COULD NOT RESTART KEYCLOAK — it is still DOWN. Start it by hand:"
+            case "$mode" in
+                standalone)     log_error "    systemctl start ${PROFILE_KC_SERVICE_NAME:-keycloak}" ;;
+                docker|podman)  log_error "    docker start ${PROFILE_KC_CONTAINER_NAME:-keycloak}" ;;
+                docker-compose) log_error "    docker compose -f ${PROFILE_KC_COMPOSE_FILE:-docker-compose.yml} up -d" ;;
+                kubernetes)     log_error "    kubectl scale deployment/${PROFILE_K8S_DEPLOYMENT:-keycloak} --replicas=${PROFILE_K8S_REPLICAS:-1} -n ${PROFILE_K8S_NAMESPACE:-keycloak}" ;;
+                deckhouse)      log_error "    kubectl patch moduleconfig keycloak --type=merge -p '{\"spec\":{\"enabled\":true}}'" ;;
+            esac
+        fi
+    fi
+
     log_warn "The database may be MID-MIGRATION. Check before retrying:"
     log_warn "  SELECT version FROM MIGRATION_MODEL ORDER BY update_time DESC LIMIT 1;"
     exit 130
@@ -658,6 +687,44 @@ get_checkpoint() {
     if [[ -f "$STATE_FILE" ]]; then
         grep "^${key}=" "$STATE_FILE" 2>/dev/null | cut -d= -f2 || echo ""
     fi
+}
+
+# clear_checkpoint <version>
+#   Forget everything we recorded about this hop.
+#
+#   A rollback restores the database to BEFORE the hop, but the checkpoints describing that hop
+#   used to survive it. On the next run should_skip_to would then read CHECKPOINT_26_6_3=migrated
+#   and skip backup/stop/start — asserting a migration that the restore had just undone, against
+#   a database that no longer had it. The state file must not outlive the state it describes.
+clear_checkpoint() {
+    local version="$1"
+    local key="CHECKPOINT_${version//\./_}"
+
+    [[ -f "$STATE_FILE" ]] || return 0
+
+    local tmp="${STATE_FILE}.tmp.$$"
+    grep -v -e "^${key}=" -e "^LAST_CHECKPOINT=${version}:" "$STATE_FILE" > "$tmp" 2>/dev/null || true
+    mv -f "$tmp" "$STATE_FILE"
+
+    # The in-memory copy comes from `source`ing the state file — stale exported values would
+    # otherwise outlive the line we just deleted.
+    unset "$key" LAST_CHECKPOINT
+    log_info "Checkpoints cleared for $version"
+}
+
+# kc_backup_dir — the one directory per-hop backups live in. Creates it.
+#
+#   Hop backups were written flat into $WORK_DIR while rotation swept $WORK_DIR/backups. Two
+#   different directories: rotation reported "Found 0 backup(s)" on every run and never deleted
+#   anything. A four-hop migration of a large database left four dumps on disk forever.
+#
+#   They now share this one path. Safety backups (safety_before_rollback_*.dump) stay OUT of it,
+#   in $WORK_DIR: rotation globs *.dump and would happily prune the emergency copy taken moments
+#   before a restore.
+kc_backup_dir() {
+    local dir="${WORK_DIR}/backups"
+    mkdir -p "$dir" 2>/dev/null || true
+    printf '%s' "$dir"
 }
 
 should_skip_to() {
@@ -1181,49 +1248,89 @@ kc_service_status() {
 }
 
 # ============================================================================
-# KEYCLOAK HEALTH CHECK
+# KEYCLOAK HEALTH CHECK — DIAGNOSTIC ONLY (ADR-009)
+#
+# A health probe answers "is this deployment's HTTP surface reachable and configured to expose
+# /health". That is a DIFFERENT question from "did the migration apply", which only the database
+# can answer (L2 / MIGRATION_MODEL — ADR-005). A probe cannot un-migrate a database, and a failed
+# probe must never be allowed to destroy a migration that L2 has already confirmed.
 # ============================================================================
 
-# shellcheck disable=SC2120 # auto: shellcheck 0.10 (CI) finding, behavior-preserving
+# Health outcome codes. Deliberately NOT 0/1: callers must be forced to distinguish "Keycloak is
+# up but health is switched off" from "Keycloak did not answer at all".
+# Plain assignments, not `readonly`: the test suite sources this file, and a second source of a
+# readonly would abort the shell.
+HEALTH_OK=0            # 200 — ready
+HEALTH_UNCONFIRMED=1   # answered, but never became ready within the retry budget
+HEALTH_NOT_SERVED=2    # 404 / not applicable — health is not exposed. Not a failure.
+
+# kc_health_endpoint <version> — the health URL this Keycloak version actually serves.
+#   KC >= 25 moved health to the MANAGEMENT interface: port 9000, path /health/ready.
+#   KC 17-24 serve /health on the HTTP port (8080).
+# Both only do so when KC_HEALTH_ENABLED=true. Probing :8080/health on a KC 26 is guaranteed to
+# 404 — which is exactly what the old default did, on every supported hop.
+kc_health_endpoint() {
+    local version="${1:-}" major
+    major="${version%%.*}"
+    [[ "$major" =~ ^[0-9]+$ ]] || major=0
+
+    if [[ "$major" -ge 25 ]]; then
+        printf 'http://localhost:9000/health/ready'
+    else
+        printf 'http://localhost:8080/health'
+    fi
+}
+
+# health_check [version] [endpoint]
+#   Returns HEALTH_OK / HEALTH_UNCONFIRMED / HEALTH_NOT_SERVED. NEVER gates a hop — see the
+#   Step 7 comment in migrate_to_version. For a real post-migration acceptance test (boots the
+#   target image with health enabled and exercises the Admin API), use the `verify` subcommand.
+# shellcheck disable=SC2120 # optional args: callers may rely on the profile defaults
 health_check() {
-    local endpoint="${1:-http://localhost:8080/health}"
+    local version="${1:-${PROFILE_KC_TARGET_VERSION:-}}"
+    local endpoint="${2:-$(kc_health_endpoint "$version")}"
     local max_attempts="${HEALTH_CHECK_RETRIES}"
     local interval="${HEALTH_CHECK_INTERVAL}"
     local mode="${PROFILE_KC_DEPLOYMENT_MODE}"
 
     # In `run` mode the container is a TRANSIENT migration boot that we stop immediately after the
-    # hop — there is no service to health-check. Worse, KC 24+ does not expose /health unless
-    # KC_HEALTH_ENABLED=true, and this probe used PROFILE_KC_CONTAINER_NAME (the docker/compose
-    # name, empty here) — so it would 404, "fail", and trigger a ROLLBACK of a migration that had
-    # just SUCCEEDED. Layer 2 (MIGRATION_MODEL) is the authoritative gate — ADR-005.
+    # hop. There is no service to health-check, and nothing downstream depends on the answer.
     if [[ "$mode" == "run" ]]; then
-        log_info "Health check skipped (run mode: transient migration container; L2/MIGRATION_MODEL is the gate)"
-        return 0
+        log_info "Health check skipped (run mode: transient migration container, nothing to serve)"
+        return "$HEALTH_NOT_SERVED"
     fi
 
     log_info "Health check: $endpoint (max $max_attempts attempts, ${interval}s interval)"
 
-    local attempt=1
+    local attempt=1 code="000"
     while [[ $attempt -le $max_attempts ]]; do
-        log_info "Attempt $attempt/$max_attempts..."
-
-        if kc_health_check "$mode" "$endpoint" \
+        code=$(kc_health_probe "$mode" "$endpoint" \
             "${PROFILE_KC_CONTAINER_NAME:-keycloak}" \
-            "${PROFILE_KC_COMPOSE_FILE:-docker-compose.yml}"; then
-            log_success "Health check passed"
-            return 0
-        fi
+            "${PROFILE_KC_COMPOSE_FILE:-docker-compose.yml}")
+
+        case "$code" in
+            200)
+                log_success "Health check passed (HTTP 200)"
+                return "$HEALTH_OK"
+                ;;
+            404)
+                log_info "Health endpoint answered HTTP 404 — Keycloak is UP but does not expose health."
+                log_info "  Keycloak serves it only with KC_HEALTH_ENABLED=true (KC>=25: port 9000)."
+                log_info "  This says nothing about the migration — L2/MIGRATION_MODEL is the gate."
+                return "$HEALTH_NOT_SERVED"
+                ;;
+        esac
 
         if [[ $attempt -lt $max_attempts ]]; then
-            log_warn "Health check failed, retrying in ${interval}s..."
+            log_info "Attempt $attempt/$max_attempts: HTTP $code — retrying in ${interval}s..."
             sleep "$interval"
         fi
-
         ((attempt++))
     done
 
-    log_error "Health check failed after $max_attempts attempts"
-    return 1
+    log_warn "Health check did not confirm readiness after $max_attempts attempts (last: HTTP $code)"
+    log_warn "  Run '$0 verify --profile <name>' for a real acceptance test against the target image."
+    return "$HEALTH_UNCONFIRMED"
 }
 
 # ============================================================================
@@ -1441,7 +1548,7 @@ migrate_rolling_update() {
 
     # Step 1: Backup before migration
     if [[ "${PROFILE_MIGRATION_BACKUP:-true}" == "true" ]]; then
-        local backup_file="$WORK_DIR/backup_before_${target_version}_$(date +%Y%m%d_%H%M%S).dump"
+        local backup_file="$(kc_backup_dir)/backup_before_${target_version}_$(date +%Y%m%d_%H%M%S).dump"
         db_backup_keycloak "$backup_file" "before $target_version" || return 1
         update_state "LAST_BACKUP" "$backup_file"
     fi
@@ -1572,7 +1679,7 @@ migrate_blue_green() {
 
     # Step 1: Backup before migration
     if [[ "${PROFILE_MIGRATION_BACKUP:-true}" == "true" ]]; then
-        local backup_file="$WORK_DIR/backup_before_${target_version}_$(date +%Y%m%d_%H%M%S).dump"
+        local backup_file="$(kc_backup_dir)/backup_before_${target_version}_$(date +%Y%m%d_%H%M%S).dump"
         db_backup_keycloak "$backup_file" "before $target_version" || return 1
         update_state "LAST_BACKUP" "$backup_file"
     fi
@@ -1725,7 +1832,7 @@ migrate_to_version() {
     # Step 1: Backup before migration
     if [[ "${PROFILE_MIGRATION_BACKUP:-true}" == "true" ]]; then
         if [[ -z "$existing_cp" ]] || ! should_skip_to "$existing_cp" "backup_done"; then
-            local backup_file="$WORK_DIR/backup_before_${target_version}_$(date +%Y%m%d_%H%M%S).dump"
+            local backup_file="$(kc_backup_dir)/backup_before_${target_version}_$(date +%Y%m%d_%H%M%S).dump"
             db_backup_keycloak "$backup_file" "before $target_version" || return 1
             update_state "LAST_BACKUP" "$backup_file"
             set_checkpoint "$target_version" "backup_done"
@@ -1738,6 +1845,10 @@ migrate_to_version() {
     if [[ -z "$existing_cp" ]] || ! should_skip_to "$existing_cp" "stopped"; then
         # shellcheck disable=SC2119 # auto: shellcheck 0.10 (CI) finding, behavior-preserving
         kc_service_stop || return 1
+        # From here until Step 5 brings it back, the user's Keycloak is DOWN because we took it
+        # down. If we die in this window the interrupt handler has to put it back — see
+        # _kc_on_interrupt. In `run` mode there is no such service, so the flag stays false.
+        [[ "${PROFILE_KC_DEPLOYMENT_MODE:-}" != "run" ]] && _KC_SERVICE_STOPPED_BY_US="true"
         set_checkpoint "$target_version" "stopped"
     else
         log_info "Skipping stop (already done)"
@@ -1799,6 +1910,8 @@ migrate_to_version() {
     else
         # shellcheck disable=SC2119 # auto: shellcheck 0.10 (CI) finding, behavior-preserving
         kc_service_start || return 1
+        # Keycloak is back up — the interrupt handler no longer owes anyone a restart.
+        _KC_SERVICE_STOPPED_BY_US="false"
         set_checkpoint "$target_version" "started"
     fi
 
@@ -1808,9 +1921,14 @@ migrate_to_version() {
 
         # Step 6b: AUTHORITATIVE Layer 2 gate — MIGRATION_MODEL must advance to the hop
         # version. "Container started" != "realm migration applied".
+        #
+        # This is the ONE place a hop can be declared failed, and therefore the ONE place a
+        # rollback may be offered. The database itself says whether the migration applied.
         if declare -F kc_verify_migration_model >/dev/null 2>&1; then
             kc_verify_migration_model "$target_version" || {
                 log_error "MIGRATION_MODEL did not advance to $target_version — Layer 2 NOT confirmed"
+                log_error "The hop did NOT apply. The database is where it was before this hop began."
+                _kc_offer_rollback "$target_version"
                 return 1
             }
         else
@@ -1827,22 +1945,23 @@ migrate_to_version() {
         log_info "Skipping migration wait (already migrated)"
     fi
 
-    # Step 7: Health check (with auto-rollback on failure)
+    # Step 7: Health check — DIAGNOSTIC ONLY, never a gate (ADR-009).
+    #
+    # L2 (Step 6b) has already confirmed this hop against the DATABASE: MIGRATION_MODEL says the
+    # realm migration ran. Whether an HTTP probe can reach /health is a fact about the deployment's
+    # configuration, not about the migration.
+    #
+    # This block used to roll back on a failed probe. Since KC 24+ serves /health only with
+    # KC_HEALTH_ENABLED=true — and KC>=25 moved it to port 9000 — the default probe 404'd on
+    # EVERY supported hop. And _confirm auto-answers its default under --yes or any non-TTY
+    # (CI, cron, pipe), where the default was "Y". So a 404 silently restored a backup over a
+    # migration that had just SUCCEEDED. In `run` mode this was papered over with an early return;
+    # the other five deployment modes carried the live defect.
+    #
+    # A failed probe now produces a warning and nothing else. `verify` is the real acceptance test.
     if [[ -z "$existing_cp" ]] || ! should_skip_to "$existing_cp" "health_ok"; then
-        # shellcheck disable=SC2119 # auto: shellcheck 0.10 (CI) finding, behavior-preserving
-        if ! health_check; then
-            log_error "Health check failed after migration to $target_version"
-            if [[ "${AUTO_ROLLBACK:-false}" == "true" ]]; then
-                log_warn "Auto-rollback enabled — rolling back..."
-                cmd_rollback_auto
-                return 1
-            else
-                if _confirm "Rollback to last backup?" "Y"; then
-                    cmd_rollback_auto
-                fi
-                return 1
-            fi
-        fi
+        # shellcheck disable=SC2119 # optional args: version comes from the profile
+        health_check "$target_version" || true
         set_checkpoint "$target_version" "health_ok"
     else
         log_info "Skipping health check (already passed)"
@@ -1977,7 +2096,7 @@ execute_migration() {
         log_section "Preflight Checks (Production Safety v3.5)"
 
         # Determine backup directory
-        local backup_dir="${WORK_DIR}/backups"
+        local backup_dir="$(kc_backup_dir)"
         mkdir -p "$backup_dir"
 
         # Get Keycloak URL if available
@@ -2143,7 +2262,7 @@ execute_migration() {
     if declare -F auto_rotate_backups >/dev/null 2>&1; then
         log_section "Backup Rotation (Production Safety v3.5)"
 
-        local backup_dir="${WORK_DIR}/backups"
+        local backup_dir="$(kc_backup_dir)"
 
         # Use rotation policy from profile or default
         local rotation_policy="${PROFILE_BACKUP_ROTATION_POLICY:-keep_last_n}"
@@ -2362,6 +2481,31 @@ find_latest_backup() {
     return 1
 }
 
+# _kc_offer_rollback <version>
+#   The ONLY path by which a failed hop may restore the database. Reached solely from the L2 gate
+#   (Step 6b), i.e. only when the database itself says the migration did not apply.
+#
+#   The default is NO, deliberately. _confirm auto-answers its DEFAULT under --yes, under
+#   ASSUME_DEFAULTS, and in any non-TTY (CI, cron, pipe) — and migrate_oneshot always passes
+#   --yes. A "Y" default here therefore means: restore a database, unattended, without anyone
+#   seeing the question. Restoring a database is not something to do by accident.
+_kc_offer_rollback() {
+    local version="$1"
+
+    if [[ "${AUTO_ROLLBACK:-false}" == "true" ]]; then
+        log_warn "AUTO_ROLLBACK=true — restoring the pre-${version} backup"
+        cmd_rollback_auto
+        return
+    fi
+
+    if _confirm "Restore the pre-${version} backup?" "N"; then
+        cmd_rollback_auto
+    else
+        log_warn "Not rolling back. The pre-${version} backup is kept in ${WORK_DIR}."
+        log_warn "  Restore it later with: $0 rollback --profile <name>"
+    fi
+}
+
 cmd_rollback_auto() {
     # Non-interactive rollback (called from auto-rollback or --force)
     log_section "Auto-Rollback"
@@ -2376,6 +2520,11 @@ cmd_rollback_auto() {
 
     log_warn "Restoring from: $last_backup"
 
+    # The backup is named backup_before_<version>_<timestamp>.dump — the version it names is the
+    # hop this restore undoes, and therefore the hop whose checkpoints must not survive it.
+    local undone_version=""
+    undone_version=$(basename "$last_backup" | sed -n 's/^backup_before_\(.*\)_[0-9]\{8\}_[0-9]\{6\}\.dump$/\1/p')
+
     # Safety backup before rollback
     local safety_backup="$WORK_DIR/safety_before_rollback_$(date +%Y%m%d_%H%M%S).dump"
     db_backup_keycloak "$safety_backup" "safety backup before rollback" || true
@@ -2389,6 +2538,16 @@ cmd_rollback_auto() {
     }
     # shellcheck disable=SC2119 # auto: shellcheck 0.10 (CI) finding, behavior-preserving
     kc_service_start || true
+
+    # The database is now BEFORE this hop. Any checkpoint claiming the hop was reached is a lie,
+    # and a resume that believed it would skip straight past the migration it needs to redo.
+    if [[ -n "$undone_version" ]]; then
+        clear_checkpoint "$undone_version"
+        update_state "RESUME_SAFE" "false"
+    else
+        log_warn "Could not derive the hop version from '$(basename "$last_backup")' — checkpoints"
+        log_warn "  were NOT cleared. Re-run with --no-resume to avoid trusting stale state."
+    fi
 
     log_success "Auto-rollback completed from: $last_backup"
     return 0

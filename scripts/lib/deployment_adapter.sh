@@ -364,6 +364,62 @@ kc_health_check() {
     esac
 }
 
+# kc_health_probe <mode> <endpoint> [container_or_ns] [compose_file]
+#   Echo the HTTP status code the health endpoint answers with; "000" when it cannot be reached
+#   at all.
+#
+#   kc_health_check collapses everything into pass/fail, which cannot distinguish the two cases
+#   that matter here:
+#     404 — Keycloak is UP and answering, but does not serve health. It only does so with
+#           KC_HEALTH_ENABLED=true, and from KC 25 on the endpoint lives on the MANAGEMENT port
+#           (9000), not 8080. That is a fact about the deployment's configuration.
+#     000 — nothing answered: wrong port, container down, network unreachable.
+#   Treating the first as "unhealthy" is what let a 404 roll back a migration that had already
+#   succeeded. Callers need the code, not a verdict.
+kc_health_probe() {
+    local mode="${1:-standalone}"
+    local endpoint="${2:-}"
+    shift 2
+    local args=("$@")
+
+    # -w '%{http_code}' prints the status (or "000" when the transfer never completed) and, unlike
+    # -f, exits 0 on a 4xx — so the code survives to be read.
+    local -a curl_args=(-s -o /dev/null -w '%{http_code}' --max-time 10)
+    local code=""
+
+    case "$mode" in
+        standalone)
+            code=$(curl "${curl_args[@]}" "$endpoint" 2>/dev/null) || true
+            ;;
+
+        docker|podman|run)
+            code=$(cr exec "${args[0]:-keycloak}" \
+                curl "${curl_args[@]}" "$endpoint" 2>/dev/null) || true
+            ;;
+
+        docker-compose)
+            # -T: no TTY. Without it this hangs when stdin is not a terminal (CI, cron).
+            # shellcheck disable=SC2046  # cr_compose returns command words
+            code=$($(cr_compose) -f "${args[1]:-docker-compose.yml}" exec -T "${args[0]:-keycloak}" \
+                curl "${curl_args[@]}" "$endpoint" 2>/dev/null) || true
+            ;;
+
+        kubernetes|deckhouse)
+            local ns pod
+            if [[ "$mode" == "deckhouse" ]]; then ns="d8-keycloak"; else ns="${args[0]:-keycloak}"; fi
+            pod=$(kubectl get pods -l app=keycloak -n "$ns" \
+                -o jsonpath='{.items[0].metadata.name}' 2>/dev/null) || true
+            if [[ -n "$pod" ]]; then
+                code=$(kubectl exec "$pod" -n "$ns" -- \
+                    curl "${curl_args[@]}" "$endpoint" 2>/dev/null) || true
+            fi
+            ;;
+    esac
+
+    code="$(printf '%s' "$code" | tr -cd '0-9')"
+    printf '%s' "${code:-000}"
+}
+
 # ============================================================================
 # Configuration Management
 # ============================================================================
