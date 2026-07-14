@@ -25,6 +25,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   removed; a caller-supplied `--work-dir` / `ONESHOT_WORK_DIR` is **never** deleted. Regression
   tests added.
 
+- **CRITICAL — the migrating container never started: Keycloak 24+ refuses to boot without a
+  hostname setting.** `kc_run_migrating_container` passed only the `KC_DB*` env, so `start
+  --optimized` died instantly with `Strict hostname resolution configured but no hostname setting
+  provided` / `Failed to start quarkus` (exit 1) — Liquibase never ran, and the caller then waited
+  out its 900s timeout. The transient migration container now gets `KC_HOSTNAME_STRICT=false` and
+  `KC_HTTP_ENABLED=true` (nobody connects to it; it exists only to run L1+L2), overridable via
+  `PROFILE_KC_RUN_HOSTNAME_STRICT` / `PROFILE_KC_RUN_HTTP_ENABLED` / `PROFILE_KC_RUN_HOSTNAME`.
+  This affected **every** hop and target, and the harness too (same function).
+- **CRITICAL — the post-hop health check would roll back a SUCCESSFUL migration.** In `run` mode it
+  probed `http://localhost:8080/health` (KC 24+ does not expose it unless `KC_HEALTH_ENABLED=true`)
+  and looked up `PROFILE_KC_CONTAINER_NAME` (the docker/compose name — empty here), so it failed and
+  `migration_step` triggered a rollback of a migration that had just succeeded. Health check is now
+  skipped in `run` mode: the container is transient and Layer 2 (`MIGRATION_MODEL`) is the
+  authoritative gate (ADR-005).
+- The standalone preflight DB-connectivity check now honours `PROFILE_DB_PASSWORD` too.
+- `mysqldump`: exit code and empty-file are now checked (same data-safety rule as PostgreSQL).
 - **CRITICAL — a FAILED backup was reported as SUCCESS and the migration proceeded anyway.**
   `db_backup()` ignored `pg_dump`'s exit code and downgraded a **failed** integrity check to a
   `Backup verification skipped` warning. The live run printed `Backup file is corrupted or invalid

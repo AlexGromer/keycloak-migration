@@ -524,17 +524,36 @@ kc_run_migrating_container() {
     local image_ref
     image_ref=$(dist_image_ref "$version")
 
+    # Keycloak 24+ in PRODUCTION mode (`start --optimized`) refuses to boot with only the DB
+    # settings. Observed on a live run (KC 24.0.5 exited 1 immediately, so Liquibase never ran):
+    #   ERROR: Strict hostname resolution configured but no hostname setting provided
+    #   ERROR: Failed to start quarkus
+    # and, with no HTTPS key material, it also demands http be explicitly enabled.
+    #
+    # This container is a TRANSIENT MIGRATION boot — nobody connects to it; we only need Keycloak
+    # to run Liquibase (L1) + RealmMigration (L2) and exit. So relax both. Override per profile
+    # with PROFILE_KC_RUN_HOSTNAME_STRICT / PROFILE_KC_RUN_HTTP_ENABLED / PROFILE_KC_RUN_HOSTNAME.
+    local hostname_strict="${PROFILE_KC_RUN_HOSTNAME_STRICT:-false}"
+    local http_enabled="${PROFILE_KC_RUN_HTTP_ENABLED:-true}"
+
+    local -a run_env=(
+        -e KC_DB=postgres
+        -e KC_DB_URL="$jdbc_url"
+        -e KC_DB_USERNAME="$db_user"
+        -e KC_DB_PASSWORD="$db_pass"
+        -e KC_HOSTNAME_STRICT="$hostname_strict"
+        -e KC_HTTP_ENABLED="$http_enabled"
+    )
+    [[ -n "${PROFILE_KC_RUN_HOSTNAME:-}" ]] && run_env+=(-e KC_HOSTNAME="${PROFILE_KC_RUN_HOSTNAME}")
+
     if [[ "${DRY_RUN:-false}" == "true" || "${KC_VERBOSE:-false}" == "true" ]]; then
-        echo "DRY-RUN: cr run -d --name $container_name $network_opt -e KC_DB=postgres -e KC_DB_URL=$jdbc_url -e KC_DB_USERNAME=$db_user -e KC_DB_PASSWORD=*** $image_ref start --optimized" >&2
+        echo "DRY-RUN: cr run -d --name $container_name $network_opt -e KC_DB=postgres -e KC_DB_URL=$jdbc_url -e KC_DB_USERNAME=$db_user -e KC_DB_PASSWORD=*** -e KC_HOSTNAME_STRICT=$hostname_strict -e KC_HTTP_ENABLED=$http_enabled $image_ref start --optimized" >&2
         [[ "${DRY_RUN:-false}" == "true" ]] && return 0
     fi
 
     cr run -d --name "$container_name" \
         "$network_opt" \
-        -e KC_DB=postgres \
-        -e KC_DB_URL="$jdbc_url" \
-        -e KC_DB_USERNAME="$db_user" \
-        -e KC_DB_PASSWORD="$db_pass" \
+        "${run_env[@]}" \
         "$image_ref" \
         start --optimized
 }

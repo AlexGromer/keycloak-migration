@@ -281,11 +281,19 @@ db_backup() {
                 }
             fi
 
-            # Fallback to mysqldump
+            # Fallback to mysqldump. Same rule as the PostgreSQL branch: a failed or empty dump
+            # must NEVER be reported as a successful backup.
             log_info "Using mysqldump (cold backup)"
-            mysqldump -h "$host" -P "$port" -u "$user" -p"$pass" \
+            if ! mysqldump -h "$host" -P "$port" -u "$user" -p"$pass" \
                 --single-transaction --routines --triggers --events \
-                "$db_name" > "$backup_file"
+                "$db_name" > "$backup_file"; then
+                log_error "mysqldump FAILED — refusing to migrate without a valid backup"
+                return 1
+            fi
+            if [[ ! -s "$backup_file" ]]; then
+                log_error "Backup is empty: $backup_file — refusing to migrate without a valid backup"
+                return 1
+            fi
 
             # Show InnoDB recommendations
             if command -v mysql_innodb_buffer_pool_recommendation &>/dev/null; then

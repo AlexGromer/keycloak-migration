@@ -588,7 +588,8 @@ run_preflight_checks() {
 
     # 5. Database connectivity (standalone only — K8s has its own networking)
     if [[ "${PROFILE_KC_DEPLOYMENT_MODE:-}" == "standalone" ]]; then
-        local db_pass="${PGPASSWORD:-${DB_PASSWORD:-}}"
+        # Same precedence as db_backup_keycloak/db_restore_keycloak: PROFILE_DB_PASSWORD first.
+        local db_pass="${PROFILE_DB_PASSWORD:-${PGPASSWORD:-${DB_PASSWORD:-}}}"
         if [[ -n "$db_pass" ]]; then
             if db_test_connection "${PROFILE_DB_TYPE}" "${PROFILE_DB_HOST}" \
                 "${PROFILE_DB_PORT}" "${PROFILE_DB_NAME}" "${PROFILE_DB_USER}" "$db_pass"; then
@@ -952,6 +953,16 @@ health_check() {
     local max_attempts="${HEALTH_CHECK_RETRIES}"
     local interval="${HEALTH_CHECK_INTERVAL}"
     local mode="${PROFILE_KC_DEPLOYMENT_MODE}"
+
+    # In `run` mode the container is a TRANSIENT migration boot that we stop immediately after the
+    # hop — there is no service to health-check. Worse, KC 24+ does not expose /health unless
+    # KC_HEALTH_ENABLED=true, and this probe used PROFILE_KC_CONTAINER_NAME (the docker/compose
+    # name, empty here) — so it would 404, "fail", and trigger a ROLLBACK of a migration that had
+    # just SUCCEEDED. Layer 2 (MIGRATION_MODEL) is the authoritative gate — ADR-005.
+    if [[ "$mode" == "run" ]]; then
+        log_info "Health check skipped (run mode: transient migration container; L2/MIGRATION_MODEL is the gate)"
+        return 0
+    fi
 
     log_info "Health check: $endpoint (max $max_attempts attempts, ${interval}s interval)"
 
