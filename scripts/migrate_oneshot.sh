@@ -95,6 +95,7 @@ ONESHOT_DRY="true"                 # default dry-run; --go flips to live
 SKIP_PREFLIGHT_PASS="false"        # --skip-preflight -> passed through to migrate
 NO_RESUME_PASS="false"             # --no-resume      -> passed through to migrate
 FORCE_UNLOCK_PASS="false"          # --force-unlock   -> passed through to migrate
+KILL_STALE_PASS="false"            # --kill-stale     -> passed through to migrate
 
 oneshot_usage() { sed -n '2,38p' "${BASH_SOURCE[0]}" | sed 's/^#\{0,1\} \{0,1\}//'; }
 
@@ -131,6 +132,7 @@ while [[ $# -gt 0 ]]; do
         --skip-preflight)   SKIP_PREFLIGHT_PASS="true"; shift ;;
         --no-resume)        NO_RESUME_PASS="true"; shift ;;
         --force-unlock)     FORCE_UNLOCK_PASS="true"; shift ;;
+        --kill-stale)       KILL_STALE_PASS="true"; shift ;;
         --gen-profile-only) GEN_ONLY="true"; shift ;;
         --dry-run)          ONESHOT_DRY="true"; shift ;;
         --go)               ONESHOT_DRY="false"; shift ;;
@@ -293,6 +295,7 @@ elif [[ "$SKIP_PREFLIGHT_PASS" == "true" ]]; then
 fi
 [[ "$NO_RESUME_PASS" == "true" ]] && MIGRATE_ARGS+=(--no-resume)
 [[ "$FORCE_UNLOCK_PASS" == "true" ]] && MIGRATE_ARGS+=(--force-unlock)
+[[ "$KILL_STALE_PASS" == "true" ]] && MIGRATE_ARGS+=(--kill-stale)
 
 log_info "Handing off: migrate_keycloak_v3.sh ${MIGRATE_ARGS[*]}"
 # Invoke via `bash` so it works regardless of the file's executable bit.

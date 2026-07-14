@@ -555,7 +555,29 @@ kc_run_migrating_container() {
         "$network_opt" \
         "${run_env[@]}" \
         "$image_ref" \
-        start --optimized
+        start --optimized || {
+        log_error "Failed to start migration container '$container_name'"
+        return 1
+    }
+
+    # Verify the boot actually TOOK, right now. A mis-configured Keycloak exits within a second or
+    # two, and a container that is already gone cannot be diagnosed afterwards — so capture the
+    # state and the logs immediately, while they still exist.
+    sleep 3
+    local st
+    st=$(cr inspect -f '{{.State.Status}}' "$container_name" 2>/dev/null | tr -d '[:space:]' || true)
+    : "${st:=missing}"
+    if [[ "$st" != "running" ]]; then
+        local rc_exit
+        rc_exit=$(cr inspect -f '{{.State.ExitCode}}' "$container_name" 2>/dev/null | tr -d '[:space:]' || true)
+        log_error "Migration container '$container_name' is '${st}' 3s after start (exit=${rc_exit:-?})"
+        log_warn "Container logs:"
+        if ! cr logs "$container_name" 2>&1 | tail -40 | sed 's/^/  /'; then
+            log_warn "  (no logs — the container is already gone)"
+        fi
+        return 1
+    fi
+    log_success "Migration container '$container_name' is running"
 }
 
 kc_run_stop_container() {

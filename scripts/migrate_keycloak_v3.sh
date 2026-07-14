@@ -109,6 +109,8 @@ ENABLE_SECURITY_SCAN="${ENABLE_SECURITY_SCAN:-false}"
 NO_RESUME="${NO_RESUME:-false}"
 # v3.9.1 (ADR-008): --force-unlock releases a stale Liquibase changelog lock left by a crash.
 FORCE_UNLOCK="${FORCE_UNLOCK:-false}"
+# v3.9.1: --kill-stale terminates competing/hung migration processes instead of refusing to run.
+KILL_STALE="${KILL_STALE:-false}"
 
 # Migration settings
 TIMEOUT_BUILD="${TIMEOUT_BUILD:-600}"
@@ -161,10 +163,47 @@ log_section() {
 # not a TTY. Returns 0 = yes, 1 = no. Interactive behaviour (a TTY, no flags) is unchanged.
 # v3.9.1: Ctrl-C must abort cleanly. There was NO signal trap at all, so an interrupt during
 # wait_for_migration's poll loop did not stop the run and left the transient container behind.
+# ============================================================================
+# v3.9.1: SINGLE-INSTANCE GUARD.
+# Two migrations running against the same workspace fight over the transient container name
+# (kc-migrate-<version>): one run's cleanup removes the container the OTHER run just started.
+# That is exactly how a "hung" run from a previous attempt silently murdered a healthy container
+# in the middle of Liquibase — the DB migration had already succeeded, but the container vanished
+# and the live run reported failure.
+# ============================================================================
+MIGRATION_LOCK_FILE="${MIGRATION_LOCK_FILE:-$WORK_DIR/migration.lock}"
+_KC_LOCK_HELD="false"
+
+_kc_acquire_lock() {
+    if [[ -f "$MIGRATION_LOCK_FILE" ]]; then
+        local old_pid
+        old_pid="$(tr -d '[:space:]' < "$MIGRATION_LOCK_FILE" 2>/dev/null || true)"
+        if [[ -n "$old_pid" ]] && kill -0 "$old_pid" 2>/dev/null; then
+            log_error "Another migration is ALREADY RUNNING (PID $old_pid)."
+            log_error "  lock: $MIGRATION_LOCK_FILE"
+            log_error "Two runs would fight over the kc-migrate-<version> container name and kill"
+            log_error "each other's containers mid-migration. Stop the other run first:"
+            log_error "    kill $old_pid"
+            return 1
+        fi
+        log_warn "Stale lock from a dead process (PID ${old_pid:-?}) — reclaiming it"
+    fi
+    printf '%s' "$$" > "$MIGRATION_LOCK_FILE" 2>/dev/null || true
+    _KC_LOCK_HELD="true"
+    return 0
+}
+
+_kc_release_lock() {
+    [[ "${_KC_LOCK_HELD:-false}" == "true" ]] || return 0
+    rm -f "$MIGRATION_LOCK_FILE" 2>/dev/null || true
+    _KC_LOCK_HELD="false"
+}
+
 _kc_on_interrupt() {
     trap - INT TERM
     echo "" >&2
     log_warn "Interrupted — aborting migration."
+    _kc_release_lock
     if [[ "${PROFILE_KC_DEPLOYMENT_MODE:-}" == "run" ]] && declare -F kc_run_stop_container >/dev/null 2>&1; then
         local cname="${PROFILE_KC_RUN_CONTAINER_NAME:-kc-migrate-${KC_HOP_VERSION:-${PROFILE_KC_TARGET_VERSION:-}}}"
         log_warn "Stopping transient migration container: $cname"
@@ -296,6 +335,55 @@ kc_build_migration_path() {
 _kc_major_minor() { local v="$1"; printf '%s' "${v%.*}"; }
 
 # ============================================================================
+# STALE / COMPETING MIGRATION PROCESSES
+#
+# Two migration processes fight over the transient container name (kc-migrate-<version>): one
+# run's cleanup removes the container the OTHER run just started, killing a healthy migration
+# mid-Liquibase. This is not hypothetical — it happened on a live run, and the culprit was a
+# leftover process from an earlier (hung) attempt. Detect them before doing anything.
+# ============================================================================
+
+# PIDs of this process and all of its ancestors — never treat ourselves as a stale process.
+_kc_self_and_ancestors() {
+    local p="$$"
+    while [[ -n "$p" && "$p" != "0" && "$p" != "1" ]]; do
+        printf '%s\n' "$p"
+        p="$(awk '{print $4}' "/proc/$p/stat" 2>/dev/null || true)"
+    done
+}
+
+# kc_find_other_migration_procs — echo the PID of every OTHER migrate/oneshot process.
+# Returns 1 when there are none.
+kc_find_other_migration_procs() {
+    command -v pgrep >/dev/null 2>&1 || return 1
+    local mine pids=() p
+    mine="$(_kc_self_and_ancestors)"
+    while IFS= read -r p; do
+        [[ -z "$p" ]] && continue
+        grep -qx "$p" <<< "$mine" && continue     # ourselves / our launcher
+        pids+=("$p")
+    done < <(pgrep -f 'migrate_keycloak_v3\.sh|migrate_oneshot\.sh' 2>/dev/null || true)
+    [[ ${#pids[@]} -gt 0 ]] || return 1
+    printf '%s\n' "${pids[@]}"
+}
+
+# kc_kill_stale_processes <pid>... — SIGTERM, then SIGKILL whatever survives.
+kc_kill_stale_processes() {
+    local p
+    for p in "$@"; do
+        log_warn "Terminating competing migration process PID $p"
+        kill -TERM "$p" 2>/dev/null || true
+    done
+    sleep 3
+    for p in "$@"; do
+        if kill -0 "$p" 2>/dev/null; then
+            log_warn "PID $p ignored SIGTERM — sending SIGKILL"
+            kill -KILL "$p" 2>/dev/null || true
+        fi
+    done
+}
+
+# ============================================================================
 # ADR-008 — STATE RECONCILIATION: the state is a FACT, not a journal.
 #
 # Checkpoints and the profile's `current_version` are CLAIMS about the past. Trusting them caused
@@ -313,6 +401,33 @@ kc_reconcile_state() {
     local target_major="$1"
 
     log_section "State Reconciliation (reading the ACTUAL state — ADR-008)"
+
+    # --- 0. Competing / stale migration processes ---
+    # They would remove the kc-migrate-<version> container this run creates (same name) and kill a
+    # healthy migration mid-Liquibase. Catch them first.
+    local others
+    if others="$(kc_find_other_migration_procs)"; then
+        log_error "Other migration processes are running. They fight over the kc-migrate-<version>"
+        log_error "container name and will destroy each other's containers mid-migration:"
+        local _p
+        while IFS= read -r _p; do
+            [[ -n "$_p" ]] && ps -o pid=,etimes=,args= -p "$_p" 2>/dev/null | sed 's/^/    pid=/' || true
+        done <<< "$others"
+
+        if [[ "${DRY_RUN:-false}" == "true" ]]; then
+            log_warn "DRY-RUN: reporting only (a dry run neither blocks nor kills anything)"
+        elif [[ "${KILL_STALE:-false}" == "true" ]]; then
+            # shellcheck disable=SC2086  # intentional word-split of the PID list
+            kc_kill_stale_processes $others
+            log_success "Competing processes terminated"
+        else
+            log_error "Stop them first, or re-run with --kill-stale:"
+            log_error "    pkill -f migrate_keycloak_v3 ; pkill -f migrate_oneshot"
+            return 1
+        fi
+    else
+        log_success "No competing migration processes"
+    fi
 
     # --- 1. Ground truth: which version last migrated THIS database? ---
     local db_version=""
@@ -339,7 +454,10 @@ kc_reconcile_state() {
         if locked="$(kc_db_changelog_locked)"; then
             log_error "Liquibase changelog lock is HELD (a previous migration crashed mid-flight):"
             printf '%s\n' "$locked" | sed 's/^/    id|lockedby|since = /'
-            if [[ "${FORCE_UNLOCK:-false}" == "true" ]]; then
+            if [[ "${DRY_RUN:-false}" == "true" ]]; then
+                log_info "DRY-RUN: would NOT release the lock (a dry run mutates nothing)"
+                return 1
+            elif [[ "${FORCE_UNLOCK:-false}" == "true" ]]; then
                 log_warn "--force-unlock: releasing the stale lock"
                 if kc_db_clear_changelog_lock; then
                     log_success "Changelog lock released"
@@ -358,18 +476,38 @@ kc_reconcile_state() {
         fi
     fi
 
-    # --- 3. Leftover transient containers from a previous attempt ---
+    # --- 3. Existing transient migration containers ---
     if [[ "${PROFILE_KC_DEPLOYMENT_MODE:-}" == "run" ]] && declare -F cr >/dev/null 2>&1; then
         local leftovers
         leftovers="$(cr ps -a --filter "name=kc-migrate-" --format '{{.Names}} {{.Status}}' 2>/dev/null | sed '/^[[:space:]]*$/d' || true)"
         if [[ -n "$leftovers" ]]; then
-            log_warn "Leftover migration containers from a previous attempt:"
+            log_warn "Existing migration containers:"
             printf '%s\n' "$leftovers" | sed 's/^/    /'
-            local _line
-            while IFS= read -r _line; do
-                [[ -n "$_line" ]] && cr rm -f "${_line%% *}" >/dev/null 2>&1 || true
-            done <<< "$leftovers"
-            log_success "Removed (they are transient and would clash on name)"
+
+            # NEVER touch a RUNNING kc-migrate-* container. It belongs to a migration that is in
+            # flight, and removing it kills a healthy migration in the middle of Liquibase. This
+            # is not hypothetical: an earlier version of this cleanup did exactly that to a live
+            # run (even from a --dry-run process), which is why the guard exists.
+            local running
+            running="$(cr ps --filter "name=kc-migrate-" --format '{{.Names}}' 2>/dev/null | sed '/^[[:space:]]*$/d' || true)"
+            if [[ -n "$running" ]]; then
+                log_error "A migration container is RUNNING — another migration is in flight:"
+                printf '%s\n' "$running" | sed 's/^/    /'
+                log_error "Refusing to touch it. Stop that migration first, or remove the container"
+                log_error "yourself once you are sure it is dead."
+                return 1
+            fi
+
+            # A DRY RUN MUST MUTATE NOTHING.
+            if [[ "${DRY_RUN:-false}" == "true" ]]; then
+                log_info "DRY-RUN: would remove the stopped leftovers listed above (nothing changed)"
+            else
+                local _line
+                while IFS= read -r _line; do
+                    [[ -n "$_line" ]] && cr rm -f "${_line%% *}" >/dev/null 2>&1 || true
+                done <<< "$leftovers"
+                log_success "Removed the stopped leftovers (they would clash on name)"
+            fi
         else
             log_success "No leftover migration containers"
         fi
@@ -1208,9 +1346,25 @@ wait_for_migration() {
             "$log_target" \
             "${PROFILE_KC_COMPOSE_FILE:-}" 2>/dev/null || echo "")
 
-        # Check for migration complete markers (Layer 1 — Liquibase).
-        # NOTE: a generic "Keycloak ... started" is NOT accepted as proof of migration;
-        # Layer 2 is confirmed separately via MIGRATION_MODEL (kc_verify_migration_model).
+        # --- PRIMARY signal: the DATABASE itself (ADR-005 / ADR-008) ---
+        # Waiting on a LOG LINE is fragile: the Liquibase wording differs between Keycloak
+        # generations (KC16/WildFly vs KC24+/Quarkus) and may not even reach INFO level. On the
+        # live run the container was up and had ALREADY migrated the database, yet this loop span
+        # for the full 900s timeout because the expected string never appeared. MIGRATION_MODEL
+        # advancing to this hop's major.minor is the FACT — poll that.
+        if declare -F kc_db_model_version >/dev/null 2>&1; then
+            local _dbv
+            _dbv="$(kc_db_model_version || true)"
+            if [[ -n "$_dbv" && "$(_kc_major_minor "$_dbv")" == "$(_kc_major_minor "$version")" ]]; then
+                migration_complete=true
+                MIGRATION_LOG_FILE="$WORK_DIR/kc_startup_${version}_$(date +%Y%m%d_%H%M%S).log"
+                printf '%s\n' "$logs" > "$MIGRATION_LOG_FILE" 2>/dev/null || true
+                log_success "Migration confirmed by the DATABASE: MIGRATION_MODEL=${_dbv} (${elapsed}s elapsed)"
+                break
+            fi
+        fi
+
+        # --- SECONDARY: the historical log marker (kept for setups without DB access) ---
         if echo "$logs" | grep -qi "Liquibase command 'update' was executed successfully\|Migration successful"; then
             migration_complete=true
             # Persist the startup log so skipped-index warnings can be recovered.
@@ -1773,6 +1927,13 @@ execute_migration() {
         exit 1
     fi
 
+    # Single-instance guard: a leftover migration process from a previous attempt would remove the
+    # kc-migrate-<version> container that THIS run creates (same name), killing a healthy migration.
+    # A dry run takes no lock — it changes nothing and must never block a real migration.
+    if [[ "${DRY_RUN:-false}" != "true" ]] && ! _kc_acquire_lock; then
+        return 1
+    fi
+
     # ADR-008: reconcile with REALITY before deciding anything. This may replace the profile's
     # claimed current_version with the version the database is actually at, so that already-applied
     # hops are skipped (kc_build_migration_path drops hops <= current) and a stale Liquibase lock or
@@ -2283,6 +2444,7 @@ OPTIONS:
                             it analyses the tool, not your database)
     --no-resume             Ignore checkpoints from a previous (failed) attempt and redo each step
     --force-unlock          Release a stale Liquibase changelog lock left by a crashed migration
+    --kill-stale            Terminate competing/hung migration processes instead of refusing to run
     --monitor               Enable live migration monitor (if available)
     -h, --help              Show this help message
 
@@ -2341,6 +2503,7 @@ EOF
 main() {
     # Installed here (not at source time) so sourcing the script for tests/wrappers is inert.
     trap _kc_on_interrupt INT TERM
+    trap _kc_release_lock EXIT
 
     local command="${1:-}"
     shift || true
@@ -2394,6 +2557,10 @@ main() {
                 ;;
             --force-unlock)
                 FORCE_UNLOCK=true
+                shift
+                ;;
+            --kill-stale)
+                KILL_STALE=true
                 shift
                 ;;
             -h|--help)

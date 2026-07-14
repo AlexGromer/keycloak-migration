@@ -31,25 +31,25 @@ describe "F2: SAFETY — a caller-supplied work dir is NEVER deleted (rm -rf reg
 WD="$TMPD/mywork"
 mkdir -p "$WD"; touch "$WD/keepme"
 # --help exits via the EXIT trap: must not wipe the caller's dir
-ONESHOT_WORK_DIR="$WD" bash "$ONESHOT" --help >/dev/null 2>&1 || true
+ONESHOT_WORK_DIR="$WD" timeout 60 bash "$ONESHOT" --help >/dev/null 2>&1 || true
 assert_file_exists "$WD/keepme" "ONESHOT_WORK_DIR survives --help"
 # --work-dir flag + a non-exec exit path (gen-profile-only)
-PROFILE_DIR="$TMPD" bash "$ONESHOT" --target 26 --os astra --work-dir "$WD" \
+PROFILE_DIR="$TMPD" timeout 60 bash "$ONESHOT" --target 26 --os astra --work-dir "$WD" \
     --profile-name wdtest --gen-profile-only </dev/null >/dev/null 2>&1 || true
 assert_file_exists "$WD/keepme" "--work-dir survives --gen-profile-only"
 # an invalid-arg exit path must not wipe it either
-PROFILE_DIR="$TMPD" bash "$ONESHOT" --target 99 --work-dir "$WD" </dev/null >/dev/null 2>&1 || true
+PROFILE_DIR="$TMPD" timeout 60 bash "$ONESHOT" --target 99 --work-dir "$WD" </dev/null >/dev/null 2>&1 || true
 assert_file_exists "$WD/keepme" "--work-dir survives a validation error"
 assert_exit_code 2 "bash '$ONESHOT' --target 26 --work-dir </dev/null" "--work-dir without a path -> exit 2"
 
 describe "F2: --work-dir / --skip-preflight are accepted"
-wd_out="$(PROFILE_DIR="$TMPD" bash "$ONESHOT" --target 26 --os astra --work-dir "$WD" \
+wd_out="$(PROFILE_DIR="$TMPD" timeout 60 bash "$ONESHOT" --target 26 --os astra --work-dir "$WD" \
     --skip-preflight --dry-run </dev/null 2>&1 || true)"
 assert_contains "$wd_out" "$WD" "banner shows the caller work dir"
 assert_contains "$wd_out" "never deleted" "banner marks the work dir as not-deleted"
 
 describe "F2: --gen-profile-only writes a run+container profile"
-gen="$(PROFILE_DIR="$TMPD" bash "$ONESHOT" --target 26 --os astra --profile-name genp --gen-profile-only </dev/null 2>&1 || true)"
+gen="$(PROFILE_DIR="$TMPD" timeout 60 bash "$ONESHOT" --target 26 --os astra --profile-name genp --gen-profile-only </dev/null 2>&1 || true)"
 f="$TMPD/genp.yaml"
 assert_file_exists "$f" "gen-profile-only wrote a profile"
 content="$(<"$f")"
