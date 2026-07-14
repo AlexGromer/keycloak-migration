@@ -7,6 +7,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Layer 3 — data integrity on every hop (ADR-010).** L1 (`DATABASECHANGELOG`) proves the
+  changesets ran; L2 (`MIGRATION_MODEL`) proves the realm migration ran. Neither says a word about
+  whether your realms, users and clients are still there afterwards — a hop that emptied
+  `user_entity` passed every check the tool had and reported complete success. `kc_data_baseline`
+  now snapshots `COUNT(*)` on `realm` / `user_entity` / `client` / `keycloak_role` **once**, before
+  any hop, and `kc_data_verify` re-checks after each one: realm and user counts must be unchanged;
+  client and role counts may only grow (migrations add default clients and roles, never remove
+  yours). Four queries, no admin credentials, works with Keycloak shut down. A violation stops the
+  migration and offers the rollback. The policy is not new — it already guarded the *synthetic*
+  harness runs in `scripts/harness/lib/harness_integrity.sh` while the real migrations ran
+  unguarded; it is promoted to `scripts/lib/data_integrity.sh` and the harness now delegates to it,
+  so the two can never drift.
+- **`verify` subcommand — the acceptance test the tool never had.** The migration leaves no running
+  Keycloak (the transient container is removed after the last hop so it cannot fight the next one
+  for the Liquibase lock), so "is the result any good" had no answer. `verify` boots the **same
+  sovereign image that performed the migration** against the migrated database with
+  `KC_HEALTH_ENABLED=true`, confirms L2 and L3, waits for `/health/ready`, runs the Admin API smoke
+  tests (realms, clients, users, token issuance), and removes the container. Without
+  `PROFILE_KC_ADMIN_USER`/`PROFILE_KC_ADMIN_PASSWORD` it reports exactly what it could **not** check
+  rather than implying it passed.
+- **Backup restore test (opt-in, `PROFILE_VERIFY_BACKUP_RESTORE=true`).** What the tool called
+  "verifying" a backup was `pg_restore --list | grep -c "TABLE DATA"` — that proves the dump's table
+  of contents parses, and nothing else. The new `kc_backup_restore_test` restores the dump into a
+  scratch database, compares row counts against the source, and drops the scratch. A backup that
+  will not restore now aborts the migration instead of being discovered during the rollback.
+
 ### Fixed
 
 Every fix below is in a deployment mode **other than `run`**. The v3.9.1 work was developed and

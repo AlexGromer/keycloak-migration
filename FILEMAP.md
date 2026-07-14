@@ -87,6 +87,8 @@
 | tests/test_migrate_oneshot.sh | Tests | — |
 | tests/test_state_reconciliation.sh | Tests | — |
 | tests/test_health_not_a_gate.sh | Tests | — |
+| scripts/lib/data_integrity.sh | Shell script | — |
+| tests/test_data_integrity.sh | Tests | — |
 ## Directory Structure
 
 ```

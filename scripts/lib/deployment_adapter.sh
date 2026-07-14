@@ -645,6 +645,71 @@ kc_run_stop_container() {
 }
 
 # ============================================================================
+# Verification Container (`verify` subcommand)
+# ============================================================================
+
+# kc_run_verify_container <version> [container_name]
+#   Boot the TARGET image against the migrated database for an acceptance test, and — unlike the
+#   migrating container — make it actually serviceable:
+#     KC_HEALTH_ENABLED=true   the migrating boot never sets this, which is why probing it was
+#                              pointless (ADR-009). Here we want a real readiness signal.
+#     ports published          on a bridge network the host cannot reach 8080/9000 otherwise, so
+#                              neither the health probe nor the Admin API smoke test could run.
+#   The image is the one that performed the migration. Verifying against a "standard" Keycloak of
+#   the same version would test a different artifact than the one you are about to run.
+kc_run_verify_container() {
+    local version="$1"
+    local container_name="${2:-kc-verify-${version}}"
+    local network="${PROFILE_KC_RUN_NETWORK:-host}"
+
+    local db_host="${PROFILE_DB_HOST:-localhost}"
+    local db_port="${PROFILE_DB_PORT:-5432}"
+    local db_name="${PROFILE_DB_NAME:-keycloak}"
+    local db_user="${PROFILE_DB_USER:-keycloak}"
+    local db_pass="${PROFILE_DB_PASSWORD:-${KC_DB_PASSWORD:-}}"
+    local jdbc_url="jdbc:postgresql://${db_host}:${db_port}/${db_name}"
+
+    local image_ref
+    image_ref=$(dist_image_ref "$version")
+
+    local -a run_args=(--network="$network")
+    # Host networking already exposes both ports on the host; publishing them again is an error.
+    if [[ "$network" != "host" ]]; then
+        run_args+=(-p "${VERIFY_HTTP_PORT:-8080}:8080" -p "${VERIFY_MGMT_PORT:-9000}:9000")
+    fi
+
+    local -a run_env=(
+        -e KC_DB=postgres
+        -e KC_DB_URL="$jdbc_url"
+        -e KC_DB_USERNAME="$db_user"
+        -e KC_DB_PASSWORD="$db_pass"
+        -e KC_HOSTNAME_STRICT="${PROFILE_KC_RUN_HOSTNAME_STRICT:-false}"
+        -e KC_HTTP_ENABLED="${PROFILE_KC_RUN_HTTP_ENABLED:-true}"
+        -e KC_HEALTH_ENABLED=true
+    )
+    [[ -n "${PROFILE_KC_RUN_HOSTNAME:-}" ]] && run_env+=(-e KC_HOSTNAME="${PROFILE_KC_RUN_HOSTNAME}")
+
+    if [[ "${DRY_RUN:-false}" == "true" ]]; then
+        echo "DRY-RUN: cr run -d --name $container_name --network=$network -e KC_DB=postgres -e KC_DB_URL=$jdbc_url -e KC_DB_PASSWORD=*** -e KC_HEALTH_ENABLED=true $image_ref start --optimized" >&2
+        return 0
+    fi
+
+    # A leftover from an earlier verify would make `cr run` fail on the name.
+    cr rm -f "$container_name" >/dev/null 2>&1 || true
+
+    cr run -d --name "$container_name" \
+        "${run_args[@]}" \
+        "${run_env[@]}" \
+        "$image_ref" \
+        start --optimized || {
+        log_error "Failed to start verification container '$container_name' from $image_ref"
+        return 1
+    }
+
+    log_success "Verification container '$container_name' started ($image_ref)"
+}
+
+# ============================================================================
 # Rolling Update (Kubernetes specific)
 # ============================================================================
 

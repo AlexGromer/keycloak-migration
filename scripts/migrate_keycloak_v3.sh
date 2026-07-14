@@ -46,6 +46,11 @@ source "$LIB_DIR/multi_tenant.sh"
 # v3.7: container-hop migration model verification (Layer 2 — MIGRATION_MODEL)
 [[ -f "$LIB_DIR/migration_verify.sh" ]] && source "$LIB_DIR/migration_verify.sh"
 
+# v3.9.2: data-integrity gate (Layer 3). L1/L2 prove the migration RAN; they say nothing about
+# whether the realms, users and clients are still there afterwards. Depends on migration_verify.sh
+# for _mv_psql, so it must be sourced after it.
+[[ -f "$LIB_DIR/data_integrity.sh" ]] && source "$LIB_DIR/data_integrity.sh"
+
 # ============================================================================
 # CONFIGURATION DEFAULTS
 # ============================================================================
@@ -1103,6 +1108,16 @@ db_backup_keycloak() {
         local size=$(du -sh "$backup_file" 2>/dev/null | cut -f1 || echo "unknown")
         log_info "Backup size: $size"
 
+        # The adapter's "verification" is `pg_restore --list | grep -c "TABLE DATA"` — it proves the
+        # dump's table of contents parses, and nothing more. Opt in to PROVING it restores
+        # (PROFILE_VERIFY_BACKUP_RESTORE=true) before betting a production migration on it.
+        if declare -F kc_backup_restore_test >/dev/null 2>&1; then
+            kc_backup_restore_test "$backup_file" || {
+                log_error "Refusing to migrate behind a backup that will not restore."
+                return 1
+            }
+        fi
+
         return 0
     else
         log_error "Backup failed"
@@ -1935,7 +1950,20 @@ migrate_to_version() {
             log_warn "kc_verify_migration_model unavailable — Layer 2 not independently confirmed"
         fi
 
-        # Step 6c: surface (and optionally apply) indexes skipped on large tables (>300k rows)
+        # Step 6c: AUTHORITATIVE Layer 3 gate — the DATA must have survived the hop.
+        #
+        # L2 says the migration ran. It does not say your realms are still there. A hop that
+        # emptied user_entity would pass every check above it and report complete success. Four
+        # COUNT(*) queries close that hole: realm and user_entity must be unchanged, client and
+        # keycloak_role may only grow (migrations add default clients/roles, never remove yours).
+        if declare -F kc_data_verify >/dev/null 2>&1; then
+            kc_data_verify "$target_version" || {
+                _kc_offer_rollback "$target_version"
+                return 1
+            }
+        fi
+
+        # Step 6d: surface (and optionally apply) indexes skipped on large tables (>300k rows)
         if declare -F kc_check_skipped_indexes >/dev/null 2>&1 && [[ -n "${MIGRATION_LOG_FILE:-}" ]]; then
             kc_check_skipped_indexes "$MIGRATION_LOG_FILE" "$target_version" || true
         fi
@@ -2180,6 +2208,15 @@ execute_migration() {
     migration_start_ts=$(date +%s)
     # audit_migration_start(source, target, profile) — pass version transition + profile
     audit_migration_start "$current_version" "$target_version" "${PROFILE_NAME:-unknown}"
+
+    # Layer 3 baseline — taken ONCE, here, while the database is still untouched.
+    #
+    # Every hop is then compared against the state we STARTED from, not against the state left by
+    # the hop before it. Re-baselining per hop would forgive cumulative loss: hop 2 could delete
+    # what hop 1 left and still "match its baseline".
+    if declare -F kc_data_baseline >/dev/null 2>&1; then
+        kc_data_baseline
+    fi
 
     # Execute migration steps (strategy-dependent)
     local step_num=1
@@ -2481,6 +2518,109 @@ find_latest_backup() {
     return 1
 }
 
+# ============================================================================
+# COMMAND: VERIFY — acceptance test of the migrated database against the TARGET image
+# ============================================================================
+
+# cmd_verify [version]
+#   The migration leaves no running Keycloak: the transient container is removed after the last hop
+#   (single-instance; it must not fight the next one for the Liquibase lock). So "is the result any
+#   good" had no answer — you were left with a database and no way to exercise it.
+#
+#   This boots the SAME sovereign image that performed the migration against the migrated database,
+#   with health enabled, exercises it, and removes the container again. Verifying against a stock
+#   Keycloak of the same version would test a different artifact than the one you are about to run.
+cmd_verify() {
+    local version="${1:-${PROFILE_KC_TARGET_VERSION:-}}"
+
+    if [[ -z "$version" ]]; then
+        log_error "verify: no target version (pass one, or use --profile)"
+        return 1
+    fi
+
+    log_section "Verify: Keycloak $version"
+
+    # L2 first, and from the host: if the database does not claim this version, booting a container
+    # to ask it the same question is a waste of two minutes.
+    if declare -F kc_verify_migration_model >/dev/null 2>&1; then
+        kc_verify_migration_model "$version" || {
+            log_error "The database is NOT at $version — nothing to verify."
+            return 1
+        }
+    fi
+
+    # L3: the data. Free, needs no container and no admin credentials.
+    if declare -F kc_data_verify >/dev/null 2>&1; then
+        kc_data_verify "$version" || return 1
+    fi
+
+    if [[ "${DRY_RUN:-false}" == "true" ]]; then
+        log_info "DRY-RUN: would boot kc-verify-${version}, probe health, run smoke tests, remove it"
+        return 0
+    fi
+
+    local cname="kc-verify-${version}"
+    kc_run_verify_container "$version" "$cname" || return 1
+
+    # Whatever happens below, the container does not outlive this function.
+    local rc=0
+    # shellcheck disable=SC2064 # expand $cname now: it is what we must clean up
+    trap "kc_run_stop_container '$cname' 2>/dev/null || true" RETURN
+
+    # Readiness. Unlike the migrating boot, this container HAS health enabled, so a failure here
+    # means something — it is not the ADR-009 false alarm.
+    local endpoint attempt=1 code="000"
+    endpoint="$(kc_health_endpoint "$version")"
+    log_info "Waiting for readiness: $endpoint"
+
+    while [[ $attempt -le ${VERIFY_READY_RETRIES:-60} ]]; do
+        code=$(kc_health_probe "run" "$endpoint" "$cname")
+        [[ "$code" == "200" ]] && break
+        sleep "${VERIFY_READY_INTERVAL:-5}"
+        ((attempt++))
+    done
+
+    if [[ "$code" != "200" ]]; then
+        log_error "Keycloak $version did not become ready (last: HTTP $code). Container logs:"
+        cr logs "$cname" 2>&1 | tail -40 | sed 's/^/  /' || true
+        return 1
+    fi
+    log_success "Keycloak $version is READY (HTTP 200 on ${endpoint##*/})"
+
+    # Admin API. This needs the realm's admin credentials, which the tool does not know and cannot
+    # derive — KC_BOOTSTRAP_ADMIN_* only creates an admin on a database that has none, and a
+    # migrated database has plenty. Without them, say what was NOT checked rather than implying it
+    # passed.
+    local admin_user="${PROFILE_KC_ADMIN_USER:-}"
+    local admin_pass="${PROFILE_KC_ADMIN_PASSWORD:-}"
+
+    if [[ -z "$admin_user" || -z "$admin_pass" ]]; then
+        log_warn "No admin credentials — skipping the Admin API smoke tests."
+        log_warn "  Verified: L2 (MIGRATION_MODEL), L3 (data integrity), and readiness."
+        log_warn "  NOT verified: realms/clients/users over the Admin API, token issuance."
+        log_warn "  Set PROFILE_KC_ADMIN_USER / PROFILE_KC_ADMIN_PASSWORD to include them."
+        log_success "Verify PASSED (without Admin API coverage)"
+        return 0
+    fi
+
+    local smoke="$SCRIPT_DIR/smoke_test.sh"
+    if [[ ! -x "$smoke" ]]; then
+        log_warn "smoke_test.sh not executable — skipping Admin API tests"
+        return 0
+    fi
+
+    local base="http://localhost:${VERIFY_HTTP_PORT:-8080}"
+    log_info "Running Admin API smoke tests against $base"
+    if KC_URL="$base" ADMIN_USER="$admin_user" ADMIN_PASS="$admin_pass" "$smoke"; then
+        log_success "Verify PASSED: $version is migrated, ready, and serving the Admin API"
+    else
+        log_error "Admin API smoke tests FAILED against $version"
+        rc=1
+    fi
+
+    return "$rc"
+}
+
 # _kc_offer_rollback <version>
 #   The ONLY path by which a failed hop may restore the database. Reached solely from the L2 gate
 #   (Step 6b), i.e. only when the database itself says the migration did not apply.
@@ -2592,6 +2732,10 @@ USAGE:
 COMMANDS:
     plan                    Show migration plan without executing
     migrate                 Execute migration
+    verify                  Acceptance-test the migrated database: boots the TARGET image against
+                            it with health enabled, checks L2 + data integrity + readiness, runs the
+                            Admin API smoke tests (needs PROFILE_KC_ADMIN_USER/PASSWORD), removes
+                            the container. This is what to run after a migration completes.
     rollback                Rollback to last backup
 
 OPTIONS:
@@ -2741,6 +2885,9 @@ main() {
             ;;
         rollback)
             cmd_rollback
+            ;;
+        verify)
+            cmd_verify
             ;;
         -h|--help)
             usage
