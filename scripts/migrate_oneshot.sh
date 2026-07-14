@@ -93,6 +93,7 @@ PROFILE_NAME_OPT=""
 GEN_ONLY="false"
 ONESHOT_DRY="true"                 # default dry-run; --go flips to live
 SKIP_PREFLIGHT_PASS="false"        # --skip-preflight -> passed through to migrate
+NO_RESUME_PASS="false"             # --no-resume      -> passed through to migrate
 
 oneshot_usage() { sed -n '2,38p' "${BASH_SOURCE[0]}" | sed 's/^#\{0,1\} \{0,1\}//'; }
 
@@ -127,6 +128,7 @@ while [[ $# -gt 0 ]]; do
         --profile-name)     PROFILE_NAME_OPT="${2:-}"; shift 2 ;;
         --work-dir)         shift 2 ;;   # already consumed by the pre-scan above
         --skip-preflight)   SKIP_PREFLIGHT_PASS="true"; shift ;;
+        --no-resume)        NO_RESUME_PASS="true"; shift ;;
         --gen-profile-only) GEN_ONLY="true"; shift ;;
         --dry-run)          ONESHOT_DRY="true"; shift ;;
         --go)               ONESHOT_DRY="false"; shift ;;
@@ -287,6 +289,7 @@ if [[ "$ONESHOT_DRY" == "true" ]]; then
 elif [[ "$SKIP_PREFLIGHT_PASS" == "true" ]]; then
     MIGRATE_ARGS+=(--skip-preflight)
 fi
+[[ "$NO_RESUME_PASS" == "true" ]] && MIGRATE_ARGS+=(--no-resume)
 
 log_info "Handing off: migrate_keycloak_v3.sh ${MIGRATE_ARGS[*]}"
 # Invoke via `bash` so it works regardless of the file's executable bit.

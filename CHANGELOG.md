@@ -25,6 +25,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   removed; a caller-supplied `--work-dir` / `ONESHOT_WORK_DIR` is **never** deleted. Regression
   tests added.
 
+- **CRITICAL — a stale checkpoint made the tool skip starting the container, then wait 15 minutes
+  for logs from a container that was never created.** Checkpoints live in `WORK_DIR`, which
+  survives between runs, so after a failed attempt the next run read `CHECKPOINT=started`, logged
+  `Skipping start (already running)` and never ran `cr run` — even though the container had been
+  removed. A checkpoint is a **claim, not a fact**: in `run` mode it is now verified against the
+  actual container state and the hop is (re)started if the container is not really running. New
+  `--no-resume` flag (also `migrate_oneshot.sh --no-resume`) ignores checkpoints outright.
+- **The fail-fast container check never fired.** `docker inspect -f` on a **missing** container
+  prints an empty line to stdout and exits 1, so `$(… || echo "missing")` produced `$'\nmissing'`
+  and the `== "missing"` comparison never matched (the same class of bug as the `grep -c` one).
+  It now strips whitespace and simply requires `running` — anything else (missing/exited/created/
+  dead/paused) fails immediately — guarded with `|| true` so `set -o pipefail` cannot abort the run.
 - **CRITICAL — the migrating container never started: Keycloak 24+ refuses to boot without a
   hostname setting.** `kc_run_migrating_container` passed only the `KC_DB*` env, so `start
   --optimized` died instantly with `Strict hostname resolution configured but no hostname setting

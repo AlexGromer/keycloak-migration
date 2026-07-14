@@ -105,6 +105,8 @@ AUTO_CONFIRM="${AUTO_CONFIRM:-false}"
 # v3.9.1: static analysis of THIS TOOL's own source — irrelevant to a migration, so OFF by
 # default. Enable with --security-scan or ENABLE_SECURITY_SCAN=true.
 ENABLE_SECURITY_SCAN="${ENABLE_SECURITY_SCAN:-false}"
+# v3.9.1: --no-resume ignores checkpoints from a previous (possibly failed) attempt.
+NO_RESUME="${NO_RESUME:-false}"
 
 # Migration settings
 TIMEOUT_BUILD="${TIMEOUT_BUILD:-600}"
@@ -1087,8 +1089,15 @@ wait_for_migration() {
         # full timeout on a container that is not running Liquibase at all.
         if [[ "${PROFILE_KC_DEPLOYMENT_MODE:-}" == "run" ]]; then
             local cstate
-            cstate=$(cr inspect -f '{{.State.Status}}' "$log_target" 2>/dev/null || echo "missing")
-            if [[ "$cstate" == "exited" || "$cstate" == "dead" || "$cstate" == "missing" ]]; then
+            # NB: `docker inspect -f` on a MISSING container prints an empty line to stdout and
+            # exits 1, so `$(... || echo missing)` yields $'\nmissing' — enumerating bad states
+            # ("exited"/"dead"/"missing") silently never matched. Strip whitespace and simply
+            # require "running": anything else (missing/exited/created/dead/paused) is a failure.
+            # `|| true`: the script runs under `set -euo pipefail`, and a failing `cr inspect`
+            # makes the whole pipeline non-zero — which would abort the run instead of reporting.
+            cstate=$(cr inspect -f '{{.State.Status}}' "$log_target" 2>/dev/null | tr -d '[:space:]' || true)
+            : "${cstate:=missing}"
+            if [[ "$cstate" != "running" ]]; then
                 log_error "Migration container '$log_target' is '${cstate}' — it is not running Liquibase."
                 log_warn "Last 30 log lines:"
                 kc_logs "${PROFILE_KC_DEPLOYMENT_MODE}" "false" "$log_target" 2>/dev/null \
@@ -1449,7 +1458,12 @@ migrate_to_version() {
     log_section "Migration Step $step_num/$total_steps: Keycloak $target_version"
 
     # Check for existing checkpoint (resume support)
-    local existing_cp=$(get_checkpoint "$target_version")
+    local existing_cp=""
+    if [[ "${NO_RESUME:-false}" == "true" ]]; then
+        log_info "--no-resume: ignoring any checkpoint from a previous attempt"
+    else
+        existing_cp=$(get_checkpoint "$target_version")
+    fi
     if [[ -n "$existing_cp" ]]; then
         log_warn "Resuming step for $target_version from checkpoint: $existing_cp"
     fi
@@ -1509,12 +1523,32 @@ migrate_to_version() {
     fi
 
     # Step 5: Start Keycloak (triggers migration)
-    if [[ -z "$existing_cp" ]] || ! should_skip_to "$existing_cp" "started"; then
+    local _skip_start="false"
+    if [[ -n "$existing_cp" ]] && should_skip_to "$existing_cp" "started"; then
+        _skip_start="true"
+        # A checkpoint is a CLAIM, not a fact. In run mode the transient container may have died
+        # or been removed since the checkpoint was written — which is exactly what a failed
+        # attempt leaves behind. Trusting it blindly meant we "skipped the start" and then waited
+        # out the full timeout for logs from a container that no longer existed. Verify.
+        if [[ "${PROFILE_KC_DEPLOYMENT_MODE:-}" == "run" ]]; then
+            local _cname _cstate
+            _cname="${PROFILE_KC_RUN_CONTAINER_NAME:-kc-migrate-${target_version}}"
+            _cstate=$(cr inspect -f '{{.State.Status}}' "$_cname" 2>/dev/null | tr -d '[:space:]' || true)
+            : "${_cstate:=missing}"
+            if [[ "$_cstate" != "running" ]]; then
+                log_warn "Checkpoint claims '$target_version' was started, but container '$_cname' is '${_cstate}' — starting it again."
+                cr rm -f "$_cname" >/dev/null 2>&1 || true
+                _skip_start="false"
+            fi
+        fi
+    fi
+
+    if [[ "$_skip_start" == "true" ]]; then
+        log_info "Skipping start (container verified running)"
+    else
         # shellcheck disable=SC2119 # auto: shellcheck 0.10 (CI) finding, behavior-preserving
         kc_service_start || return 1
         set_checkpoint "$target_version" "started"
-    else
-        log_info "Skipping start (already running)"
     fi
 
     # Step 6: Wait for migration to complete
@@ -2136,6 +2170,7 @@ OPTIONS:
     --yes, -y               Assume "yes" for confirmation prompts (non-interactive)
     --security-scan         Run ShellCheck/gitleaks over THIS TOOL's own source (off by default;
                             it analyses the tool, not your database)
+    --no-resume             Ignore checkpoints from a previous (failed) attempt and redo each step
     --monitor               Enable live migration monitor (if available)
     -h, --help              Show this help message
 
@@ -2239,6 +2274,10 @@ main() {
                 ;;
             --security-scan)
                 ENABLE_SECURITY_SCAN=true
+                shift
+                ;;
+            --no-resume)
+                NO_RESUME=true
                 shift
                 ;;
             -h|--help)
