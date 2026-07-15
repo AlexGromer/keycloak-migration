@@ -3,21 +3,15 @@ name: Release
 on:
   push:
     tags:
-      - 'v*.*.*'  # Triggers on version tags like v3.0.0, v3.1.0
+      - 'v*.*.*'  # v3.9.2, v4.0.0, ...
 
 permissions:
   contents: write
 
 jobs:
-  # ============================================================================
-  # Job 1: Create GitHub Release
-  # ============================================================================
-  create-release:
-    name: Create GitHub Release
+  release:
+    name: Build and publish the release
     runs-on: ubuntu-latest
-    outputs:
-      upload_url: ${{ steps.create_release.outputs.upload_url }}
-      version: ${{ steps.get_version.outputs.version }}
 
     steps:
       - name: Checkout code
@@ -26,129 +20,113 @@ jobs:
           fetch-depth: 0
 
       - name: Get version from tag
-        id: get_version
+        id: version
         run: |
           VERSION=${GITHUB_REF#refs/tags/v}
-          echo "version=$VERSION" >> $GITHUB_OUTPUT
-          echo "Version: $VERSION"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "Releasing version: $VERSION"
 
-      - name: Extract changelog for this version
-        id: changelog
+      # The version in the code must match the tag. A release that ships a tool announcing a
+      # different version than the one you downloaded is a support incident waiting to happen —
+      # and the versions in this repo HAD drifted (code said 3.0.0, README said 3.8, the changelog
+      # said 3.9.1, and no 3.9 tag existed at all).
+      - name: Version matches the tag
         run: |
-          VERSION=${{ steps.get_version.outputs.version }}
+          set -euo pipefail
+          VERSION="${{ steps.version.outputs.version }}"
+          CODE_VERSION="$(grep -m1 '^VERSION=' scripts/migrate_keycloak_v3.sh | cut -d'"' -f2)"
 
-          # Extract changelog section for this version
-          awk "/## \[$VERSION\]/,/## \[/" CHANGELOG.md | sed '$d' > release_notes.md
+          if [ "$CODE_VERSION" != "$VERSION" ]; then
+            echo "::error::Tag is v$VERSION but scripts/migrate_keycloak_v3.sh says VERSION=\"$CODE_VERSION\""
+            echo "Update VERSION in the script, or tag the version the code actually is."
+            exit 1
+          fi
+          echo "OK: code and tag both say $VERSION"
 
-          # If empty, use placeholder
+      # The old extraction was `awk "/## \[$V\]/,/## \[/" | sed '$d'`. An awk range whose START line
+      # also matches its END pattern collapses to that one line — and `sed '$d'` then deleted it.
+      # Release notes came out EMPTY. It was never noticed because the release had not been run
+      # since the changelog started carrying real content.
+      - name: Extract the changelog entry for this version
+        run: |
+          set -euo pipefail
+          VERSION="${{ steps.version.outputs.version }}"
+
+          awk -v v="$VERSION" '
+            $0 ~ "^## \\[" v "\\]" { found = 1; next }   # skip the header itself
+            found && /^## \[/      { exit }              # stop at the next version
+            found                  { print }
+          ' CHANGELOG.md > release_notes.md
+
           if [ ! -s release_notes.md ]; then
-            echo "No changelog entry found for v$VERSION" > release_notes.md
+            echo "::error::CHANGELOG.md has no '## [$VERSION]' section — write the release notes first."
+            exit 1
           fi
 
+          echo "--- release notes ---"
           cat release_notes.md
 
-      - name: Create GitHub Release
-        id: create_release
-        uses: actions/create-release@v1
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      # The archive contains what the RECIPIENT needs to perform a migration, and nothing else.
+      #
+      # Deliberately NOT shipped: tests/ (they verify the tool, they do not migrate anything),
+      # README.md (1300 lines of feature catalogue — QUICKSTART is the instruction), CHANGELOG,
+      # ARCHITECTURE, CONTRIBUTING, SECURITY. Those are for people working ON the tool, in the repo.
+      # The old list managed to ship stale V3_*.md status dumps while omitting the only real runbook.
+      - name: Build the release archive
+        run: |
+          set -euo pipefail
+          VERSION="${{ steps.version.outputs.version }}"
+          DIR="release/keycloak-migration-$VERSION"
+
+          mkdir -p "$DIR/docs" "$DIR/config"
+
+          # The tool itself
+          cp -r scripts/        "$DIR/"     # migrate_oneshot, migrate_keycloak_v3, libs, harness
+          cp -r profiles/       "$DIR/"     # ready-made configurations, and examples to copy
+          cp -r containerfiles/ "$DIR/"     # recipes: build the images from YOUR licensed base
+
+          # Superseded entrypoints from before the container-hop model. Nothing references them and
+          # they would only invite someone to run the wrong tool.
+          rm -f "$DIR/scripts/migrate_keycloak.sh" \
+                "$DIR/scripts/migrate_keycloak.sh.v1.backup" \
+                "$DIR/scripts/migrate_keycloak_v2.sh" \
+                "$DIR/scripts/IMPROVEMENTS_APPLIED.md"
+
+          # Examples to fill in
+          cp config/images.conf.example       "$DIR/config/"
+          cp config/kc-migration.env.example  "$DIR/config/"
+
+          # The instructions
+          cp QUICKSTART.md            "$DIR/"        # start here
+          cp docs/MIGRATION_GUIDE.md  "$DIR/docs/"   # the full runbook
+          cp docs/AIRGAP.md           "$DIR/docs/"   # offline / sovereign delivery
+          cp LICENSE                  "$DIR/"
+
+          # An archive whose scripts do not parse is not a release.
+          find "$DIR/scripts" -name '*.sh' -type f -print0 | xargs -0 -n1 bash -n
+
+          echo "--- shipping ---"
+          ( cd "$DIR" && find . -maxdepth 2 | sort )
+
+          tar czf "release/keycloak-migration-$VERSION.tar.gz" -C release "keycloak-migration-$VERSION"
+          ( cd release && sha256sum "keycloak-migration-$VERSION.tar.gz" \
+              > "keycloak-migration-$VERSION.tar.gz.sha256" )
+
+          ls -lh release/
+
+      # actions/create-release and actions/upload-release-asset were ARCHIVED by GitHub in 2021 and
+      # receive no fixes. softprops/action-gh-release does both jobs in one step.
+      - name: Publish the GitHub Release
+        uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ github.ref_name }}
-          release_name: Release ${{ github.ref_name }}
+          name: Release ${{ github.ref_name }}
           body_path: release_notes.md
           draft: false
           prerelease: false
+          files: |
+            release/keycloak-migration-${{ steps.version.outputs.version }}.tar.gz
+            release/keycloak-migration-${{ steps.version.outputs.version }}.tar.gz.sha256
 
-  # ============================================================================
-  # Job 2: Build and Upload Artifacts
-  # ============================================================================
-  build-artifacts:
-    name: Build Release Artifacts
-    runs-on: ubuntu-latest
-    needs: create-release
-
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-
-      - name: Create release archive
-        run: |
-          VERSION=${{ needs.create-release.outputs.version }}
-
-          # Create archive with all necessary files
-          mkdir -p release/keycloak-migration-$VERSION
-
-          # Copy scripts
-          cp -r scripts/ release/keycloak-migration-$VERSION/
-
-          # Copy profiles
-          cp -r profiles/ release/keycloak-migration-$VERSION/
-
-          # Copy tests
-          cp -r tests/ release/keycloak-migration-$VERSION/
-
-          # Copy documentation
-          cp README.md CONTRIBUTING.md CHANGELOG.md LICENSE SECURITY.md \
-             release/keycloak-migration-$VERSION/
-
-          # Copy architecture docs
-          cp V3_*.md QUICK_START.md AUTO_DISCOVERY_DEMO.md \
-             release/keycloak-migration-$VERSION/ 2>/dev/null || true
-
-          # Create tarball
-          cd release
-          tar czf keycloak-migration-$VERSION.tar.gz keycloak-migration-$VERSION/
-
-          # Create checksums
-          sha256sum keycloak-migration-$VERSION.tar.gz > keycloak-migration-$VERSION.tar.gz.sha256
-
-          ls -lh
-
-      - name: Upload release archive
-        uses: actions/upload-release-asset@v1
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        with:
-          upload_url: ${{ needs.create-release.outputs.upload_url }}
-          asset_path: release/keycloak-migration-${{ needs.create-release.outputs.version }}.tar.gz
-          asset_name: keycloak-migration-${{ needs.create-release.outputs.version }}.tar.gz
-          asset_content_type: application/gzip
-
-      - name: Upload checksum
-        uses: actions/upload-release-asset@v1
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        with:
-          upload_url: ${{ needs.create-release.outputs.upload_url }}
-          asset_path: release/keycloak-migration-${{ needs.create-release.outputs.version }}.tar.gz.sha256
-          asset_name: keycloak-migration-${{ needs.create-release.outputs.version }}.tar.gz.sha256
-          asset_content_type: text/plain
-
-  # ============================================================================
-  # Job 3: Update README Badge (optional)
-  # ============================================================================
-  update-readme:
-    name: Update Version Badge
-    runs-on: ubuntu-latest
-    needs: create-release
-
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-        with:
-          ref: main
-
-      - name: Update README version badge
-        run: |
-          VERSION=${{ needs.create-release.outputs.version }}
-
-          # Update badge in README (if exists)
-          if grep -q "badge/version-.*-blue" README.md; then
-            sed -i "s|badge/version-.*-blue|badge/version-$VERSION-blue|g" README.md
-
-            git config user.name "github-actions[bot]"
-            git config user.email "github-actions[bot]@users.noreply.github.com"
-            git add README.md
-            git commit -m "docs: update version badge to $VERSION [skip ci]" || true
-            git push || true
-          fi
+      # NOTE: the per-hop container images are NOT here. They are 1.5-1.8 GiB each, built FROM
+      # licensed Astra/RED OS bases that may not be redistributed (ADR-006), and are published
+      # separately by .github/workflows/build-images.yml to a PRIVATE registry. See docs/AIRGAP.md.

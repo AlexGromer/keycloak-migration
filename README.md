@@ -1,4 +1,4 @@
-# Keycloak Migration Tool v3.8
+# Keycloak Migration Tool v3.9.2
 
 **One-command Keycloak migration utility** with auto-detection, multi-tenant support, clustered deployments, real-time monitoring, production hardening, **security hardening** (SAST, secrets scanning, input validation, audit logging), **container-hop migration** (boots a real Keycloak container per hop and verifies the MIGRATION_MODEL Layer-2 advance), **sovereign-OS images** (Astra Linux SE / RED OS) with **air-gapped** offline distribution, and support for all Keycloak-supported databases.
 
@@ -6,7 +6,7 @@
 [![Tests](https://img.shields.io/badge/tests-428%20total-success)](tests/)
 [![Bash](https://img.shields.io/badge/bash-5.0%2B-green.svg)](scripts/)
 [![Databases](https://img.shields.io/badge/databases-7-blue.svg)](scripts/lib/database_adapter.sh)
-[![Version](https://img.shields.io/badge/version-v3.8-blue.svg)](CHANGELOG.md)
+[![Version](https://img.shields.io/badge/version-v3.9.2-blue.svg)](CHANGELOG.md)
 [![Images](https://img.shields.io/badge/sovereign%20images-Astra%20SE%20%7C%20RED%20OS-blue.svg)](docs/AIRGAP.md)
 
 ---
@@ -1346,10 +1346,12 @@ Contributions welcome! Please:
 
 ## 📚 Documentation
 
-- [Architecture](V3_ARCHITECTURE.md) — Detailed design documentation
-- [Quick Start](QUICK_START.md) — Step-by-step guide
-- [Auto-Discovery](AUTO_DISCOVERY_DEMO.md) — Auto-discovery examples
-- [Improvements](scripts/IMPROVEMENTS_APPLIED.md) — v2.0 → v3.0 changelog
+- **[QUICKSTART.md](QUICKSTART.md)** — start here. Every parameter, every image source, what happens
+  at each step, and what to do when it goes wrong.
+- [docs/MIGRATION_GUIDE.md](docs/MIGRATION_GUIDE.md) — the full runbook
+- [docs/AIRGAP.md](docs/AIRGAP.md) — offline / sovereign delivery
+- [ARCHITECTURE.md](ARCHITECTURE.md) — the decisions and why (ADR-001 … ADR-010)
+- [CHANGELOG.md](CHANGELOG.md) — what changed, and what it broke before it was fixed
 
 ---
 

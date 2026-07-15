@@ -7,6 +7,51 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Planned
+- AWS RDS / GCP Cloud SQL / Azure Database migration examples
+- Ansible playbook wrapper
+- Terraform module
+- Helm chart
+- Sovereign KC16 runtime datasource validation (harness live run)
+- Port the v3.9.1/v3.9.2 fixes to `blue_green.sh` / `canary.sh` (untested, out of scope so far)
+
+---
+
+## [3.9.2] - 2026-07-14
+
+### Release and packaging
+
+- **The release artifact was not usable by its recipient.** It shipped stale `V3_*.md` status dumps
+  and a `QUICK_START.md` describing a hop chain that does not exist (16→17→22→25→26; the real one is
+  16→24.0.5→26.6.3), while omitting `docs/MIGRATION_GUIDE.md` — the only real runbook — and
+  `containerfiles/`, without which the sovereign images cannot be rebuilt. The archive now contains
+  what someone needs to *perform a migration* and nothing else: `scripts/`, `profiles/`,
+  `containerfiles/`, the config examples, `QUICKSTART.md`, `docs/`, `LICENSE`. No tests, no
+  contributor docs — those are for people working on the tool, in the repo.
+- **The release workflow used GitHub Actions that GitHub archived in 2021** (`actions/create-release`,
+  `actions/upload-release-asset`). Replaced with `softprops/action-gh-release`. It now also refuses
+  to publish a tag whose version disagrees with the code, and refuses to publish without release
+  notes in the changelog.
+- **`docker build .` did not work.** `COPY V3_*.md QUICK_START.md ... ./ 2>/dev/null || true` — there
+  is no shell in a Dockerfile, so `2>/dev/null`, `||` and `true` were parsed as three more source
+  paths. No workflow builds this image, so nobody found out.
+- **The version had drifted to four different answers** (code `3.0.0`, README `v3.8`, Dockerfile
+  `3.0.0`, changelog `3.9.1`) with no 3.9 tag existing at all. `VERSION` in
+  `scripts/migrate_keycloak_v3.sh` is now the single source of truth, and the release workflow
+  enforces it.
+- **`scripts/build_bundle.sh`** — the air-gap bundle had no build step. `dist/kc-<os>-bundle.tar.xz`,
+  the file every offline migration consumes, was packed by hand and its structure survived only in a
+  sentence of prose. Now a script: it refuses to pack an incomplete set, lists the archive back to
+  prove what is in it, writes a checksum, and warns when a bundle approaches GitHub's 2 GiB asset
+  limit.
+- **`QUICKSTART.md`** — the instruction for someone who has just been handed this. Every parameter,
+  the three ways to configure it, the three ways to supply images (including from a company's own
+  registry under its own naming), what happens at each step, how to try it safely first, how to
+  verify the result, and what each failure means.
+- Removed 2,358 lines of dead documentation (`V3_*.md`, `README_V2.md`, `STATUS.txt`,
+  `COMPLETE_V2.txt`, `RELEASE_NOTES_v3.6.0.md`, `AUTO_DISCOVERY_DEMO.md`, and the misleading
+  `QUICK_START.md`).
+
 ### Changed
 
 - **Backup space is now MEASURED, not guessed.** Two checks disagreed with each other: a hardcoded
@@ -112,13 +157,6 @@ live-tested only on `run`; the other five modes (`standalone`, `docker`/`podman`
   left standing, or `kubectl scale --replicas=0` left standing, i.e. production scaled to zero with
   nobody putting it back. The interrupt handler now restarts what it stopped, and if it cannot, says
   so loudly with the exact command to run by hand.
-
-### Planned
-- AWS RDS / GCP Cloud SQL / Azure Database migration examples
-- Ansible playbook wrapper
-- Terraform module
-- Helm chart
-- Sovereign KC16 runtime datasource validation (harness live run)
 
 ---
 
