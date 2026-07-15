@@ -380,26 +380,46 @@ _kc_major_minor() { local v="$1"; printf '%s' "${v%.*}"; }
 # leftover process from an earlier (hung) attempt. Detect them before doing anything.
 # ============================================================================
 
-# PIDs of this process and all of its ancestors — never treat ourselves as a stale process.
-_kc_self_and_ancestors() {
-    local p="$$"
-    while [[ -n "$p" && "$p" != "0" && "$p" != "1" ]]; do
-        printf '%s\n' "$p"
-        p="$(awk '{print $4}' "/proc/$p/stat" 2>/dev/null || true)"
-    done
+# _kc_proc_runs_migration <pid> — true if THIS pid is actually executing a migration script, i.e.
+# one of its argv ELEMENTS is a file named migrate_keycloak_v3.sh or migrate_oneshot.sh.
+#
+# The distinction matters. The old check was `pgrep -f 'migrate_..._v3\.sh|migrate_oneshot\.sh'`,
+# which matches the string ANYWHERE in the command line — so it flagged the shell wrapper that
+# launched the run (`zsh -c '... bash migrate_oneshot.sh ...'`), a `grep migrate_oneshot`, an
+# editor with the file open, even the `pkill -f migrate_keycloak_v3` from our own error message.
+# argv[0] of a real run is a shell and one later argv element is the script PATH; a mention lives
+# INSIDE a single -c blob or a grep pattern, never as its own argv element. Match the element.
+_kc_proc_runs_migration() {
+    local pid="$1" arg base
+    while IFS= read -r -d '' arg; do
+        base="${arg##*/}"
+        [[ "$base" == "migrate_keycloak_v3.sh" || "$base" == "migrate_oneshot.sh" ]] && return 0
+    done < "/proc/$pid/cmdline" 2>/dev/null
+    return 1
 }
 
-# kc_find_other_migration_procs — echo the PID of every OTHER migrate/oneshot process.
-# Returns 1 when there are none.
+# kc_find_other_migration_procs — echo the PID of every OTHER process that is running a migration
+# script. Returns 1 when there are none.
+#
+# Walks /proc directly instead of pgrep: no PPID-ancestry walk (which broke the moment a launcher
+# was reparented to init — a detached shell, a pipeline, nohup — leaving the run to flag its own
+# launcher as a competitor and refuse to start).
+#
+# Two of our OWN pids must be excluded, and they are different pids:
+#   $$        the main migration process (the one-shot wrapper execs INTO it, so there is no
+#             separate launcher process still executing a script).
+#   $BASHPID  THIS function runs inside a command-substitution subshell — `x="$(...)"`. That
+#             subshell inherits the script's argv verbatim (`bash .../migrate_keycloak_v3.sh …`),
+#             so it is a process "running a migration script" with a pid that is NOT $$ ($$ stays
+#             the parent's pid in a subshell). Without excluding it, the scan flags the very
+#             subshell performing the scan — which is why a lone dry-run reported a competitor.
 kc_find_other_migration_procs() {
-    command -v pgrep >/dev/null 2>&1 || return 1
-    local mine pids=() p
-    mine="$(_kc_self_and_ancestors)"
-    while IFS= read -r p; do
-        [[ -z "$p" ]] && continue
-        grep -qx "$p" <<< "$mine" && continue     # ourselves / our launcher
-        pids+=("$p")
-    done < <(pgrep -f 'migrate_keycloak_v3\.sh|migrate_oneshot\.sh' 2>/dev/null || true)
+    local selves=" $$ ${BASHPID:-} " pids=() f pid
+    for f in /proc/[0-9]*/cmdline; do
+        pid="${f#/proc/}"; pid="${pid%/cmdline}"
+        [[ "$selves" == *" $pid "* ]] && continue
+        _kc_proc_runs_migration "$pid" && pids+=("$pid")
+    done
     [[ ${#pids[@]} -gt 0 ]] || return 1
     printf '%s\n' "${pids[@]}"
 }

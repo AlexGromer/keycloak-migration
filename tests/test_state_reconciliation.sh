@@ -70,6 +70,53 @@ assert_true "MIGRATION_LOCK_FILE='$_lockdir/migration.lock' _kc_acquire_lock >/d
     "reclaims a stale lock from a dead process"
 rm -rf "$_lockdir"
 
+describe "REGRESSION: competing-process detection has no FALSE POSITIVES"
+# The old scan was `pgrep -f 'migrate_..._v3\.sh|migrate_oneshot\.sh'` plus a PPID-ancestry walk.
+# It flagged a lone run as its own competitor and REFUSED TO START, because:
+#   (a) pgrep -f matched any command line MENTIONING the script — the launching `zsh -c '...'`
+#       wrapper, a `grep`, an editor — not only real invocations, and
+#   (b) the ancestry walk broke when the launcher was reparented to init (detached shell/pipeline),
+#       so the real launcher was never excluded, and
+#   (c) the scan runs inside a `$(...)` subshell whose argv is the script's own — a pid that is NOT
+#       $$ — so it detected ITSELF.
+# A lone invocation must report zero competitors.
+assert_true "declare -F kc_find_other_migration_procs" "detector defined"
+assert_true "declare -F _kc_proc_runs_migration"       "argv-precise matcher defined"
+
+# Called here (inside the test's own bash, whose argv is the TEST script — not a migration script),
+# there is no migration process at all, so it must find none.
+assert_false "kc_find_other_migration_procs >/dev/null 2>&1" \
+    "a lone run finds no competitor (was: flagged its own subshell/launcher and aborted)"
+
+# It must still EXCLUDE our own two pids explicitly — proven by construction: exclude $$ and $BASHPID.
+assert_true "grep -q 'BASHPID' '$PROJECT_ROOT/scripts/migrate_keycloak_v3.sh'" \
+    "the scanning subshell (\$BASHPID) is excluded, not just \$\$"
+# No EXECUTABLE line calls pgrep any more (comments explaining the old approach are fine).
+assert_equals "0" \
+    "$(grep -vE '^\s*#' "$PROJECT_ROOT/scripts/migrate_keycloak_v3.sh" | grep -c 'pgrep' || true)" \
+    "the substring-matching pgrep scan is gone from the code"
+
+describe "REGRESSION: but a REAL competing migration IS still detected"
+# A process whose argv0 basenames to migrate_oneshot.sh (a symlink to sleep — no real migration is
+# run) must be found. This proves the fix did not just neuter the check into always-none.
+_cs_dir="$(mktemp -d)"
+ln -sf /bin/sleep "$_cs_dir/migrate_oneshot.sh"
+"$_cs_dir/migrate_oneshot.sh" 20 &
+_cs_fake=$!
+sleep 0.3
+_cs_found="$(kc_find_other_migration_procs 2>/dev/null || true)"
+assert_true "grep -qx '$_cs_fake' <<< '$_cs_found'" \
+    "a process actually running migrate_oneshot.sh is detected by pid"
+# And the argv-precise matcher rejects a mere MENTION: a shell whose -c blob names the script.
+bash -c "sleep 20 # mentions migrate_keycloak_v3.sh in a comment only" &
+_cs_mention=$!
+sleep 0.3
+_cs_found2="$(kc_find_other_migration_procs 2>/dev/null || true)"
+assert_true "! grep -qx '$_cs_mention' <<< '$_cs_found2'" \
+    "a process that only MENTIONS the script (not argv) is NOT flagged"
+kill "$_cs_fake" "$_cs_mention" 2>/dev/null || true
+rm -rf "$_cs_dir"
+
 describe "ADR-008: --force-unlock and --no-resume are wired"
 MV="$PROJECT_ROOT/scripts/migrate_keycloak_v3.sh"
 assert_true "bash '$MV' --help 2>&1 | grep -q 'force-unlock'" "usage documents --force-unlock"
