@@ -560,6 +560,36 @@ kc_get_version() {
 # Transient Migrating Container (run mode)
 # ============================================================================
 
+# _kc_db_suffix — a short, stable token identifying the TARGET database (host:port:db).
+# Empty identity -> empty token (unchanged names for setups that never set the DB coordinates).
+_kc_db_suffix() {
+    local id="${PROFILE_DB_HOST:-}:${PROFILE_DB_PORT:-}:${PROFILE_DB_NAME:-}"
+    [[ "$id" == "::" ]] && return 0
+    printf '%s' "$id" | { sha1sum 2>/dev/null || cksum; } | cut -c1-8
+}
+
+# kc_run_container_name <version> — the transient container name for a hop.
+#
+# Names are now UNIQUE PER DATABASE (kc-migrate-<version>-<db-token>), not just per version. Two
+# migrations against DIFFERENT databases on one host therefore get different container names and run
+# in parallel without one's cleanup removing the other's container — real isolation, not just
+# detection. The same database always maps to the same name (and the DB advisory lock, ADR-011,
+# refuses a second run there regardless). An explicit PROFILE_KC_RUN_CONTAINER_NAME still wins, and
+# the leftover-container scan still globs `kc-migrate-*`.
+kc_run_container_name() {
+    local version="$1" suf
+    if [[ -n "${PROFILE_KC_RUN_CONTAINER_NAME:-}" ]]; then
+        printf '%s' "$PROFILE_KC_RUN_CONTAINER_NAME"
+        return 0
+    fi
+    suf="$(_kc_db_suffix)"
+    if [[ -n "$suf" ]]; then
+        printf 'kc-migrate-%s-%s' "$version" "$suf"
+    else
+        printf 'kc-migrate-%s' "$version"
+    fi
+}
+
 kc_run_migrating_container() {
     # Boot a transient Keycloak container of <version> against the configured
     # PostgreSQL. Keycloak runs Liquibase + RealmMigration on startup.
@@ -567,7 +597,7 @@ kc_run_migrating_container() {
     # database; override with PROFILE_KC_RUN_NETWORK (e.g. a user-defined bridge).
     # Usage: kc_run_migrating_container <version>
     local version="$1"
-    local container_name="${PROFILE_KC_RUN_CONTAINER_NAME:-kc-migrate-${version}}"
+    local container_name; container_name="$(kc_run_container_name "$version")"
     local network_opt="--network=${PROFILE_KC_RUN_NETWORK:-host}"
 
     local db_host="${PROFILE_DB_HOST:-localhost}"

@@ -94,6 +94,8 @@
 | scripts/build_bundle.sh | Shell script | — |
 | QUICKSTART.md | Documentation | — |
 | tests/test_build_bundle.sh | Tests | — |
+| scripts/lib/db_lock.sh | Shell script | — |
+| tests/test_db_lock.sh | Tests | — |
 ## Directory Structure
 
 ```

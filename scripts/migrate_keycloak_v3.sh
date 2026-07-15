@@ -54,6 +54,11 @@ source "$LIB_DIR/multi_tenant.sh"
 # for _mv_psql, so it must be sourced after it.
 [[ -f "$LIB_DIR/data_integrity.sh" ]] && source "$LIB_DIR/data_integrity.sh"
 
+# v3.9.2: database-level advisory lock (ADR-011). One migration per database, enforced BY the
+# database — closes the gap the per-workspace file lock leaves (two runs, different work dirs or
+# hosts, same DB).
+[[ -f "$LIB_DIR/db_lock.sh" ]] && source "$LIB_DIR/db_lock.sh"
+
 # ============================================================================
 # CONFIGURATION DEFAULTS
 # ============================================================================
@@ -207,6 +212,15 @@ _kc_release_lock() {
     _KC_LOCK_HELD="false"
 }
 
+# Release BOTH locks — the workspace file lock and the database advisory lock. Used by the EXIT
+# trap and the interrupt handler so neither lock outlives the run. The DB lock also self-releases
+# when our connection drops, but dropping it explicitly frees the database the instant we finish.
+_kc_release_all_locks() {
+    _kc_release_lock
+    declare -F kc_db_lock_release >/dev/null 2>&1 && kc_db_lock_release
+    return 0
+}
+
 # True only while WE hold the user's Keycloak down: set after Step 2's stop, cleared by Step 5's
 # start. Never set in `run` mode — there is no long-lived service there, only a transient container.
 _KC_SERVICE_STOPPED_BY_US="false"
@@ -215,12 +229,12 @@ _kc_on_interrupt() {
     trap - INT TERM
     echo "" >&2
     log_warn "Interrupted — aborting migration."
-    _kc_release_lock
+    _kc_release_all_locks
 
     local mode="${PROFILE_KC_DEPLOYMENT_MODE:-}"
 
     if [[ "$mode" == "run" ]] && declare -F kc_run_stop_container >/dev/null 2>&1; then
-        local cname="${PROFILE_KC_RUN_CONTAINER_NAME:-kc-migrate-${KC_HOP_VERSION:-${PROFILE_KC_TARGET_VERSION:-}}}"
+        local cname="$(kc_run_container_name "${KC_HOP_VERSION:-${PROFILE_KC_TARGET_VERSION:-}}")"
         log_warn "Stopping transient migration container: $cname"
         kc_run_stop_container "$cname" 2>/dev/null || true
     fi
@@ -1242,7 +1256,7 @@ kc_service_stop() {
             kc_stop "$mode" "${PROFILE_KC_CONTAINER_NAME:-keycloak}"
             ;;
         run)
-            kc_run_stop_container "${PROFILE_KC_RUN_CONTAINER_NAME:-kc-migrate-${version}}"
+            kc_run_stop_container "$(kc_run_container_name "$version")"
             ;;
         docker-compose)
             kc_stop "$mode" "${PROFILE_KC_COMPOSE_FILE:-docker-compose.yml}"
@@ -1270,7 +1284,7 @@ kc_service_status() {
             kc_status "$mode" "${PROFILE_KC_CONTAINER_NAME:-keycloak}"
             ;;
         run)
-            kc_status "$mode" "${PROFILE_KC_RUN_CONTAINER_NAME:-kc-migrate-${KC_HOP_VERSION:-${PROFILE_KC_TARGET_VERSION:-}}}"
+            kc_status "$mode" "$(kc_run_container_name "${KC_HOP_VERSION:-${PROFILE_KC_TARGET_VERSION:-}}")"
             ;;
         docker-compose)
             kc_status "$mode" "${PROFILE_KC_COMPOSE_FILE:-docker-compose.yml}"
@@ -1454,7 +1468,7 @@ wait_for_migration() {
     # exporting both names.)
     local log_target="${PROFILE_KC_CONTAINER_NAME:-}"
     if [[ "${PROFILE_KC_DEPLOYMENT_MODE:-}" == "run" ]]; then
-        log_target="${PROFILE_KC_RUN_CONTAINER_NAME:-kc-migrate-${version}}"
+        log_target="$(kc_run_container_name "$version")"
     fi
     log_info "Reading migration logs from: ${log_target:-<default>}"
 
@@ -1932,7 +1946,7 @@ migrate_to_version() {
         # out the full timeout for logs from a container that no longer existed. Verify.
         if [[ "${PROFILE_KC_DEPLOYMENT_MODE:-}" == "run" ]]; then
             local _cname _cstate
-            _cname="${PROFILE_KC_RUN_CONTAINER_NAME:-kc-migrate-${target_version}}"
+            _cname="$(kc_run_container_name "$target_version")"
             _cstate=$(cr inspect -f '{{.State.Status}}' "$_cname" 2>/dev/null | tr -d '[:space:]' || true)
             : "${_cstate:=missing}"
             if [[ "$_cstate" != "running" ]]; then
@@ -2034,7 +2048,7 @@ migrate_to_version() {
     # run topology: the transient migrating container has done its job — stop+remove it
     # before the next hop boots (single-instance migration; avoids DB lock contention).
     if [[ "${PROFILE_KC_DEPLOYMENT_MODE}" == "run" ]] && declare -F kc_run_stop_container >/dev/null 2>&1; then
-        kc_run_stop_container "${PROFILE_KC_RUN_CONTAINER_NAME:-kc-migrate-${target_version}}" || true
+        kc_run_stop_container "$(kc_run_container_name "$target_version")" || true
     fi
 
     # Mark step as fully successful
@@ -2102,6 +2116,16 @@ execute_migration() {
     # A dry run takes no lock — it changes nothing and must never block a real migration.
     if [[ "${DRY_RUN:-false}" != "true" ]] && ! _kc_acquire_lock; then
         return 1
+    fi
+
+    # ADR-011: one migration per DATABASE, enforced by the database. The file lock above only
+    # catches a re-run from the SAME work dir; this catches a second run against this database from
+    # ANY work dir or host, and — being a session advisory lock — releases itself if we crash.
+    # Taken before reconcile so two concurrent runs cannot even both read/rewrite the state.
+    if [[ "${DRY_RUN:-false}" != "true" ]] && declare -F kc_db_lock_acquire >/dev/null 2>&1; then
+        if ! kc_db_lock_acquire; then
+            return 1
+        fi
     fi
 
     # ADR-008: reconcile with REALITY before deciding anything. This may replace the profile's
@@ -2837,7 +2861,7 @@ EOF
 main() {
     # Installed here (not at source time) so sourcing the script for tests/wrappers is inert.
     trap _kc_on_interrupt INT TERM
-    trap _kc_release_lock EXIT
+    trap _kc_release_all_locks EXIT
 
     local command="${1:-}"
     shift || true

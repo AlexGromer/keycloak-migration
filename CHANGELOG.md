@@ -7,6 +7,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **One migration per database, isolated — not just detected (ADR-011).** The per-workspace file
+  lock only caught a re-run from the *same* work dir; two runs against one database from different
+  work dirs (or hosts) migrated its schema concurrently and corrupted it, and the transient
+  container name `kc-migrate-<version>` was global to the container daemon so even runs against
+  *different* databases fought over it.
+  - **DB advisory lock** (`scripts/lib/db_lock.sh`): a PostgreSQL session-level
+    `pg_try_advisory_lock`, keyed to the database and held for the whole run by a persistent psql
+    connection. A second run against the same database is refused immediately with a clear message;
+    the lock auto-releases if the run crashes (the connection drops). Cross-host, unlike a lock
+    file. Degrades to the file lock with a warning when `psql` is absent.
+  - **Per-database container names**: the transient container is now
+    `kc-migrate-<version>-<db-token>`. Runs against different databases get different names and
+    proceed in parallel without one's cleanup removing the other's container. Still matches the
+    `kc-migrate-*` cleanup glob; an explicit `PROFILE_KC_RUN_CONTAINER_NAME` still wins.
+
+### Fixed
+
+- **Competing-process detection flagged the run as its own competitor and aborted every `--go`**
+  (even a lone dry-run), while `ps` showed nothing. The `$(...)` scan subshell inherits the script's
+  argv and has a pid ≠ `$$`, so the scan detected *itself*; `pgrep -f` matched any command line
+  *mentioning* the script (the launching `zsh -c` wrapper, a `grep`, an editor); and the PPID
+  ancestry walk broke when a launcher was reparented to init. Rewritten to match only processes with
+  the script as an actual argv element, excluding both `$$` and `$BASHPID`, with no PPID walk. The
+  single-instance lock remains the authoritative concurrent-run guard.
+- **The harness aborted when the base KC16 image exits after schema-init.** `astra-16.1.1`
+  initialises the schema and exits, so seeding via `kcadm exec` found no running container.
+  Seeding is now best-effort: it warns, dumps the base container's logs to explain the exit, and
+  continues — the integrity gate still checks the default realm across every hop.
+
 ### Planned
 - AWS RDS / GCP Cloud SQL / Azure Database migration examples
 - Ansible playbook wrapper
