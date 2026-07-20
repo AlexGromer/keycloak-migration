@@ -158,4 +158,39 @@ assert_true "grep -q 'FORCE_UNLOCK=true' '$MV'"               "--force-unlock se
 assert_true "grep -q 'databasechangeloglock' '$PROJECT_ROOT/scripts/lib/migration_verify.sh'" \
     "Liquibase changelog lock is actually checked"
 
+describe "REGRESSION: false success — stale 'migrated' checkpoints invalidated vs the DB (ADR-008)"
+# A work dir reused across runs carried CHECKPOINT_<hop>=health_ok while the DB was a fresh 16.1.1.
+# The resume logic then SKIPPED wait_for_migration and reported success for a migration that never
+# ran (DB left at 16.1.1). reconcile must invalidate any checkpoint claiming a migration the
+# database does not have, and archive the stale state instead of trusting it.
+assert_true "declare -F _kc_invalidate_stale_checkpoints" "false-success guard defined"
+
+_sc_orig_wd="$WORK_DIR"; _sc_orig_sf="$STATE_FILE"
+_sc_wd="$(mktemp -d)"; WORK_DIR="$_sc_wd"; STATE_FILE="$_sc_wd/migration_state.env"; export DRY_RUN=false
+{
+    echo "CHECKPOINT_24_0_5=health_ok"
+    echo "CHECKPOINT_26_6_3=health_ok"
+    echo "LAST_SUCCESSFUL_STEP=26.6.3"
+} > "$STATE_FILE"
+: > "$_sc_wd/.preflight_passed"
+echo "DI_BASE_user_entity=1" > "$_sc_wd/data_baseline.env"
+_kc_invalidate_stale_checkpoints 26 16.1.1 >/dev/null 2>&1
+assert_empty "$(get_checkpoint 26.6.3)" \
+    "stale 26.6.3 'migrated' checkpoint invalidated -> the hop runs for real"
+assert_false "test -f '$STATE_FILE'" \
+    "the stale state file is moved out of the way (not trusted)"
+assert_true "ls -d '$_sc_wd'/stale_*/data_baseline.env >/dev/null 2>&1" \
+    "stale state incl. the baseline is archived to a timestamped stale_* dir (audit trail)"
+
+# NEGATIVE: a legitimate resume (DB at 24.0.5; 26.6.3 interrupted at 'started', not migrated) is kept.
+_sc_wd2="$(mktemp -d)"; WORK_DIR="$_sc_wd2"; STATE_FILE="$_sc_wd2/migration_state.env"
+echo "CHECKPOINT_26_6_3=started" > "$STATE_FILE"
+_kc_invalidate_stale_checkpoints 26 24.0.5 >/dev/null 2>&1
+assert_equals "started" "$(get_checkpoint 26.6.3)" \
+    "a real resume (26.6.3 interrupted at 'started') is preserved, not archived"
+assert_true "test -f '$STATE_FILE'" "legit resume state file is kept in place"
+
+rm -rf "$_sc_wd" "$_sc_wd2"
+WORK_DIR="$_sc_orig_wd"; STATE_FILE="$_sc_orig_sf"
+
 test_report
