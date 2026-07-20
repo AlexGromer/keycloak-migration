@@ -105,6 +105,12 @@ jobs:
           # An archive whose scripts do not parse is not a release.
           find "$DIR/scripts" -name '*.sh' -type f -print0 | xargs -0 -n1 bash -n
 
+          # Belt-and-suspenders: the entry-point scripts must be executable in the shipped tar, so a
+          # recipient can run the documented `scripts/migrate_*.sh ...` directly (not only via bash).
+          # The git modes are 100755, but make it so even if a checkout dropped the bit. Libraries in
+          # scripts/lib are sourced, not executed — leave them alone.
+          chmod +x "$DIR"/scripts/*.sh "$DIR"/scripts/harness/*.sh 2>/dev/null || true
+
           echo "--- shipping ---"
           ( cd "$DIR" && find . -maxdepth 2 | sort )
 
