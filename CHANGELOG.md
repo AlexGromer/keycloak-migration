@@ -7,6 +7,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed (surfaced by a full live 16→26 run on the new code)
+
+- **The competing-process scan flagged the DB-lock coproc and aborted every `--go`.** ADR-011 holds
+  the advisory lock through `coproc { … psql; }`; a brace-group coproc keeps a bash WRAPPER carrying
+  our own argv (a pid that is neither `$$` nor `$BASHPID`), so the scan detected itself. Exclusion is
+  now by PROCESS GROUP — the main process, its command-substitution subshells, the coproc and any
+  children all share our pgid; a genuinely separate invocation has its own. This also subsumes the
+  earlier `$$`/`$BASHPID` special-casing.
+- **A second, older preflight still hardcoded 15 GB of disk.** Wave 3 rewrote the *library* check to
+  measure backup space, but `migrate_keycloak_v3.sh`'s own `run_preflight_checks` carried a duplicate
+  `MIN_DISK_GB:-15` gate that ran first and refused an 11 GB host for a migration needing ~24 MB. It
+  never surfaced because earlier runs skipped preflight via the `.preflight_passed` marker. Reduced
+  to a 512 MB working-space floor (`MIN_DISK_FREE_MB`); the measured backup check remains the real
+  gate.
+- **`verify` could not start its container, then could not pass its smoke test.** Three faults, all
+  from assuming health can be turned on at runtime: (1) `verify --profile` never loaded the profile,
+  so it had no target version; (2) the verify container forced `KC_HEALTH_ENABLED=true`, a BUILD-time
+  option that makes an optimized sovereign image refuse to start (exit 2) — dropped, with readiness
+  now taken from the startup log; (3) `smoke_test.sh` waited on `/health` (never served on an
+  optimized image) and its `((counter++))` increments aborted the whole script under `set -e` on the
+  first success. Smoke now probes `/realms/master` for readiness, treats a missing `/health` as
+  informational, and increments with assignments. Verified end-to-end: `verify` boots the target
+  sovereign image, confirms readiness from the log, and passes all 7 Admin-API smoke tests.
+
+### Known gaps
+
+- `verify --profile <oneshot-profile>` needs `PROFILE_CONTAINER_IMAGE_REF='<ns>:<os>-{version}'` in
+  the environment: the sovereign image tag (`astra-<version>`) is not persisted in the profile,
+  because the flat-YAML parser cannot hold a value containing `:`. A sidecar for the ref is the
+  planned fix.
+
 ### Added
 
 - **One migration per database, isolated — not just detected (ADR-011).** The per-workspace file

@@ -161,12 +161,18 @@ assert_contains "$verify_src" "kc_run_stop_container"     "verify removes its co
 assert_contains "$verify_src" "NOT verified" \
     "missing admin credentials are reported honestly, not silently skipped"
 
-# The container it boots is the one that DID the migration, with health actually switched on —
-# unlike the migrating boot, whose missing KC_HEALTH_ENABLED is the root of ADR-009.
+# It boots the SAME sovereign image that performed the migration — and does NOT force
+# KC_HEALTH_ENABLED: that is a BUILD-time option an optimized image is not built with, and passing
+# it makes the image refuse to start (exit 2). Readiness comes from the startup log instead.
 adapter_src="$(sed -n '/^kc_run_verify_container()/,/^}/p' "$PROJECT_ROOT/scripts/lib/deployment_adapter.sh")"
-assert_contains "$adapter_src" "KC_HEALTH_ENABLED=true" \
-    "the verify container serves health (the migrating one never did)"
+assert_true "! grep -q 'KC_HEALTH_ENABLED=true' <<< \"\$adapter_src\"" \
+    "the verify container does NOT force health (build-time option; fatal on an optimized image)"
 assert_contains "$adapter_src" "dist_image_ref" \
     "it boots the SAME sovereign image that performed the migration"
+
+# Readiness is taken from the startup log, not a /health probe.
+verify_fn="$(sed -n '/^cmd_verify()/,/^}/p' "$MAIN")"
+assert_contains "$verify_fn" "startup confirmed in the log" \
+    "verify reports readiness from the container log, not from /health"
 
 test_report

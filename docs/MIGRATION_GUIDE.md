@@ -84,8 +84,8 @@ psql -h <pg-host> -U <pg-user> -d keycloak -tAc "SHOW server_version;"
 
 | Проверка | Где | Порог | Как изменить |
 |---|---|---|---|
-| Базовый preflight | ФС каталога `WORK_DIR` | **15 ГБ** | `export MIN_DISK_GB=<N>` или сменить `WORK_DIR` |
-| Preflight v3.5 | `WORK_DIR/backups` | 10 ГБ | та же ФС; бэкап ≈ размер БД × 3 |
+| Базовый preflight | ФС каталога `WORK_DIR` | **512 МБ floor** (логи/state/temp) | `export MIN_DISK_FREE_MB=<N>` или сменить `WORK_DIR` |
+| Preflight v3.5 (backup space) | `WORK_DIR/backups` | **измеряется**: данные таблиц × 1.2 × число хопов | указать `--work-dir` на просторную ФС |
 
 ```bash
 # найти ФС со свободным местом
@@ -95,8 +95,8 @@ df -BG --output=avail,target -x tmpfs -x devtmpfs | sort -rn | head -5
 scripts/migrate_oneshot.sh ... --work-dir /var/lib/kcwork --go
 # вариант 2 — для migrate_keycloak_v3.sh напрямую
 export WORK_DIR=/var/lib/kcwork
-# вариант 3 — снизить порог (если БД маленькая) или пропустить проверки
-export MIN_DISK_GB=5        #  ... либо  --skip-preflight
+# вариант 3 — снизить floor (обычно не нужно) или пропустить проверки
+export MIN_DISK_FREE_MB=256   #  ... либо  --skip-preflight
 ```
 
 > По умолчанию `migrate_oneshot.sh` создаёт временный `WORK_DIR` в `$TMPDIR` — если там мало

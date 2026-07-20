@@ -416,23 +416,29 @@ _kc_proc_runs_migration() {
 # script. Returns 1 when there are none.
 #
 # Walks /proc directly instead of pgrep: no PPID-ancestry walk (which broke the moment a launcher
-# was reparented to init — a detached shell, a pipeline, nohup — leaving the run to flag its own
-# launcher as a competitor and refuse to start).
+# was reparented to init — a detached shell, a pipeline, nohup).
 #
-# Two of our OWN pids must be excluded, and they are different pids:
-#   $$        the main migration process (the one-shot wrapper execs INTO it, so there is no
-#             separate launcher process still executing a script).
-#   $BASHPID  THIS function runs inside a command-substitution subshell — `x="$(...)"`. That
-#             subshell inherits the script's argv verbatim (`bash .../migrate_keycloak_v3.sh …`),
-#             so it is a process "running a migration script" with a pid that is NOT $$ ($$ stays
-#             the parent's pid in a subshell). Without excluding it, the scan flags the very
-#             subshell performing the scan — which is why a lone dry-run reported a competitor.
+# Exclusion is by PROCESS GROUP, not by a list of our own pids. Our run spawns several processes
+# that each inherit the script's argv and so match the "runs a migration script" test:
+#   - $$                     the main process;
+#   - the `x="$(...)"` command-substitution subshell this function runs in ($BASHPID);
+#   - the DB-lock coproc — a brace-group `coproc { … psql; }` keeps a bash WRAPPER with our argv
+#     (psql is its child), a pid that is neither $$ nor $BASHPID. This is what re-broke the scan.
+# All of them share our process group; a genuinely separate migration invocation has its own. So
+# skip any candidate whose pgid equals ours — that excludes the whole tree, coproc included, and
+# will keep excluding whatever we fork next.
 kc_find_other_migration_procs() {
-    local selves=" $$ ${BASHPID:-} " pids=() f pid
+    local my_pgid pids=() f pid pgid
+    my_pgid="$(ps -o pgid= -p "$$" 2>/dev/null | tr -d ' ')"
     for f in /proc/[0-9]*/cmdline; do
         pid="${f#/proc/}"; pid="${pid%/cmdline}"
-        [[ "$selves" == *" $pid "* ]] && continue
-        _kc_proc_runs_migration "$pid" && pids+=("$pid")
+        [[ "$pid" == "$$" ]] && continue
+        _kc_proc_runs_migration "$pid" || continue
+        if [[ -n "$my_pgid" ]]; then
+            pgid="$(ps -o pgid= -p "$pid" 2>/dev/null | tr -d ' ')"
+            [[ "$pgid" == "$my_pgid" ]] && continue   # our own process tree
+        fi
+        pids+=("$pid")
     done
     [[ ${#pids[@]} -gt 0 ]] || return 1
     printf '%s\n' "${pids[@]}"
@@ -834,23 +840,24 @@ run_preflight_checks() {
 
     local errors=0
 
-    # 1. Free space on the WORK_DIR filesystem (default 15 GB; override with MIN_DISK_GB).
-    #    This space is for the pre-hop DB dumps (backup ~ DB size x3) — NOT for container
-    #    images (those live in the container-runtime store).
+    # 1. A FLOOR of working space (logs, state, temp) on the WORK_DIR filesystem — NOT a backup
+    #    budget. The real backup requirement is MEASURED from the database by the v3.5 preflight
+    #    that runs next (check_backup_space: table-data x 1.2 x hop-count). This used to hardcode
+    #    15 GB with "backup ~ DB size x3" reasoning and refused small migrations on roomy hosts —
+    #    the exact arbitrary gate ADR-010's sizing work removed from the library check. A fixed
+    #    number here re-introduced it, and only surfaced now because earlier runs skipped preflight.
     local target_path="$WORK_DIR"
     [[ ! -d "$target_path" ]] && target_path="$(dirname "$target_path")"
-    local available_gb=$(df -BG "$target_path" 2>/dev/null | tail -1 | awk '{print $4}' | tr -d 'G' || echo "0")
-    local required_gb="${MIN_DISK_GB:-15}"
+    local avail_mb
+    avail_mb=$(df -BM "$target_path" 2>/dev/null | awk 'NR==2 { gsub(/M/, "", $4); print $4 + 0 }')
+    : "${avail_mb:=0}"
+    local floor_mb="${MIN_DISK_FREE_MB:-512}"
 
-    if [[ "${available_gb:-0}" -ge "$required_gb" ]]; then
-        log_success "Disk space: ${available_gb}GB available on ${target_path} (need ${required_gb}GB)"
+    if (( avail_mb >= floor_mb )); then
+        log_success "Working space: ${avail_mb}MB on ${target_path} (floor ${floor_mb}MB; backups sized from the DB next)"
     else
-        log_error "Disk space: ${available_gb}GB < ${required_gb}GB required on ${target_path} (WORK_DIR)"
-        log_info "  Space is for pre-hop DB dumps (backup ~ DB size x3), not for images."
-        log_info "  Point WORK_DIR at a filesystem with more free space:"
-        log_info "    export WORK_DIR=/path/on/bigger/fs             # migrate_keycloak_v3.sh"
-        log_info "    scripts/migrate_oneshot.sh --work-dir /path/on/bigger/fs"
-        log_info "  Or adjust: export MIN_DISK_GB=<N>   |   skip checks: --skip-preflight"
+        log_error "Working space: ${avail_mb}MB < ${floor_mb}MB floor on ${target_path} (WORK_DIR)"
+        log_info "  Point WORK_DIR at a roomier filesystem, or skip checks with --skip-preflight."
         errors=$((errors + 1))
     fi
 
@@ -2583,10 +2590,17 @@ find_latest_backup() {
 #   with health enabled, exercises it, and removes the container again. Verifying against a stock
 #   Keycloak of the same version would test a different artifact than the one you are about to run.
 cmd_verify() {
-    local version="${1:-${PROFILE_KC_TARGET_VERSION:-}}"
+    local profile="${1:-${PROFILE_NAME:-}}"
 
+    # Load the profile so the DB coordinates and target version are populated — verify runs as its
+    # own subcommand, without going through cmd_migrate, so nothing has loaded it yet.
+    if [[ -n "$profile" ]] && declare -F load_profile_or_discover >/dev/null 2>&1; then
+        load_profile_or_discover "$profile" >/dev/null 2>&1 || true
+    fi
+
+    local version="${PROFILE_KC_TARGET_VERSION:-}"
     if [[ -z "$version" ]]; then
-        log_error "verify: no target version (pass one, or use --profile)"
+        log_error "verify: no target version — pass --profile <name> (or set PROFILE_KC_TARGET_VERSION)"
         return 1
     fi
 
@@ -2619,25 +2633,44 @@ cmd_verify() {
     # shellcheck disable=SC2064 # expand $cname now: it is what we must clean up
     trap "kc_run_stop_container '$cname' 2>/dev/null || true" RETURN
 
-    # Readiness. Unlike the migrating boot, this container HAS health enabled, so a failure here
-    # means something — it is not the ADR-009 false alarm.
-    local endpoint attempt=1 code="000"
-    endpoint="$(kc_health_endpoint "$version")"
-    log_info "Waiting for readiness: $endpoint"
+    # Readiness from the STARTUP LOG, not a /health probe. Health is a build-time option the
+    # optimized sovereign image was not built with (forcing it makes the image refuse to start), so
+    # "started in NNs" / "Listening on" is the signal that works for the artifact we actually have.
+    local attempt=1 ready="false"
+    log_info "Waiting for Keycloak $version to finish starting (from the container log)"
 
     while [[ $attempt -le ${VERIFY_READY_RETRIES:-60} ]]; do
-        code=$(kc_health_probe "run" "$endpoint" "$cname")
-        [[ "$code" == "200" ]] && break
+        # The container must still be alive AND have logged the started marker.
+        local st
+        st=$(cr inspect -f '{{.State.Status}}' "$cname" 2>/dev/null | tr -d '[:space:]' || true)
+        if [[ "$st" != "running" ]]; then
+            log_error "Verification container '$cname' is '${st:-gone}' — it failed to start. Logs:"
+            cr logs "$cname" 2>&1 | tail -40 | sed 's/^/  /' || true
+            return 1
+        fi
+        if cr logs "$cname" 2>&1 | grep -qiE 'Listening on|started in [0-9]|Running the server'; then
+            ready="true"; break
+        fi
         sleep "${VERIFY_READY_INTERVAL:-5}"
         ((attempt++))
     done
 
-    if [[ "$code" != "200" ]]; then
-        log_error "Keycloak $version did not become ready (last: HTTP $code). Container logs:"
+    if [[ "$ready" != "true" ]]; then
+        log_error "Keycloak $version did not report readiness within the budget. Container logs:"
         cr logs "$cname" 2>&1 | tail -40 | sed 's/^/  /' || true
         return 1
     fi
-    log_success "Keycloak $version is READY (HTTP 200 on ${endpoint##*/})"
+    log_success "Keycloak $version is up and serving (startup confirmed in the log)"
+
+    # If the image happens to serve health, note it — but never gate on it (ADR-009).
+    local hep hcode
+    hep="$(kc_health_endpoint "$version")"
+    hcode=$(kc_health_probe "run" "$hep" "$cname")
+    if [[ "$hcode" == "200" ]]; then
+        log_success "Health endpoint also ready (${hep##*/})"
+    else
+        log_info "Health not served (HTTP ${hcode}) — expected on an optimized image; not a failure"
+    fi
 
     # Admin API. This needs the realm's admin credentials, which the tool does not know and cannot
     # derive — KC_BOOTSTRAP_ADMIN_* only creates an admin on a database that has none, and a
@@ -2656,14 +2689,15 @@ cmd_verify() {
     fi
 
     local smoke="$SCRIPT_DIR/smoke_test.sh"
-    if [[ ! -x "$smoke" ]]; then
-        log_warn "smoke_test.sh not executable — skipping Admin API tests"
+    if [[ ! -f "$smoke" ]]; then
+        log_warn "smoke_test.sh not found at $smoke — skipping Admin API tests"
         return 0
     fi
 
+    # Invoke via `bash` so a missing +x bit (common after checkout/copy) does not skip the tests.
     local base="http://localhost:${VERIFY_HTTP_PORT:-8080}"
     log_info "Running Admin API smoke tests against $base"
-    if KC_URL="$base" ADMIN_USER="$admin_user" ADMIN_PASS="$admin_pass" "$smoke"; then
+    if KC_URL="$base" ADMIN_USER="$admin_user" ADMIN_PASS="$admin_pass" bash "$smoke"; then
         log_success "Verify PASSED: $version is migrated, ready, and serving the Admin API"
     else
         log_error "Admin API smoke tests FAILED against $version"
@@ -2847,8 +2881,8 @@ ENVIRONMENT VARIABLES:
     DB_PASSWORD             Database password (generic)
     WORK_DIR                Workspace directory (default: ./migration_workspace).
                             Preflight checks FREE SPACE on this path's filesystem.
-    MIN_DISK_GB             Preflight free-space threshold on WORK_DIR's fs (default: 15).
-                            Space is for pre-hop DB dumps, not for container images.
+    MIN_DISK_FREE_MB        Preflight FLOOR of free working space on WORK_DIR's fs (default: 512).
+                            The backup requirement is measured from the DB, not fixed here.
     ASSUME_DEFAULTS         If "true": run non-interactively with safe defaults (like --yes)
 
 EOF
@@ -2949,7 +2983,7 @@ main() {
             cmd_rollback
             ;;
         verify)
-            cmd_verify
+            cmd_verify "$PROFILE_NAME"
             ;;
         -h|--help)
             usage

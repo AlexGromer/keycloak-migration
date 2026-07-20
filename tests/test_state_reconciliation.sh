@@ -88,33 +88,49 @@ assert_true "declare -F _kc_proc_runs_migration"       "argv-precise matcher def
 assert_false "kc_find_other_migration_procs >/dev/null 2>&1" \
     "a lone run finds no competitor (was: flagged its own subshell/launcher and aborted)"
 
-# It must still EXCLUDE our own two pids explicitly — proven by construction: exclude $$ and $BASHPID.
-assert_true "grep -q 'BASHPID' '$PROJECT_ROOT/scripts/migrate_keycloak_v3.sh'" \
-    "the scanning subshell (\$BASHPID) is excluded, not just \$\$"
-# No EXECUTABLE line calls pgrep any more (comments explaining the old approach are fine).
+# Exclusion is by PROCESS GROUP now (not a $$/$BASHPID list): the DB-lock coproc is a bash wrapper
+# that inherits our argv with a pid that is neither, and it re-broke the scan until we switched to
+# pgid. The code must exclude by pgid, and must not call pgrep (comments about the old way are fine).
+assert_true "grep -q 'my_pgid' '$PROJECT_ROOT/scripts/migrate_keycloak_v3.sh'" \
+    "the scan excludes our whole process group (pgid), not just individual pids"
 assert_equals "0" \
     "$(grep -vE '^\s*#' "$PROJECT_ROOT/scripts/migrate_keycloak_v3.sh" | grep -c 'pgrep' || true)" \
     "the substring-matching pgrep scan is gone from the code"
 
+# A coproc in OUR process group, with our argv, must NOT be flagged — this is the exact shape of the
+# DB-lock coproc that re-broke the scan on the live --go.
+coproc _RC_CP { sleep 20; }
+_cs_found0="$(kc_find_other_migration_procs 2>/dev/null || true)"
+assert_true "[[ -z '$_cs_found0' ]]" \
+    "a coproc in our process group (DB-lock shape) is NOT flagged"
+kill "${_RC_CP_PID}" 2>/dev/null || true
+
 describe "REGRESSION: but a REAL competing migration IS still detected"
-# A process whose argv0 basenames to migrate_oneshot.sh (a symlink to sleep — no real migration is
-# run) must be found. This proves the fix did not just neuter the check into always-none.
+# A REAL second run is a SEPARATE invocation with its OWN process group — simulate with setsid so it
+# is not in ours. argv0 basenames to migrate_oneshot.sh (a symlink to sleep; no real migration runs).
+# (A plain `&` job would share our pgid in a non-interactive shell and be correctly treated as ours.)
 _cs_dir="$(mktemp -d)"
 ln -sf /bin/sleep "$_cs_dir/migrate_oneshot.sh"
-"$_cs_dir/migrate_oneshot.sh" 20 &
-_cs_fake=$!
-sleep 0.3
-_cs_found="$(kc_find_other_migration_procs 2>/dev/null || true)"
-assert_true "grep -qx '$_cs_fake' <<< '$_cs_found'" \
-    "a process actually running migrate_oneshot.sh is detected by pid"
-# And the argv-precise matcher rejects a mere MENTION: a shell whose -c blob names the script.
-bash -c "sleep 20 # mentions migrate_keycloak_v3.sh in a comment only" &
+if command -v setsid >/dev/null 2>&1; then
+    setsid "$_cs_dir/migrate_oneshot.sh" 20 &
+    _cs_fake=$!
+    sleep 0.3
+    _cs_found="$(kc_find_other_migration_procs 2>/dev/null || true)"
+    assert_true "grep -qx '$_cs_fake' <<< '$_cs_found'" \
+        "a separate-pgid process running migrate_oneshot.sh is detected by pid"
+    kill "$_cs_fake" 2>/dev/null || true
+else
+    skip_test "setsid unavailable — cannot simulate a separate-process-group run"
+fi
+
+# A mere MENTION (the script name only inside a -c blob) must never be flagged, own group or not.
+setsid bash -c "sleep 20 # mentions migrate_keycloak_v3.sh in a comment only" &
 _cs_mention=$!
 sleep 0.3
 _cs_found2="$(kc_find_other_migration_procs 2>/dev/null || true)"
 assert_true "! grep -qx '$_cs_mention' <<< '$_cs_found2'" \
-    "a process that only MENTIONS the script (not argv) is NOT flagged"
-kill "$_cs_fake" "$_cs_mention" 2>/dev/null || true
+    "a process that only MENTIONS the script (not as an argv element) is NOT flagged"
+kill "$_cs_mention" 2>/dev/null || true
 rm -rf "$_cs_dir"
 
 describe "ADR-008: --force-unlock and --no-resume are wired"

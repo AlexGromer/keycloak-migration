@@ -679,14 +679,16 @@ kc_run_stop_container() {
 # ============================================================================
 
 # kc_run_verify_container <version> [container_name]
-#   Boot the TARGET image against the migrated database for an acceptance test, and — unlike the
-#   migrating container — make it actually serviceable:
-#     KC_HEALTH_ENABLED=true   the migrating boot never sets this, which is why probing it was
-#                              pointless (ADR-009). Here we want a real readiness signal.
-#     ports published          on a bridge network the host cannot reach 8080/9000 otherwise, so
-#                              neither the health probe nor the Admin API smoke test could run.
-#   The image is the one that performed the migration. Verifying against a "standard" Keycloak of
-#   the same version would test a different artifact than the one you are about to run.
+#   Boot the TARGET image against the migrated database for an acceptance test. The image is the one
+#   that performed the migration — verifying against a "standard" Keycloak of the same version would
+#   test a different artifact than the one you are about to run.
+#
+#   NOTE on health: KC_HEALTH_ENABLED is a BUILD-time option. A sovereign image is pre-built with
+#   `start --optimized`, and passing a build-time option that differs from the baked value makes it
+#   refuse to start (exit 2) — which is exactly what broke the first verify attempt. So we do NOT
+#   force health on; readiness is taken from the startup log ("Listening on"/"started in"), and the
+#   real acceptance test is the Admin API smoke run. Ports are published on a bridge network so the
+#   smoke test on the host can reach 8080.
 kc_run_verify_container() {
     local version="$1"
     local container_name="${2:-kc-verify-${version}}"
@@ -708,6 +710,7 @@ kc_run_verify_container() {
         run_args+=(-p "${VERIFY_HTTP_PORT:-8080}:8080" -p "${VERIFY_MGMT_PORT:-9000}:9000")
     fi
 
+    # Same env as the migrating boot — NO KC_HEALTH_ENABLED (build-time; fatal on an optimized image).
     local -a run_env=(
         -e KC_DB=postgres
         -e KC_DB_URL="$jdbc_url"
@@ -715,12 +718,11 @@ kc_run_verify_container() {
         -e KC_DB_PASSWORD="$db_pass"
         -e KC_HOSTNAME_STRICT="${PROFILE_KC_RUN_HOSTNAME_STRICT:-false}"
         -e KC_HTTP_ENABLED="${PROFILE_KC_RUN_HTTP_ENABLED:-true}"
-        -e KC_HEALTH_ENABLED=true
     )
     [[ -n "${PROFILE_KC_RUN_HOSTNAME:-}" ]] && run_env+=(-e KC_HOSTNAME="${PROFILE_KC_RUN_HOSTNAME}")
 
     if [[ "${DRY_RUN:-false}" == "true" ]]; then
-        echo "DRY-RUN: cr run -d --name $container_name --network=$network -e KC_DB=postgres -e KC_DB_URL=$jdbc_url -e KC_DB_PASSWORD=*** -e KC_HEALTH_ENABLED=true $image_ref start --optimized" >&2
+        echo "DRY-RUN: cr run -d --name $container_name --network=$network -e KC_DB=postgres -e KC_DB_URL=$jdbc_url -e KC_DB_PASSWORD=*** $image_ref start --optimized" >&2
         return 0
     fi
 
