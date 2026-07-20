@@ -18,6 +18,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [3.9.4] - 2026-07-20
+
+### Fixed
+
+- **`--apply-indexes` double-applied every skipped index and reported a spurious failure.**
+  Keycloak 25/26 skips creating an index on a table whose estimated row count (`pg_class.reltuples`)
+  exceeds Keycloak's `indexCreationThreshold` (default 300000) and logs the DDL instead — and it does
+  so from TWO subsystems: the `CustomCreateIndexChange` Liquibase change during the migration, and the
+  `DatabaseIndexChecker` at startup. `kc_check_skipped_indexes` matched both lines, so the same
+  `CREATE INDEX` was captured twice; with `--apply-indexes` the second `CREATE INDEX CONCURRENTLY`
+  failed with "relation already exists", logging `[ERROR] Failed to apply index` and returning
+  non-zero (swallowed by `|| true` at the call site — harmless but alarming) even though the index had
+  been created. Captured statements are now deduplicated on a normalised key, and the concurrent form
+  is `CREATE INDEX CONCURRENTLY IF NOT EXISTS` so a re-apply — or an index Keycloak created itself — is
+  an idempotent no-op. Verified live on a 350 000-row table across the full 16→24.0.5→26.6.3 path.
+
+---
+
 ## [3.9.3] - 2026-07-20
 
 ### Fixed
