@@ -18,6 +18,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [3.9.3] - 2026-07-20
+
+### Fixed
+
+- **The shipped entry-point scripts were not executable, so the documented direct invocation
+  failed.** `migrate_keycloak_v3.sh` (and `smoke_test.sh`, and the legacy `migrate_keycloak*.sh`)
+  were mode `100644` in git, and the release tar copies `scripts/` as-is — so a recipient running the
+  commands as `docs/MIGRATION_GUIDE.md` and QUICKSTART show them (`scripts/migrate_keycloak_v3.sh
+  migrate/plan/rollback/verify`) got `Permission denied`. The tool worked *internally* only because
+  `migrate_oneshot.sh` (which was executable) hands off via `exec bash …/migrate_keycloak_v3.sh`,
+  where the execute bit is irrelevant. The entry scripts are now `100755`, and the release workflow
+  `chmod +x`s them into the tar as a belt-and-suspenders. Library files under `scripts/lib` stay
+  non-executable — they are sourced, not run. (v3.9.2 shipped with the wrong modes; run those via
+  `bash scripts/…` or upgrade to 3.9.3.)
+
+---
+
 ## [3.9.2] - 2026-07-20
 
 ### Fixed (surfaced by a full live 16→26 run on the new code)

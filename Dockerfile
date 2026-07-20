@@ -5,7 +5,7 @@ FROM ubuntu:22.04
 
 LABEL maintainer="AlexGromer <alexei.pape@yandex.ru>"
 LABEL description="Keycloak Migration Tool — container-hop migration framework"
-LABEL version="3.9.2"
+LABEL version="3.9.3"
 
 # ============================================================================
 # Install Dependencies
