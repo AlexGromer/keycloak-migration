@@ -53,8 +53,13 @@ kc_db_lock_acquire() {
 
     # A persistent connection. The lock lives exactly as long as this psql stays connected, which is
     # why it is a coproc held open for the run — not a one-shot query that would release instantly.
+    #
+    # `exec` so the coproc process BECOMES psql, with no bash wrapper around it. That wrapper was two
+    # separate problems: it kept our own argv (so the competing-process scan flagged it until we
+    # switched to pgid exclusion), and killing it left psql orphaned to die later on EOF. As a bare
+    # psql, _KC_DBLOCK_PID is the connection itself — kill it and the lock drops at once.
     coproc _KC_DBLOCK_CP { \
-        PGPASSWORD="${PROFILE_DB_PASSWORD:-}" psql \
+        PGPASSWORD="${PROFILE_DB_PASSWORD:-}" exec psql \
             -h "${PROFILE_DB_HOST:-localhost}" \
             -p "${PROFILE_DB_PORT:-5432}" \
             -U "${PROFILE_DB_USER:-keycloak}" \
@@ -109,10 +114,15 @@ kc_db_lock_acquire() {
 kc_db_lock_release() { _kc_db_lock_release; }
 _kc_db_lock_release() {
     [[ -n "$_KC_DBLOCK_PID" ]] || { _KC_DBLOCK_HELD="false"; return 0; }
-    # Killing psql closes its connection, and Postgres frees any advisory lock that connection held.
-    kill "$_KC_DBLOCK_PID" 2>/dev/null || true
+    local pid="$_KC_DBLOCK_PID"
     _KC_DBLOCK_PID=""
     _KC_DBLOCK_HELD="false"
+    # Killing psql closes its connection, and Postgres frees any advisory lock that connection held.
+    kill "$pid" 2>/dev/null || true
+    # Reap it so it never lingers as a zombie. `wait` succeeds because the coproc is a direct child;
+    # the redirect swallows the "terminated" status. Without this, a killed coproc sits defunct
+    # until the shell exits.
+    wait "$pid" 2>/dev/null || true
 }
 
 if [[ "${BASH_SOURCE[0]}" != "${0}" ]]; then

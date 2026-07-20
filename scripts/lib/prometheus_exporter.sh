@@ -191,13 +191,17 @@ prom_start_exporter() {
 }
 
 prom_stop_exporter() {
-    # Stop HTTP server
-    if [[ -n "${PROM_EXPORTER_PID:-}" ]]; then
-        log_info "Stopping Prometheus exporter (PID: $PROM_EXPORTER_PID)..."
-        kill "$PROM_EXPORTER_PID" 2>/dev/null || true
-        PROM_EXPORTER_PID=""
-        log_success "Exporter stopped"
-    fi
+    # Stop the HTTP server. The exporter is a background subshell whose `nc -l` is a CHILD; killing
+    # only the subshell would orphan nc (it holds the port). Kill the child first, then the subshell,
+    # then reap so nothing is left running or defunct.
+    [[ -n "${PROM_EXPORTER_PID:-}" ]] || return 0
+    local pid="$PROM_EXPORTER_PID"
+    PROM_EXPORTER_PID=""
+    log_info "Stopping Prometheus exporter (PID: $pid)..."
+    pkill -P "$pid" 2>/dev/null || true   # the nc child holding the port
+    kill "$pid" 2>/dev/null || true       # the subshell loop
+    wait "$pid" 2>/dev/null || true       # reap — no zombie
+    log_success "Exporter stopped"
 }
 
 # ============================================================================

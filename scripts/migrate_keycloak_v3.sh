@@ -218,15 +218,17 @@ _kc_release_lock() {
 # running container, and neither does any other error path.
 _KC_ACTIVE_RUN_CONTAINER=""
 
-# Release BOTH locks AND remove any still-live transient container. Runs from the EXIT trap (every
-# exit: success, error, or the interrupt handler's exit) so nothing outlives the run. The DB lock
-# also self-releases when our connection drops, but dropping it explicitly frees the database the
-# instant we finish.
+# The one teardown, run from the EXIT trap on EVERY exit — success, error, or the interrupt
+# handler's exit. It must leave NOTHING behind: no running transient container, no held lock, and
+# no orphaned/defunct child process (the DB-lock psql, the metrics exporter). Each child is killed
+# AND reaped by its own release function; we do not `wait` with no args (a child that ignored the
+# signal would hang the exit).
 _kc_release_all_locks() {
     if [[ -n "${_KC_ACTIVE_RUN_CONTAINER:-}" ]] && declare -F kc_run_stop_container >/dev/null 2>&1; then
         kc_run_stop_container "$_KC_ACTIVE_RUN_CONTAINER" 2>/dev/null || true
         _KC_ACTIVE_RUN_CONTAINER=""
     fi
+    declare -F prom_stop_exporter >/dev/null 2>&1 && prom_stop_exporter >/dev/null 2>&1
     _kc_release_lock
     declare -F kc_db_lock_release >/dev/null 2>&1 && kc_db_lock_release
     return 0

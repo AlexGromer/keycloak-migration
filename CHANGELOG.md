@@ -44,6 +44,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   pre-set `PROFILE_CONTAINER_IMAGE_REF` still wins. `verify --profile <name>` — the documented
   post-migration step — works out of the box; before, it fell back to `registry/image:version` and
   could not find the os-prefixed image.
+- **Process lifecycle: no orphans, no zombies, no leaked ports on any exit.** The run spawns two
+  long-lived children — the DB-lock connection and (with `--monitor`) the metrics exporter — and
+  neither was torn down cleanly. The DB-lock coproc was a bash wrapper around psql: killing it left
+  psql to die later on EOF, and nothing reaped it. It now `exec`s psql, so the coproc process IS the
+  connection — killed directly, then `wait`ed to reap. The exporter's `prom_stop_exporter` was
+  **never called from anywhere**, so `--monitor` leaked a background subshell and its `nc` child
+  (holding the port) on every run; it is now wired into the single EXIT teardown, kills the `nc`
+  child (`pkill -P`) as well as the subshell, and reaps both. Verified against real processes: after
+  teardown no psql, no exporter, no `nc` on the port, the advisory lock free, and zero zombies in
+  the process tree. Bounded waits everywhere (`read -t`, migration/verify timeouts) mean no hangs.
 - **`/auth` is a per-instance runtime setting, and the tool no longer assumes it.** The HTTP
   relative path is `/auth` on KC16 (WildFly) and `/` on KC17+ (Quarkus), freely changeable via
   `KC_HTTP_RELATIVE_PATH`. `smoke_test.sh`'s default `KC_URL` dropped its stale `/auth` suffix (the

@@ -71,10 +71,29 @@ assert_true "PATH='$_fakebin' kc_db_lock_acquire >/dev/null 2>&1" \
 rm -rf "$_fakebin"
 
 # The EXIT/interrupt path releases BOTH locks.
-assert_true "declare -F _kc_release_all_locks || grep -q '_kc_release_all_locks' '$PROJECT_ROOT/scripts/migrate_keycloak_v3.sh'" \
-    "a combined release frees the file lock and the DB lock together" 2>/dev/null || \
 assert_true "grep -q 'kc_db_lock_release' '$PROJECT_ROOT/scripts/migrate_keycloak_v3.sh'" \
     "the DB lock is released on exit"
+
+# ---------------------------------------------------------------------------
+describe "process lifecycle: the lock holder is a single psql, killed AND reaped"
+# The coproc `exec`s psql, so the held connection is ONE process (no bash wrapper) — killing it
+# drops the lock at once and leaves no orphan; and release `wait`s to reap it (no zombie).
+dblib="$PROJECT_ROOT/scripts/lib/db_lock.sh"
+assert_contains "$(cat "$dblib")" "exec psql" \
+    "the coproc execs psql (single process, no wrapper to orphan)"
+rel="$(sed -n '/^_kc_db_lock_release()/,/^}/p' "$dblib")"
+assert_contains "$rel" "wait " \
+    "release reaps the killed psql (no zombie)"
+
+# The metrics exporter — a background subshell with an nc child — is stopped and reaped, and is
+# wired into the single EXIT teardown so it never leaks on error (it was previously never stopped).
+promlib="$PROJECT_ROOT/scripts/lib/prometheus_exporter.sh"
+stop="$(sed -n '/^prom_stop_exporter()/,/^}/p' "$promlib")"
+assert_contains "$stop" "pkill -P" "exporter stop kills the nc child, not just the subshell"
+assert_contains "$stop" "wait "   "exporter stop reaps the subshell (no zombie)"
+teardown="$(sed -n '/^_kc_release_all_locks()/,/^}/p' "$PROJECT_ROOT/scripts/migrate_keycloak_v3.sh")"
+assert_contains "$teardown" "prom_stop_exporter" \
+    "the EXIT teardown stops the exporter (so a failed run does not leak it)"
 
 # ---------------------------------------------------------------------------
 describe "the DB advisory lock actually excludes a second run (needs a real PG)"
@@ -102,9 +121,16 @@ if command -v psql >/dev/null 2>&1 && \
     sleep 1
     assert_true "kc_db_lock_acquire >/dev/null 2>&1" \
         "after the holder's connection drops, the lock is acquirable again (auto-release)"
-    # And releasing ours frees it too.
+    # And releasing ours frees it too — and leaves NO live psql and NO zombie behind.
+    kc_db_lock_acquire >/dev/null 2>&1
+    _held_pid="$_KC_DBLOCK_PID"
     kc_db_lock_release
     assert_equals "false" "$_KC_DBLOCK_HELD" "release clears the held flag"
+    sleep 1
+    assert_false "kill -0 '$_held_pid' 2>/dev/null" \
+        "the held psql is dead after release (no orphaned connection)"
+    assert_empty "$(ps -o stat= -p "$_held_pid" 2>/dev/null | grep Z || true)" \
+        "and it is reaped, not left a zombie"
 else
     skip_test "no reachable PostgreSQL (set KC_TESTDB_* to enable the advisory-lock cases)"
 fi
