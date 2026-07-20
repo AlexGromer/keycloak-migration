@@ -77,6 +77,31 @@ Path A (target 25) это ограничение не применяется.
 psql -h <pg-host> -U <pg-user> -d keycloak -tAc "SHOW server_version;"
 ```
 
+#### Свободное место на диске (preflight это ПРОВЕРЯЕТ и блокирует)
+
+Инструмент делает **дамп БД перед каждым хопом**, поэтому preflight требует свободного места на
+файловой системе **рабочего каталога (`WORK_DIR`)** — не под образы (они уже в сторе runtime).
+
+| Проверка | Где | Порог | Как изменить |
+|---|---|---|---|
+| Базовый preflight | ФС каталога `WORK_DIR` | **512 МБ floor** (логи/state/temp) | `export MIN_DISK_FREE_MB=<N>` или сменить `WORK_DIR` |
+| Preflight v3.5 (backup space) | `WORK_DIR/backups` | **измеряется**: данные таблиц × 1.2 × число хопов | указать `--work-dir` на просторную ФС |
+
+```bash
+# найти ФС со свободным местом
+df -BG --output=avail,target -x tmpfs -x devtmpfs | sort -rn | head -5
+
+# вариант 1 — указать рабочий каталог инструменту (безопасно: ваш каталог НИКОГДА не удаляется)
+scripts/migrate_oneshot.sh ... --work-dir /var/lib/kcwork --go
+# вариант 2 — для migrate_keycloak_v3.sh напрямую
+export WORK_DIR=/var/lib/kcwork
+# вариант 3 — снизить floor (обычно не нужно) или пропустить проверки
+export MIN_DISK_FREE_MB=256   #  ... либо  --skip-preflight
+```
+
+> По умолчанию `migrate_oneshot.sh` создаёт временный `WORK_DIR` в `$TMPDIR` — если там мало
+> места, preflight упадёт с `Disk space: NGB < 15GB required on <путь> (WORK_DIR)`.
+
 ### 0.2. Безопасность: работаем на клоне
 
 > ⚠️ **Миграция необратима в рамках одного прогона.** Liquibase (L1) и RealmMigration (L2)

@@ -53,6 +53,45 @@ _mv_psql() {
         -tAc "$sql" 2>/dev/null
 }
 
+# ============================================================================
+# ADR-008 — STATE RECONCILIATION PRIMITIVES
+# Read the ACTUAL state of the database. Checkpoints and the profile's `current_version` are
+# CLAIMS about the past; these functions report FACTS.
+# ============================================================================
+
+# kc_db_model_version
+#   Echo the version Keycloak last wrote to MIGRATION_MODEL — the ground truth for "where is this
+#   database, really". Returns 1 (echoing nothing) when the table/rows are absent (the DB was never
+#   initialised by Keycloak) or the database is unreachable.
+kc_db_model_version() {
+    command -v psql >/dev/null 2>&1 || return 1
+    local raw
+    raw="$(_mv_psql "SELECT version FROM MIGRATION_MODEL ORDER BY update_time DESC LIMIT 1;" || true)"
+    [[ -n "$raw" ]] || raw="$(_mv_psql "SELECT version FROM MIGRATION_MODEL LIMIT 1;" || true)"
+    raw="$(printf '%s' "$raw" | tr -d '[:space:]')"
+    [[ -n "$raw" ]] || return 1
+    printf '%s' "$raw"
+}
+
+# kc_db_changelog_locked
+#   Liquibase sets LOCKED=true while migrating and clears it when done. A migration that crashed
+#   mid-flight leaves the lock HELD — and every later Keycloak then blocks on it. Keycloak uses
+#   SEVERAL lock ids (1, 1000, 1001, …), so all rows are checked.
+#   Echoes "id|lockedby|lockgranted" per held lock; returns 1 when nothing is locked.
+kc_db_changelog_locked() {
+    command -v psql >/dev/null 2>&1 || return 1
+    local rows
+    rows="$(_mv_psql "SELECT id || '|' || COALESCE(lockedby,'?') || '|' || COALESCE(lockgranted::text,'?') FROM databasechangeloglock WHERE locked;" || true)"
+    rows="$(printf '%s\n' "$rows" | sed '/^[[:space:]]*$/d')"
+    [[ -n "$rows" ]] || return 1
+    printf '%s\n' "$rows"
+}
+
+# kc_db_clear_changelog_lock — release a stale Liquibase lock (explicit opt-in only).
+kc_db_clear_changelog_lock() {
+    _mv_psql "UPDATE databasechangeloglock SET locked=false, lockedby=null, lockgranted=null WHERE locked;" >/dev/null 2>&1
+}
+
 # Rewrite a "CREATE INDEX ..." statement into a CONCURRENTLY variant
 # (case-insensitive). Already-concurrent or non-matching statements pass through.
 _mv_to_concurrent() {
@@ -220,4 +259,8 @@ kc_check_skipped_indexes() {
 if [[ "${BASH_SOURCE[0]}" != "${0}" ]]; then
     export -f kc_verify_migration_model
     export -f kc_check_skipped_indexes
+    # ADR-008 state-reconciliation primitives
+    export -f kc_db_model_version
+    export -f kc_db_changelog_locked
+    export -f kc_db_clear_changelog_lock
 fi

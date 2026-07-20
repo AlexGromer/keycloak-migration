@@ -56,6 +56,17 @@ img_build() {
     local ref
     ref="$(dist_image_ref "$v")"
 
+    # Reuse an image that is already on the host instead of rebuilding it from a base OS.
+    #
+    # The harness was Phase-1 build-only: every hop rebuilt FROM the sovereign base (Astra/RED OS).
+    # That base is licensed and not always present — in this repo it is a placeholder ref that does
+    # not exist — so a live harness run against images that were ALREADY built and loaded died at
+    # the build step. When IMG_SKIP_IF_PRESENT=true and the target image is present, use it.
+    if [[ "${IMG_SKIP_IF_PRESENT:-false}" == "true" ]] && cr image inspect "$ref" >/dev/null 2>&1; then
+        log_info "Reusing image already present: $ref (IMG_SKIP_IF_PRESENT=true, no rebuild)"
+        return 0
+    fi
+
     log_info "Building Keycloak image: $ref (base=$base, jdk=$jdk, containerfile=$cf)"
 
     cr build \

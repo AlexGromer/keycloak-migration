@@ -364,6 +364,62 @@ kc_health_check() {
     esac
 }
 
+# kc_health_probe <mode> <endpoint> [container_or_ns] [compose_file]
+#   Echo the HTTP status code the health endpoint answers with; "000" when it cannot be reached
+#   at all.
+#
+#   kc_health_check collapses everything into pass/fail, which cannot distinguish the two cases
+#   that matter here:
+#     404 — Keycloak is UP and answering, but does not serve health. It only does so with
+#           KC_HEALTH_ENABLED=true, and from KC 25 on the endpoint lives on the MANAGEMENT port
+#           (9000), not 8080. That is a fact about the deployment's configuration.
+#     000 — nothing answered: wrong port, container down, network unreachable.
+#   Treating the first as "unhealthy" is what let a 404 roll back a migration that had already
+#   succeeded. Callers need the code, not a verdict.
+kc_health_probe() {
+    local mode="${1:-standalone}"
+    local endpoint="${2:-}"
+    shift 2
+    local args=("$@")
+
+    # -w '%{http_code}' prints the status (or "000" when the transfer never completed) and, unlike
+    # -f, exits 0 on a 4xx — so the code survives to be read.
+    local -a curl_args=(-s -o /dev/null -w '%{http_code}' --max-time 10)
+    local code=""
+
+    case "$mode" in
+        standalone)
+            code=$(curl "${curl_args[@]}" "$endpoint" 2>/dev/null) || true
+            ;;
+
+        docker|podman|run)
+            code=$(cr exec "${args[0]:-keycloak}" \
+                curl "${curl_args[@]}" "$endpoint" 2>/dev/null) || true
+            ;;
+
+        docker-compose)
+            # -T: no TTY. Without it this hangs when stdin is not a terminal (CI, cron).
+            # shellcheck disable=SC2046  # cr_compose returns command words
+            code=$($(cr_compose) -f "${args[1]:-docker-compose.yml}" exec -T "${args[0]:-keycloak}" \
+                curl "${curl_args[@]}" "$endpoint" 2>/dev/null) || true
+            ;;
+
+        kubernetes|deckhouse)
+            local ns pod
+            if [[ "$mode" == "deckhouse" ]]; then ns="d8-keycloak"; else ns="${args[0]:-keycloak}"; fi
+            pod=$(kubectl get pods -l app=keycloak -n "$ns" \
+                -o jsonpath='{.items[0].metadata.name}' 2>/dev/null) || true
+            if [[ -n "$pod" ]]; then
+                code=$(kubectl exec "$pod" -n "$ns" -- \
+                    curl "${curl_args[@]}" "$endpoint" 2>/dev/null) || true
+            fi
+            ;;
+    esac
+
+    code="$(printf '%s' "$code" | tr -cd '0-9')"
+    printf '%s' "${code:-000}"
+}
+
 # ============================================================================
 # Configuration Management
 # ============================================================================
@@ -504,6 +560,36 @@ kc_get_version() {
 # Transient Migrating Container (run mode)
 # ============================================================================
 
+# _kc_db_suffix — a short, stable token identifying the TARGET database (host:port:db).
+# Empty identity -> empty token (unchanged names for setups that never set the DB coordinates).
+_kc_db_suffix() {
+    local id="${PROFILE_DB_HOST:-}:${PROFILE_DB_PORT:-}:${PROFILE_DB_NAME:-}"
+    [[ "$id" == "::" ]] && return 0
+    printf '%s' "$id" | { sha1sum 2>/dev/null || cksum; } | cut -c1-8
+}
+
+# kc_run_container_name <version> — the transient container name for a hop.
+#
+# Names are now UNIQUE PER DATABASE (kc-migrate-<version>-<db-token>), not just per version. Two
+# migrations against DIFFERENT databases on one host therefore get different container names and run
+# in parallel without one's cleanup removing the other's container — real isolation, not just
+# detection. The same database always maps to the same name (and the DB advisory lock, ADR-011,
+# refuses a second run there regardless). An explicit PROFILE_KC_RUN_CONTAINER_NAME still wins, and
+# the leftover-container scan still globs `kc-migrate-*`.
+kc_run_container_name() {
+    local version="$1" suf
+    if [[ -n "${PROFILE_KC_RUN_CONTAINER_NAME:-}" ]]; then
+        printf '%s' "$PROFILE_KC_RUN_CONTAINER_NAME"
+        return 0
+    fi
+    suf="$(_kc_db_suffix)"
+    if [[ -n "$suf" ]]; then
+        printf 'kc-migrate-%s-%s' "$version" "$suf"
+    else
+        printf 'kc-migrate-%s' "$version"
+    fi
+}
+
 kc_run_migrating_container() {
     # Boot a transient Keycloak container of <version> against the configured
     # PostgreSQL. Keycloak runs Liquibase + RealmMigration on startup.
@@ -511,7 +597,7 @@ kc_run_migrating_container() {
     # database; override with PROFILE_KC_RUN_NETWORK (e.g. a user-defined bridge).
     # Usage: kc_run_migrating_container <version>
     local version="$1"
-    local container_name="${PROFILE_KC_RUN_CONTAINER_NAME:-kc-migrate-${version}}"
+    local container_name; container_name="$(kc_run_container_name "$version")"
     local network_opt="--network=${PROFILE_KC_RUN_NETWORK:-host}"
 
     local db_host="${PROFILE_DB_HOST:-localhost}"
@@ -524,19 +610,60 @@ kc_run_migrating_container() {
     local image_ref
     image_ref=$(dist_image_ref "$version")
 
+    # Keycloak 24+ in PRODUCTION mode (`start --optimized`) refuses to boot with only the DB
+    # settings. Observed on a live run (KC 24.0.5 exited 1 immediately, so Liquibase never ran):
+    #   ERROR: Strict hostname resolution configured but no hostname setting provided
+    #   ERROR: Failed to start quarkus
+    # and, with no HTTPS key material, it also demands http be explicitly enabled.
+    #
+    # This container is a TRANSIENT MIGRATION boot — nobody connects to it; we only need Keycloak
+    # to run Liquibase (L1) + RealmMigration (L2) and exit. So relax both. Override per profile
+    # with PROFILE_KC_RUN_HOSTNAME_STRICT / PROFILE_KC_RUN_HTTP_ENABLED / PROFILE_KC_RUN_HOSTNAME.
+    local hostname_strict="${PROFILE_KC_RUN_HOSTNAME_STRICT:-false}"
+    local http_enabled="${PROFILE_KC_RUN_HTTP_ENABLED:-true}"
+
+    local -a run_env=(
+        -e KC_DB=postgres
+        -e KC_DB_URL="$jdbc_url"
+        -e KC_DB_USERNAME="$db_user"
+        -e KC_DB_PASSWORD="$db_pass"
+        -e KC_HOSTNAME_STRICT="$hostname_strict"
+        -e KC_HTTP_ENABLED="$http_enabled"
+    )
+    [[ -n "${PROFILE_KC_RUN_HOSTNAME:-}" ]] && run_env+=(-e KC_HOSTNAME="${PROFILE_KC_RUN_HOSTNAME}")
+
     if [[ "${DRY_RUN:-false}" == "true" || "${KC_VERBOSE:-false}" == "true" ]]; then
-        echo "DRY-RUN: cr run -d --name $container_name $network_opt -e KC_DB=postgres -e KC_DB_URL=$jdbc_url -e KC_DB_USERNAME=$db_user -e KC_DB_PASSWORD=*** $image_ref start --optimized" >&2
+        echo "DRY-RUN: cr run -d --name $container_name $network_opt -e KC_DB=postgres -e KC_DB_URL=$jdbc_url -e KC_DB_USERNAME=$db_user -e KC_DB_PASSWORD=*** -e KC_HOSTNAME_STRICT=$hostname_strict -e KC_HTTP_ENABLED=$http_enabled $image_ref start --optimized" >&2
         [[ "${DRY_RUN:-false}" == "true" ]] && return 0
     fi
 
     cr run -d --name "$container_name" \
         "$network_opt" \
-        -e KC_DB=postgres \
-        -e KC_DB_URL="$jdbc_url" \
-        -e KC_DB_USERNAME="$db_user" \
-        -e KC_DB_PASSWORD="$db_pass" \
+        "${run_env[@]}" \
         "$image_ref" \
-        start --optimized
+        start --optimized || {
+        log_error "Failed to start migration container '$container_name'"
+        return 1
+    }
+
+    # Verify the boot actually TOOK, right now. A mis-configured Keycloak exits within a second or
+    # two, and a container that is already gone cannot be diagnosed afterwards — so capture the
+    # state and the logs immediately, while they still exist.
+    sleep 3
+    local st
+    st=$(cr inspect -f '{{.State.Status}}' "$container_name" 2>/dev/null | tr -d '[:space:]' || true)
+    : "${st:=missing}"
+    if [[ "$st" != "running" ]]; then
+        local rc_exit
+        rc_exit=$(cr inspect -f '{{.State.ExitCode}}' "$container_name" 2>/dev/null | tr -d '[:space:]' || true)
+        log_error "Migration container '$container_name' is '${st}' 3s after start (exit=${rc_exit:-?})"
+        log_warn "Container logs:"
+        if ! cr logs "$container_name" 2>&1 | tail -40 | sed 's/^/  /'; then
+            log_warn "  (no logs — the container is already gone)"
+        fi
+        return 1
+    fi
+    log_success "Migration container '$container_name' is running"
 }
 
 kc_run_stop_container() {
@@ -545,6 +672,73 @@ kc_run_stop_container() {
     local container_name="${1:-${PROFILE_KC_RUN_CONTAINER_NAME:-keycloak}}"
     cr stop "$container_name" 2>/dev/null || true
     cr rm "$container_name" 2>/dev/null || true
+}
+
+# ============================================================================
+# Verification Container (`verify` subcommand)
+# ============================================================================
+
+# kc_run_verify_container <version> [container_name]
+#   Boot the TARGET image against the migrated database for an acceptance test. The image is the one
+#   that performed the migration — verifying against a "standard" Keycloak of the same version would
+#   test a different artifact than the one you are about to run.
+#
+#   NOTE on health: KC_HEALTH_ENABLED is a BUILD-time option. A sovereign image is pre-built with
+#   `start --optimized`, and passing a build-time option that differs from the baked value makes it
+#   refuse to start (exit 2) — which is exactly what broke the first verify attempt. So we do NOT
+#   force health on; readiness is taken from the startup log ("Listening on"/"started in"), and the
+#   real acceptance test is the Admin API smoke run. Ports are published on a bridge network so the
+#   smoke test on the host can reach 8080.
+kc_run_verify_container() {
+    local version="$1"
+    local container_name="${2:-kc-verify-${version}}"
+    local network="${PROFILE_KC_RUN_NETWORK:-host}"
+
+    local db_host="${PROFILE_DB_HOST:-localhost}"
+    local db_port="${PROFILE_DB_PORT:-5432}"
+    local db_name="${PROFILE_DB_NAME:-keycloak}"
+    local db_user="${PROFILE_DB_USER:-keycloak}"
+    local db_pass="${PROFILE_DB_PASSWORD:-${KC_DB_PASSWORD:-}}"
+    local jdbc_url="jdbc:postgresql://${db_host}:${db_port}/${db_name}"
+
+    local image_ref
+    image_ref=$(dist_image_ref "$version")
+
+    local -a run_args=(--network="$network")
+    # Host networking already exposes both ports on the host; publishing them again is an error.
+    if [[ "$network" != "host" ]]; then
+        run_args+=(-p "${VERIFY_HTTP_PORT:-8080}:8080" -p "${VERIFY_MGMT_PORT:-9000}:9000")
+    fi
+
+    # Same env as the migrating boot — NO KC_HEALTH_ENABLED (build-time; fatal on an optimized image).
+    local -a run_env=(
+        -e KC_DB=postgres
+        -e KC_DB_URL="$jdbc_url"
+        -e KC_DB_USERNAME="$db_user"
+        -e KC_DB_PASSWORD="$db_pass"
+        -e KC_HOSTNAME_STRICT="${PROFILE_KC_RUN_HOSTNAME_STRICT:-false}"
+        -e KC_HTTP_ENABLED="${PROFILE_KC_RUN_HTTP_ENABLED:-true}"
+    )
+    [[ -n "${PROFILE_KC_RUN_HOSTNAME:-}" ]] && run_env+=(-e KC_HOSTNAME="${PROFILE_KC_RUN_HOSTNAME}")
+
+    if [[ "${DRY_RUN:-false}" == "true" ]]; then
+        echo "DRY-RUN: cr run -d --name $container_name --network=$network -e KC_DB=postgres -e KC_DB_URL=$jdbc_url -e KC_DB_PASSWORD=*** $image_ref start --optimized" >&2
+        return 0
+    fi
+
+    # A leftover from an earlier verify would make `cr run` fail on the name.
+    cr rm -f "$container_name" >/dev/null 2>&1 || true
+
+    cr run -d --name "$container_name" \
+        "${run_args[@]}" \
+        "${run_env[@]}" \
+        "$image_ref" \
+        start --optimized || {
+        log_error "Failed to start verification container '$container_name' from $image_ref"
+        return 1
+    }
+
+    log_success "Verification container '$container_name' started ($image_ref)"
 }
 
 # ============================================================================

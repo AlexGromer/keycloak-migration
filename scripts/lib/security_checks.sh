@@ -137,7 +137,11 @@ run_shellcheck_single() {
     local output
     local exit_code=0
 
-    output=$(shellcheck -s bash -S "$severity" -f gcc "$script_file" 2>&1) || exit_code=$?
+    # Use the SAME exclusions as CI (.github/workflows/ci.yml: -e SC2086,SC2155,SC1091), otherwise
+    # the scan screams "CRITICAL" about style findings the project deliberately accepts.
+    output=$(shellcheck -s bash -S "$severity" \
+        -e "${SEC_SHELLCHECK_EXCLUDE:-SC2086,SC2155,SC1091}" \
+        -f gcc "$script_file" 2>&1) || exit_code=$?
 
     if [[ $exit_code -eq 0 ]]; then
         sec_log_success "ShellCheck: No issues in $script_file"
@@ -148,10 +152,15 @@ run_shellcheck_single() {
         local high_count=0
         local medium_count=0
 
-        # Count issues by severity (ShellCheck SC codes)
-        critical_count=$(echo "$output" | grep -c "SC1" || echo "0")  # Syntax errors
-        high_count=$(echo "$output" | grep -c "SC2" || echo "0")      # Semantic issues
-        medium_count=$(echo "$output" | grep -c "SC3\|SC4" || echo "0") # Style issues
+        # Count issues by severity (ShellCheck SC codes).
+        # NB: `grep -c` ALREADY prints "0" when nothing matches (and exits 1). The old
+        # `|| echo "0"` therefore appended a SECOND "0", so the variable became "0\n0" and the
+        # comparison below blew up with:
+        #   security_checks.sh: line 159: [[: 0\n0: arithmetic syntax error (error token is "0")
+        critical_count=$(echo "$output" | grep -c "SC1" || true)  # Syntax errors
+        high_count=$(echo "$output" | grep -c "SC2" || true)      # Semantic issues
+        medium_count=$(echo "$output" | grep -c "SC3\|SC4" || true) # Style issues
+        : "${critical_count:=0}" "${high_count:=0}" "${medium_count:=0}"
 
         sec_log_warn "ShellCheck found issues in $script_file:"
         echo "$output" | head -20

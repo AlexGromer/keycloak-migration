@@ -154,7 +154,7 @@ counter=$((counter + 1))
 
 **Update relevant docs when changing:**
 - **README.md** — User-facing features
-- **V3_ARCHITECTURE.md** — Architecture changes
+- **ARCHITECTURE.md** — architectural decisions (add an ADR)
 - **CONTRIBUTING.md** — Development workflow changes
 - **Inline comments** — Complex logic
 
@@ -278,7 +278,7 @@ keycloak-migration/
 │
 ├── README.md                       # User documentation
 ├── CONTRIBUTING.md                 # This file
-└── V3_ARCHITECTURE.md              # Design docs
+└── ARCHITECTURE.md                 # ADRs + change log
 ```
 
 ---
@@ -353,7 +353,7 @@ source ./lib/not_found_by_shellcheck.sh
 
 3. **Update docs:**
    - README.md — Add to supported databases
-   - V3_ARCHITECTURE.md — Document implementation
+   - ARCHITECTURE.md — add an ADR for the decision
 
 ### Add New Deployment Mode
 
@@ -375,7 +375,7 @@ migrate_new_strategy() {
 
 - **Issues:** https://github.com/AlexGromer/keycloak-migration/issues
 - **Discussions:** https://github.com/AlexGromer/keycloak-migration/discussions
-- **Documentation:** [README.md](README.md), [V3_ARCHITECTURE.md](V3_ARCHITECTURE.md)
+- **Documentation:** [README.md](README.md), [ARCHITECTURE.md](ARCHITECTURE.md), [QUICKSTART.md](QUICKSTART.md)
 
 ---
 

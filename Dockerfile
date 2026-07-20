@@ -4,8 +4,8 @@
 FROM ubuntu:22.04
 
 LABEL maintainer="AlexGromer <alexei.pape@yandex.ru>"
-LABEL description="Keycloak Migration Tool v3.0 — Universal migration framework"
-LABEL version="3.0.0"
+LABEL description="Keycloak Migration Tool — container-hop migration framework"
+LABEL version="3.9.2"
 
 # ============================================================================
 # Install Dependencies
@@ -51,8 +51,14 @@ COPY profiles/ ./profiles/
 COPY tests/ ./tests/
 
 # Copy documentation
-COPY README.md CONTRIBUTING.md CHANGELOG.md LICENSE SECURITY.md ./
-COPY V3_*.md QUICK_START.md AUTO_DISCOVERY_DEMO.md ./ 2>/dev/null || true
+#
+# There is no shell here, so `COPY a b ./ 2>/dev/null || true` did not mean "copy if present" —
+# `2>/dev/null`, `||` and `true` were parsed as three more source paths. `docker build .` failed
+# outright. No workflow builds this image, so nobody found out.
+COPY README.md QUICKSTART.md ARCHITECTURE.md CONTRIBUTING.md CHANGELOG.md LICENSE SECURITY.md ./
+COPY docs/ ./docs/
+COPY config/ ./config/
+COPY containerfiles/ ./containerfiles/
 
 # Set executable permissions
 RUN chmod +x scripts/*.sh scripts/lib/*.sh tests/*.sh

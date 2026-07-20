@@ -12,8 +12,8 @@ Which documentation needs improvement?
 
 - [ ] README.md
 - [ ] CONTRIBUTING.md
-- [ ] V3_ARCHITECTURE.md
-- [ ] QUICK_START.md
+- [ ] ARCHITECTURE.md
+- [ ] QUICKSTART.md
 - [ ] Auto-discovery guide
 - [ ] Code comments
 - [ ] Other: _______________

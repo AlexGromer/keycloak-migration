@@ -175,6 +175,12 @@ harness_main() {
     export PROFILE_KC_DISTRIBUTION_MODE="container"
     export PROFILE_CONTAINER_ACQUISITION="build"
 
+    # Reuse per-hop images that are already loaded (e.g. from a bundle) instead of rebuilding each
+    # from the sovereign base. The base is licensed and often absent; without this a live run
+    # against pre-built images dies at the first build. Override with IMG_SKIP_IF_PRESENT=false to
+    # force a genuine build-from-base.
+    export IMG_SKIP_IF_PRESENT="${IMG_SKIP_IF_PRESENT:-true}"
+
     # Point every component at the throwaway PG on the shared bridge.
     export PROFILE_DB_TYPE="postgresql"
     export PROFILE_DB_HOST="$HARNESS_PG_NAME"

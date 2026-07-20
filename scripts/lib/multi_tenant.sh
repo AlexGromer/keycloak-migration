@@ -328,14 +328,31 @@ mt_execute_parallel() {
 
     log_success "Launched $count parallel workers"
 
+    # Record the workers so the run's EXIT/interrupt teardown kills them if we die before the wait
+    # loop below — otherwise an interrupted parent leaves N migrations running in the background.
+    # (Guarded: the global lives in migrate_keycloak_v3.sh; harmless if unset under standalone use.)
+    if declare -p _KC_MT_WORKER_PIDS >/dev/null 2>&1; then
+        _KC_MT_WORKER_PIDS=("${pids[@]}")
+    fi
+
     # Monitor progress
     mt_monitor_parallel "$type" "${names[@]}" "${pids[@]}"
 
-    # Wait for all to complete
+    # Wait for all to complete — BOUNDED. A hung worker must not hang the whole migration: give each
+    # its per-version timeout, then kill it and count it failed. Plain `wait "$pid"` had no bound.
     local failed=0
+    local deadline=$(( $(date +%s) + ${PROFILE_MIGRATION_TIMEOUT:-900} ))
     for ((i=0; i<${#pids[@]}; i++)); do
         local pid="${pids[$i]}"
         local name="${names[$i]}"
+
+        while kill -0 "$pid" 2>/dev/null && [[ "$(date +%s)" -lt "$deadline" ]]; do
+            sleep 2
+        done
+        if kill -0 "$pid" 2>/dev/null; then
+            log_error "$type $name exceeded the ${PROFILE_MIGRATION_TIMEOUT:-900}s timeout — killing"
+            kill "$pid" 2>/dev/null || true
+        fi
 
         if wait "$pid"; then
             log_success "$type $name completed successfully"
@@ -344,6 +361,11 @@ mt_execute_parallel() {
             failed=$((failed + 1))
         fi
     done
+
+    # Reaped normally — nothing left for the teardown to kill.
+    if declare -p _KC_MT_WORKER_PIDS >/dev/null 2>&1; then
+        _KC_MT_WORKER_PIDS=()
+    fi
 
     if [[ $failed -gt 0 ]]; then
         log_error "$failed ${type}(s) failed"

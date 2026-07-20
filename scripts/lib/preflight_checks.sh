@@ -19,9 +19,24 @@ set -euo pipefail
 # CONSTANTS
 # ============================================================================
 
-readonly MIN_DISK_SPACE_GB=10        # Minimum free disk space (GB)
+# A floor, not a budget. The real backup requirement is COMPUTED from the database (see
+# check_backup_space); this only reserves room for logs, the state file and psql temp files.
+#
+# It used to be `MIN_DISK_SPACE_GB=10`, checked BEFORE the database size was even known — so a host
+# with 8 GB free refused to migrate a 50 MB database. An arbitrary number cannot know what your
+# migration needs; measuring it can.
+readonly MIN_DISK_FREE_MB=512        # Floor: logs, state, temp (NOT the backup — that is computed)
 readonly MIN_MEMORY_GB=2             # Minimum free memory (GB)
-readonly MIN_BACKUP_SPACE_MULTIPLIER=3  # Backup space = DB size × 3
+
+# What actually lands in a pg_dump, per GB of heap.
+#
+# The old multiplier was `db_size × 3`, where db_size = pg_database_size() — which INCLUDES indexes.
+# pg_dump does not dump indexes; it dumps CREATE INDEX statements (a few KB) and the heap, then
+# gzips it. For a 200 GB database with 80 GB of indexes that demanded 600 GB for a dump that would
+# have been ~30 GB — refusing a migration there was room for. We now size from the heap alone and
+# keep a modest cushion for the incompressible worst case.
+readonly BACKUP_HEAP_MULTIPLIER_PCT=120   # required = heap × 1.2 (uncompressed worst case + slack)
+
 readonly NETWORK_TIMEOUT=5           # Network connectivity timeout (seconds)
 readonly DB_HEALTH_TIMEOUT=10        # Database health check timeout (seconds)
 
@@ -70,27 +85,29 @@ preflight_log_section() {
 # ============================================================================
 
 check_disk_space() {
-    preflight_log_section "1. DISK SPACE CHECK"
+    preflight_log_section "1. DISK SPACE FLOOR"
 
     local backup_dir="${1:-/tmp}"
-    local required_space_gb="${2:-$MIN_DISK_SPACE_GB}"
+    local required_mb="${2:-$MIN_DISK_FREE_MB}"
 
-    preflight_log_info "Checking disk space on: $backup_dir"
-    preflight_log_info "Required: ${required_space_gb}GB minimum"
+    # This is the FLOOR only — room for logs, the state file and temp. The backup requirement is
+    # measured from the database in check_backup_space, which runs after we know how big it is.
+    preflight_log_info "Checking working space on: $backup_dir"
+    preflight_log_info "Floor: ${required_mb}MB (logs/state/temp — the backup is sized separately)"
 
-    # Get available space in GB
-    local available_space_gb
-    available_space_gb=$(df -BG "$backup_dir" | awk 'NR==2 {gsub(/G/, "", $4); print $4}')
+    local available_mb
+    available_mb=$(df -BM "$backup_dir" 2>/dev/null | awk 'NR==2 { gsub(/M/, "", $4); print $4 + 0 }')
+    : "${available_mb:=0}"
 
-    preflight_log_info "Available space: ${available_space_gb}GB"
+    preflight_log_info "Available space: ${available_mb}MB"
 
-    if (( available_space_gb < required_space_gb )); then
-        preflight_log_error "Insufficient disk space: ${available_space_gb}GB < ${required_space_gb}GB"
-        preflight_log_error "Free up space or specify different backup location"
+    if (( available_mb < required_mb )); then
+        preflight_log_error "Insufficient working space: ${available_mb}MB < ${required_mb}MB"
+        preflight_log_error "Free up space or point --work-dir at a roomier filesystem"
         return $EXIT_DISK_SPACE
     fi
 
-    preflight_log_success "Disk space: ${available_space_gb}GB (OK)"
+    preflight_log_success "Working space: ${available_mb}MB (OK)"
     return 0
 }
 
@@ -131,18 +148,21 @@ check_network_connectivity() {
 
     preflight_log_info "Testing connectivity to: $host:$port"
 
-    # Test using timeout and nc (netcat) or bash built-in
-    if command -v nc >/dev/null 2>&1; then
-        if timeout "$NETWORK_TIMEOUT" nc -zv "$host" "$port" 2>&1 | grep -q "succeeded\|open"; then
-            preflight_log_success "Network: $host:$port (reachable)"
-            return 0
-        fi
-    else
-        # Fallback: bash TCP test
-        if timeout "$NETWORK_TIMEOUT" bash -c "echo > /dev/tcp/$host/$port" 2>/dev/null; then
-            preflight_log_success "Network: $host:$port (reachable)"
-            return 0
-        fi
+    # Probe with bash's own TCP redirection FIRST — it is implementation-independent.
+    # NEVER parse nc's output: the wording differs per flavour (netcat-openbsd prints
+    # "succeeded", ncat/nmap prints "Connected to", netcat-traditional prints nothing), which
+    # produced FALSE "UNREACHABLE" verdicts on hosts where nc is ncat — even though psql
+    # connected to the very same host:port.
+    if timeout "$NETWORK_TIMEOUT" bash -c "exec 3<>/dev/tcp/${host}/${port}" 2>/dev/null; then
+        preflight_log_success "Network: $host:$port (reachable)"
+        return 0
+    fi
+
+    # Fallback: nc, judged by its EXIT CODE only (never by its message).
+    if command -v nc >/dev/null 2>&1 &&
+       timeout "$NETWORK_TIMEOUT" nc -z "$host" "$port" >/dev/null 2>&1; then
+        preflight_log_success "Network: $host:$port (reachable)"
+        return 0
     fi
 
     preflight_log_error "Network: $host:$port (UNREACHABLE)"
@@ -273,7 +293,7 @@ check_database_size() {
 
     if [[ -n "$size_bytes" && "$size_bytes" -gt 0 ]]; then
         size_gb=$(echo "scale=2; $size_bytes / 1024 / 1024 / 1024" | bc -l 2>/dev/null || echo "0")
-        preflight_log_info "Database size: ${size_gb}GB"
+        preflight_log_info "Database size: ${size_gb}GB (on disk, indexes included)"
         preflight_log_success "Database size check: OK"
 
         # Export for backup space calculation
@@ -281,6 +301,76 @@ check_database_size() {
     else
         preflight_log_warn "Could not retrieve database size"
         export PREFLIGHT_DB_SIZE_GB="10"  # Default fallback
+    fi
+
+    # What will actually land in the dump — a different number, and the one that matters.
+    #
+    # pg_database_size() counts indexes; pg_dump does not dump them (it dumps the CREATE INDEX
+    # statements, which are kilobytes). Sizing a backup from pg_database_size overstates it by
+    # however much of the database is index — commonly 30-50% for Keycloak.
+    export PREFLIGHT_DUMP_HEAP_MB=""
+    if [[ "$db_type" == "postgresql" || "$db_type" == "cockroachdb" ]]; then
+        local heap_bytes
+        heap_bytes=$(PGPASSWORD="$pass" psql -h "$host" -p "$port" -U "$user" -d "$db_name" -tAc "
+            SELECT COALESCE(sum(pg_relation_size(c.oid)), 0)
+            FROM pg_class c
+            JOIN pg_namespace n ON n.oid = c.relnamespace
+            WHERE c.relkind IN ('r','p')
+              AND n.nspname NOT IN ('pg_catalog', 'information_schema');" 2>/dev/null | tr -cd '0-9')
+
+        if [[ -n "$heap_bytes" ]]; then
+            PREFLIGHT_DUMP_HEAP_MB=$(awk -v b="$heap_bytes" 'BEGIN { printf "%d", (b / 1048576) + 0.5 }')
+            export PREFLIGHT_DUMP_HEAP_MB
+            preflight_log_info "Table data (what pg_dump actually writes): ${PREFLIGHT_DUMP_HEAP_MB}MB"
+        else
+            preflight_log_warn "Could not measure table data — backup sizing falls back to total DB size"
+        fi
+
+        check_large_tables "$host" "$port" "$user" "$pass" "$db_name"
+    fi
+
+    return 0
+}
+
+# check_large_tables — warn about tables Keycloak will REFUSE to index during the migration.
+#
+# Above roughly 300k rows Keycloak skips CREATE INDEX at startup rather than block the boot, and
+# logs the DDL instead. The migration then succeeds — with indexes missing. Nothing goes bang; the
+# database is simply slow afterwards, and the cause is a log line nobody read.
+#
+# The tool already captures that DDL (kc_check_skipped_indexes) but only APPLIES it when
+# PROFILE_APPLY_SKIPPED_INDEXES=true, which nothing sets. So say it BEFORE the migration, while
+# turning it on is still a decision rather than an incident.
+check_large_tables() {
+    local host="$1" port="$2" user="$3" pass="$4" db_name="$5"
+    local threshold="${KC_INDEX_SKIP_ROW_THRESHOLD:-300000}"
+
+    local rows
+    rows=$(PGPASSWORD="$pass" psql -h "$host" -p "$port" -U "$user" -d "$db_name" -tAc "
+        SELECT c.relname || ' (' || c.reltuples::bigint || ' rows)'
+        FROM pg_class c
+        JOIN pg_namespace n ON n.oid = c.relnamespace
+        WHERE c.relkind = 'r'
+          AND n.nspname NOT IN ('pg_catalog', 'information_schema')
+          AND c.reltuples > ${threshold}
+        ORDER BY c.reltuples DESC
+        LIMIT 10;" 2>/dev/null)
+
+    [[ -n "$rows" ]] || return 0
+
+    preflight_log_warn "Tables above Keycloak's ${threshold}-row index threshold:"
+    printf '%s\n' "$rows" | while IFS= read -r line; do
+        [[ -n "$line" ]] && preflight_log_warn "    ${line}"
+    done
+    preflight_log_warn "Keycloak will SKIP creating indexes on these and log the DDL instead."
+    preflight_log_warn "The migration will succeed; the database will be slow, with indexes missing."
+
+    if [[ "${PROFILE_APPLY_SKIPPED_INDEXES:-false}" == "true" ]]; then
+        preflight_log_info "--apply-indexes is ON: the skipped indexes will be created CONCURRENTLY."
+    else
+        preflight_log_warn "Pass --apply-indexes (or PROFILE_APPLY_SKIPPED_INDEXES=true) to create"
+        preflight_log_warn "them CONCURRENTLY after each hop. Otherwise apply the generated"
+        preflight_log_warn "skipped_indexes_<version>.sql by hand."
     fi
 
     return 0
@@ -420,27 +510,46 @@ check_backup_space() {
     preflight_log_section "10. BACKUP SPACE CHECK"
 
     local backup_dir="${1}"
-    local db_size_gb="${PREFLIGHT_DB_SIZE_GB:-10}"
 
-    # Calculate required backup space (DB size × 3 for safety)
-    local required_space_gb
-    required_space_gb=$(echo "scale=0; $db_size_gb * $MIN_BACKUP_SPACE_MULTIPLIER" | bc -l 2>/dev/null || echo "30")
+    # One backup is taken BEFORE EACH HOP, and they all stay on disk. 16 -> 24 -> 25 -> 26 is three
+    # backups, not one. This factor did not exist before: the check sized for a single dump and the
+    # migration then wrote three, filling the disk mid-run on exactly the large databases where the
+    # check mattered.
+    local hops="${PREFLIGHT_HOP_COUNT:-1}"
+    [[ "$hops" =~ ^[0-9]+$ ]] && (( hops >= 1 )) || hops=1
 
-    preflight_log_info "Database size: ${db_size_gb}GB"
-    preflight_log_info "Required backup space: ${required_space_gb}GB (3x DB size)"
+    # Size from the heap — the bytes pg_dump actually writes. Fall back to pg_database_size (indexes
+    # and all) only when the heap could not be measured; overestimating beats guessing low here.
+    local base_mb source_desc
+    if [[ -n "${PREFLIGHT_DUMP_HEAP_MB:-}" ]]; then
+        base_mb="$PREFLIGHT_DUMP_HEAP_MB"
+        source_desc="table data"
+    else
+        base_mb=$(awk -v g="${PREFLIGHT_DB_SIZE_GB:-0}" 'BEGIN { printf "%d", (g * 1024) + 0.5 }' 2>/dev/null || echo 0)
+        source_desc="total DB size (heap unavailable — conservative)"
+    fi
 
-    # Check available space
-    local available_space_gb
-    available_space_gb=$(df -BG "$backup_dir" | awk 'NR==2 {gsub(/G/, "", $4); print $4}')
+    # awk does the float math; bash arithmetic is integer-only and chokes on values like ".01".
+    local required_mb available_mb
+    required_mb=$(awk -v b="${base_mb:-0}" -v p="$BACKUP_HEAP_MULTIPLIER_PCT" -v h="$hops" \
+        'BEGIN { printf "%d", ((b * p / 100) * h) + 0.5 }' 2>/dev/null || echo 1)
+    (( required_mb < 1 )) && required_mb=1
 
-    preflight_log_info "Available space: ${available_space_gb}GB"
+    available_mb=$(df -BM "$backup_dir" 2>/dev/null | awk 'NR==2 { gsub(/M/, "", $4); print $4 + 0 }')
+    : "${available_mb:=0}"
 
-    if (( available_space_gb < required_space_gb )); then
-        preflight_log_error "Insufficient backup space: ${available_space_gb}GB < ${required_space_gb}GB"
+    preflight_log_info "Backup basis: ${base_mb}MB (${source_desc})"
+    preflight_log_info "Hops in this migration: ${hops} (one backup each, all retained)"
+    preflight_log_info "Required: ${required_mb}MB  = ${base_mb}MB x ${BACKUP_HEAP_MULTIPLIER_PCT}% x ${hops}"
+    preflight_log_info "Available: ${available_mb}MB in ${backup_dir}"
+
+    if (( available_mb < required_mb )); then
+        preflight_log_error "Insufficient backup space: ${available_mb}MB < ${required_mb}MB"
+        preflight_log_error "Free space, point --work-dir elsewhere, or lower the backup retention."
         return $EXIT_DISK_SPACE
     fi
 
-    preflight_log_success "Backup space: ${available_space_gb}GB (OK)"
+    preflight_log_success "Backup space: ${available_mb}MB available, ${required_mb}MB needed (OK)"
     return 0
 }
 
@@ -654,7 +763,9 @@ run_all_preflight_checks() {
     local failure_reasons=()
 
     # 1. System Resources
-    if check_disk_space "$backup_dir" "$MIN_DISK_SPACE_GB"; then
+    # The FLOOR only (logs/state/temp). The backup requirement is measured from the database in
+    # check_backup_space below — which is why the database must be sized before it, not after.
+    if check_disk_space "$backup_dir" "$MIN_DISK_FREE_MB"; then
         ((passed_checks++))
     else
         ((failed_checks++))

@@ -47,10 +47,10 @@
 | tests/test_migration_logic.sh | Migration flow tests | — |
 | tests/run_all_tests.sh | Test runner entry point | — |
 | tests/test_framework.sh | Shared test utilities | assert_eq(), setup(), teardown() |
-| ARCHITECTURE.md | System architecture overview | — |
-| V3_ARCHITECTURE.md | v3-specific architecture details | — |
-| KEYCLOAK_MIGRATION_PLAN.md | Migration runbook and plan | — |
-| keycloak-16-24-26-upgrade-runbook.md | Version-specific upgrade steps | — |
+| ARCHITECTURE.md | System architecture + ADR-001…010 + change log | — |
+| QUICKSTART.md | Recipient-facing instruction: params, image sources, per-step walkthrough, troubleshooting | — |
+| docs/MIGRATION_GUIDE.md | Full migration runbook | — |
+| docs/AIRGAP.md | Offline / sovereign delivery | — |
 | BACKLOG.md | Task backlog | — |
 | CHANGELOG.md | Version history | — |
 | SECURITY.md | Security policy | — |
@@ -85,6 +85,17 @@
 | tests/test_noninteractive.sh | Tests | — |
 | tests/test_config_wizard_run.sh | Tests | — |
 | tests/test_migrate_oneshot.sh | Tests | — |
+| tests/test_state_reconciliation.sh | Tests | — |
+| tests/test_health_not_a_gate.sh | Tests | — |
+| scripts/lib/data_integrity.sh | Shell script | — |
+| tests/test_data_integrity.sh | Tests | — |
+| tests/test_config_entrypoints.sh | Tests | — |
+| .github/workflows/release.yml | Configuration | — |
+| scripts/build_bundle.sh | Shell script | — |
+| QUICKSTART.md | Documentation | — |
+| tests/test_build_bundle.sh | Tests | — |
+| scripts/lib/db_lock.sh | Shell script | — |
+| tests/test_db_lock.sh | Tests | — |
 ## Directory Structure
 
 ```

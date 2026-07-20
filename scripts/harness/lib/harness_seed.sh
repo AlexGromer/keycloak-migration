@@ -40,11 +40,28 @@ harness_seed() {
         return 0
     fi
 
-    cr exec "$kc" "$HARNESS_KCADM" config credentials \
+    # Seeding is a NICE-TO-HAVE: it gives the integrity gate richer data than the default master
+    # realm. It is NOT a precondition for the run. If the base KC16 container will not stay up long
+    # enough to accept kcadm (some sovereign images init the schema and then exit — observed with
+    # astra-16.1.1), do NOT abort the whole rehearsal: warn, show WHY it died, and let the chain run
+    # against the default realm, which the integrity gate still checks across every hop.
+    if ! cr inspect -f '{{.State.Status}}' "$kc" 2>/dev/null | grep -qx running; then
+        log_warn "Base KC16 container '$kc' is not running — cannot seed via kcadm."
+        log_warn "Its schema is already initialised, so the run continues WITHOUT extra seed data."
+        log_warn "Why it exited (last 30 log lines):"
+        cr logs "$kc" 2>&1 | tail -30 | sed 's/^/    /' || true
+        return 0
+    fi
+
+    if ! cr exec "$kc" "$HARNESS_KCADM" config credentials \
         --server http://localhost:8080/auth --realm master \
-        --user "$admin" --password "${HARNESS_KC_ADMIN_PASSWORD:-}" || {
-        log_error "kcadm authentication failed"; return 1
-    }
+        --user "$admin" --password "${HARNESS_KC_ADMIN_PASSWORD:-}"; then
+        log_warn "kcadm authentication failed — continuing WITHOUT extra seed data."
+        log_warn "The integrity gate will still verify the default realm survives every hop."
+        log_warn "Base KC16 logs (last 30 lines):"
+        cr logs "$kc" 2>&1 | tail -30 | sed 's/^/    /' || true
+        return 0
+    fi
 
     local i j realm
     for ((i = 1; i <= realms; i++)); do

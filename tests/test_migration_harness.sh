@@ -1,5 +1,10 @@
 #!/usr/bin/env bash
 # Tests: Migration Test Harness (Phase 1 — dry-run plan + non-mutation)
+#
+# shellcheck disable=SC2030,SC2031  # PROFILE_* is set inside ( ) / $( ) subshells ON PURPOSE, to
+#                                     isolate each case — the "change might be lost" is the intent.
+# shellcheck disable=SC2329          # cr()/img_* stubs are invoked indirectly (command subst,
+#                                     sourced functions); shellcheck cannot see the call.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -44,6 +49,52 @@ describe "image ref override (dist_image_ref)"
     "final image ref honours {version} substitution" )
 
 # ============================================================================
+describe "img_build reuses a present image instead of rebuilding from base"
+# ============================================================================
+# Phase-1 rebuilt every hop FROM the sovereign base OS. That base is licensed and often absent, so a
+# live run against images that were already built and loaded died at the build step. With
+# IMG_SKIP_IF_PRESENT=true, a present image is reused. Asserts run in the PARENT shell (a `( )`
+# subshell would swallow their tally) so the stub is defined here and cleared afterwards.
+# shellcheck source=/dev/null
+source "$PROJECT_ROOT/scripts/lib/distribution_handler.sh"
+# shellcheck source=/dev/null
+source "$PROJECT_ROOT/scripts/lib/image_builder.sh"
+
+_ib_saved_ref="${PROFILE_CONTAINER_IMAGE_REF:-}"
+export PROFILE_CONTAINER_IMAGE_REF="reuse-test/kc:{version}"
+_IB_PRESENT="true"   # flips the stubbed `cr image inspect` result
+
+# Stub the runtime: image presence is _IB_PRESENT; a real `cr build` prints BUILD-RAN so a test can
+# see whether it happened.
+cr() {
+    if [[ "$1" == "image" && "$2" == "inspect" ]]; then
+        [[ "$_IB_PRESENT" == "true" ]] && return 0 || return 1
+    fi
+    [[ "$1" == "build" ]] && echo "BUILD-RAN"
+    return 0
+}
+
+_IB_PRESENT="true"
+out="$(IMG_SKIP_IF_PRESENT=true img_build 26.6.3 some/base:latest 21 2>&1)"
+assert_contains "$out" "Reusing image already present" \
+    "a present image is reused when IMG_SKIP_IF_PRESENT=true"
+assert_true "[[ '$out' != *BUILD-RAN* ]]" \
+    "and cr build is NOT invoked"
+
+_IB_PRESENT="false"
+out="$(IMG_SKIP_IF_PRESENT=true img_build 26.6.3 some/base:latest 21 2>&1)"
+assert_contains "$out" "BUILD-RAN" \
+    "an ABSENT image still builds — the skip is reuse, not refuse"
+
+_IB_PRESENT="true"
+out="$(IMG_SKIP_IF_PRESENT=false img_build 26.6.3 some/base:latest 21 2>&1)"
+assert_contains "$out" "BUILD-RAN" \
+    "without the flag, a present image is rebuilt — existing callers are unaffected"
+
+unset -f cr
+export PROFILE_CONTAINER_IMAGE_REF="$_ib_saved_ref"
+
+# ============================================================================
 describe "data-integrity policy (_harness_integrity_eval)"
 # ============================================================================
 assert_true  "_harness_integrity_eval 3 3 150 150 30 33 >/dev/null 2>&1" \
@@ -65,6 +116,9 @@ assert_equals "0" "$PLAN_RC" "harness dry-run exits 0"
 assert_contains "$PLAN" "DRY-RUN: cr network create"        "plan: bridge network"
 assert_contains "$PLAN" "POSTGRES_PASSWORD=\*\*\*"           "plan: fresh PG (password masked)"
 assert_contains "$PLAN" "DB_VENDOR=postgres"                 "plan: KC16 WildFly base boot"
+# JGroups pinned to loopback: the HA WildFly KC16 otherwise binds UDP to the bridge/gateway address,
+# fails, cascades dozens of dead services, and never reaches Liquibase — leaving an empty schema.
+assert_contains "$PLAN" "jgroups.bind_addr=127.0.0.1"        "plan: KC16 JGroups pinned to loopback"
 assert_contains "$PLAN" "create realms"                      "plan: kcadm random seed"
 assert_contains "$PLAN" "baseline COUNT"                     "plan: data-integrity baseline"
 assert_contains "$PLAN" "img_build 24.0.5"                   "plan: build hop 24.0.5"

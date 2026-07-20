@@ -14,7 +14,10 @@
 set -euo pipefail
 
 # Script metadata
-VERSION="3.0.0"
+# The single source of truth for the tool's version. The release workflow refuses to publish a tag
+# that disagrees with this line — the versions in this repo had drifted to four different answers
+# (code 3.0.0, README 3.8, Dockerfile 3.0.0, CHANGELOG 3.9.1) with no 3.9 tag existing at all.
+VERSION="3.9.2"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 LIB_DIR="$SCRIPT_DIR/lib"
 # shellcheck disable=SC2034  # PROJECT_ROOT kept for external/sourced use
@@ -45,6 +48,16 @@ source "$LIB_DIR/multi_tenant.sh"
 
 # v3.7: container-hop migration model verification (Layer 2 — MIGRATION_MODEL)
 [[ -f "$LIB_DIR/migration_verify.sh" ]] && source "$LIB_DIR/migration_verify.sh"
+
+# v3.9.2: data-integrity gate (Layer 3). L1/L2 prove the migration RAN; they say nothing about
+# whether the realms, users and clients are still there afterwards. Depends on migration_verify.sh
+# for _mv_psql, so it must be sourced after it.
+[[ -f "$LIB_DIR/data_integrity.sh" ]] && source "$LIB_DIR/data_integrity.sh"
+
+# v3.9.2: database-level advisory lock (ADR-011). One migration per database, enforced BY the
+# database — closes the gap the per-workspace file lock leaves (two runs, different work dirs or
+# hosts, same DB).
+[[ -f "$LIB_DIR/db_lock.sh" ]] && source "$LIB_DIR/db_lock.sh"
 
 # ============================================================================
 # CONFIGURATION DEFAULTS
@@ -102,6 +115,15 @@ SKIP_TESTS="${SKIP_TESTS:-false}"
 ENABLE_MONITOR="${ENABLE_MONITOR:-false}"
 # v3.9: non-interactive confirmation. --yes/-y sets this; env ASSUME_DEFAULTS also honored.
 AUTO_CONFIRM="${AUTO_CONFIRM:-false}"
+# v3.9.1: static analysis of THIS TOOL's own source — irrelevant to a migration, so OFF by
+# default. Enable with --security-scan or ENABLE_SECURITY_SCAN=true.
+ENABLE_SECURITY_SCAN="${ENABLE_SECURITY_SCAN:-false}"
+# v3.9.1: --no-resume ignores checkpoints from a previous (possibly failed) attempt.
+NO_RESUME="${NO_RESUME:-false}"
+# v3.9.1 (ADR-008): --force-unlock releases a stale Liquibase changelog lock left by a crash.
+FORCE_UNLOCK="${FORCE_UNLOCK:-false}"
+# v3.9.1: --kill-stale terminates competing/hung migration processes instead of refusing to run.
+KILL_STALE="${KILL_STALE:-false}"
 
 # Migration settings
 TIMEOUT_BUILD="${TIMEOUT_BUILD:-600}"
@@ -152,6 +174,135 @@ log_section() {
 #   _confirm "Question?" "Y"|"N"   — the 2nd arg is the default AND the auto-answer.
 # Auto-answers (no prompt) when --yes (AUTO_CONFIRM), ASSUME_DEFAULTS=true, or stdin is
 # not a TTY. Returns 0 = yes, 1 = no. Interactive behaviour (a TTY, no flags) is unchanged.
+# v3.9.1: Ctrl-C must abort cleanly. There was NO signal trap at all, so an interrupt during
+# wait_for_migration's poll loop did not stop the run and left the transient container behind.
+# ============================================================================
+# v3.9.1: SINGLE-INSTANCE GUARD.
+# Two migrations running against the same workspace fight over the transient container name
+# (kc-migrate-<version>): one run's cleanup removes the container the OTHER run just started.
+# That is exactly how a "hung" run from a previous attempt silently murdered a healthy container
+# in the middle of Liquibase — the DB migration had already succeeded, but the container vanished
+# and the live run reported failure.
+# ============================================================================
+MIGRATION_LOCK_FILE="${MIGRATION_LOCK_FILE:-$WORK_DIR/migration.lock}"
+_KC_LOCK_HELD="false"
+
+_kc_acquire_lock() {
+    if [[ -f "$MIGRATION_LOCK_FILE" ]]; then
+        local old_pid
+        old_pid="$(tr -d '[:space:]' < "$MIGRATION_LOCK_FILE" 2>/dev/null || true)"
+        if [[ -n "$old_pid" ]] && kill -0 "$old_pid" 2>/dev/null; then
+            log_error "Another migration is ALREADY RUNNING (PID $old_pid)."
+            log_error "  lock: $MIGRATION_LOCK_FILE"
+            log_error "Two runs would fight over the kc-migrate-<version> container name and kill"
+            log_error "each other's containers mid-migration. Stop the other run first:"
+            log_error "    kill $old_pid"
+            return 1
+        fi
+        log_warn "Stale lock from a dead process (PID ${old_pid:-?}) — reclaiming it"
+    fi
+    printf '%s' "$$" > "$MIGRATION_LOCK_FILE" 2>/dev/null || true
+    _KC_LOCK_HELD="true"
+    return 0
+}
+
+_kc_release_lock() {
+    [[ "${_KC_LOCK_HELD:-false}" == "true" ]] || return 0
+    rm -f "$MIGRATION_LOCK_FILE" 2>/dev/null || true
+    _KC_LOCK_HELD="false"
+}
+
+# The transient run-mode container of the CURRENT hop, while it is live. Set once the container is
+# started, cleared when it is stopped normally. The EXIT trap removes whatever is still named here —
+# so a hop that fails at wait/L2/L3/health (returning before the normal stop) does not leak a
+# running container, and neither does any other error path.
+_KC_ACTIVE_RUN_CONTAINER=""
+
+# Other background children that must not outlive the run:
+#   the blue-green smoke-test `kubectl port-forward` (a leaked one keeps holding its local port),
+#   and the multi-tenant parallel workers (a run interrupted before its wait loop would otherwise
+#   leave them migrating in the background). Set while live, cleared when reaped normally.
+_KC_ACTIVE_PORT_FORWARD=""
+_KC_MT_WORKER_PIDS=()
+
+# _kc_kill_reap <pid>... — SIGTERM each, then reap so none is left running or defunct.
+_kc_kill_reap() {
+    local p
+    for p in "$@"; do
+        [[ -n "$p" ]] || continue
+        kill "$p" 2>/dev/null || true
+        wait "$p" 2>/dev/null || true
+    done
+}
+
+# The one teardown, run from the EXIT trap on EVERY exit — success, error, or the interrupt
+# handler's exit. It must leave NOTHING behind: no running transient container, no held lock, and
+# no orphaned/defunct child process (the DB-lock psql, the metrics exporter, the port-forward, the
+# parallel workers). Each child is killed AND reaped; we do not `wait` with no args (a child that
+# ignored the signal would hang the exit).
+_kc_release_all_locks() {
+    if [[ -n "${_KC_ACTIVE_RUN_CONTAINER:-}" ]] && declare -F kc_run_stop_container >/dev/null 2>&1; then
+        kc_run_stop_container "$_KC_ACTIVE_RUN_CONTAINER" 2>/dev/null || true
+        _KC_ACTIVE_RUN_CONTAINER=""
+    fi
+    if [[ -n "${_KC_ACTIVE_PORT_FORWARD:-}" ]]; then
+        _kc_kill_reap "$_KC_ACTIVE_PORT_FORWARD"
+        _KC_ACTIVE_PORT_FORWARD=""
+    fi
+    if [[ ${#_KC_MT_WORKER_PIDS[@]} -gt 0 ]]; then
+        _kc_kill_reap "${_KC_MT_WORKER_PIDS[@]}"
+        _KC_MT_WORKER_PIDS=()
+    fi
+    declare -F prom_stop_exporter >/dev/null 2>&1 && prom_stop_exporter >/dev/null 2>&1
+    _kc_release_lock
+    declare -F kc_db_lock_release >/dev/null 2>&1 && kc_db_lock_release
+    return 0
+}
+
+# True only while WE hold the user's Keycloak down: set after Step 2's stop, cleared by Step 5's
+# start. Never set in `run` mode — there is no long-lived service there, only a transient container.
+_KC_SERVICE_STOPPED_BY_US="false"
+
+_kc_on_interrupt() {
+    trap - INT TERM
+    echo "" >&2
+    log_warn "Interrupted — aborting migration."
+    _kc_release_all_locks
+
+    local mode="${PROFILE_KC_DEPLOYMENT_MODE:-}"
+
+    if [[ "$mode" == "run" ]] && declare -F kc_run_stop_container >/dev/null 2>&1; then
+        local cname="$(kc_run_container_name "${KC_HOP_VERSION:-${PROFILE_KC_TARGET_VERSION:-}}")"
+        log_warn "Stopping transient migration container: $cname"
+        kc_run_stop_container "$cname" 2>/dev/null || true
+    fi
+
+    # Every other mode stops the user's REAL Keycloak at Step 2 and restarts it at Step 5. A
+    # Ctrl-C in that window used to just exit — leaving `systemctl stop keycloak` un-done, or a
+    # `kubectl scale --replicas=0` un-done, i.e. production scaled to zero and nobody putting it
+    # back. Whatever else has gone wrong, we do not walk away from a service we took down.
+    if [[ "${_KC_SERVICE_STOPPED_BY_US:-false}" == "true" ]] && declare -F kc_service_start >/dev/null 2>&1; then
+        log_warn "Keycloak was stopped by this run ($mode) — bringing it back up."
+        # shellcheck disable=SC2119 # optional args: service identity comes from the profile
+        if kc_service_start 2>/dev/null; then
+            log_success "Keycloak restarted."
+        else
+            log_error "COULD NOT RESTART KEYCLOAK — it is still DOWN. Start it by hand:"
+            case "$mode" in
+                standalone)     log_error "    systemctl start ${PROFILE_KC_SERVICE_NAME:-keycloak}" ;;
+                docker|podman)  log_error "    docker start ${PROFILE_KC_CONTAINER_NAME:-keycloak}" ;;
+                docker-compose) log_error "    docker compose -f ${PROFILE_KC_COMPOSE_FILE:-docker-compose.yml} up -d" ;;
+                kubernetes)     log_error "    kubectl scale deployment/${PROFILE_K8S_DEPLOYMENT:-keycloak} --replicas=${PROFILE_K8S_REPLICAS:-1} -n ${PROFILE_K8S_NAMESPACE:-keycloak}" ;;
+                deckhouse)      log_error "    kubectl patch moduleconfig keycloak --type=merge -p '{\"spec\":{\"enabled\":true}}'" ;;
+            esac
+        fi
+    fi
+
+    log_warn "The database may be MID-MIGRATION. Check before retrying:"
+    log_warn "  SELECT version FROM MIGRATION_MODEL ORDER BY update_time DESC LIMIT 1;"
+    exit 130
+}
+
 _confirm() {
     local prompt="$1" def="${2:-N}" ans
     if [[ "${AUTO_CONFIRM:-false}" == "true" || "${ASSUME_DEFAULTS:-false}" == "true" || ! -t 0 ]]; then
@@ -267,6 +418,226 @@ kc_build_migration_path() {
         return 1
     fi
     echo "${out[*]}"
+}
+
+# major.minor of a version string: 26.6.3 -> 26.6
+_kc_major_minor() { local v="$1"; printf '%s' "${v%.*}"; }
+
+# ============================================================================
+# STALE / COMPETING MIGRATION PROCESSES
+#
+# Two migration processes fight over the transient container name (kc-migrate-<version>): one
+# run's cleanup removes the container the OTHER run just started, killing a healthy migration
+# mid-Liquibase. This is not hypothetical — it happened on a live run, and the culprit was a
+# leftover process from an earlier (hung) attempt. Detect them before doing anything.
+# ============================================================================
+
+# _kc_proc_runs_migration <pid> — true if THIS pid is actually executing a migration script, i.e.
+# one of its argv ELEMENTS is a file named migrate_keycloak_v3.sh or migrate_oneshot.sh.
+#
+# The distinction matters. The old check was `pgrep -f 'migrate_..._v3\.sh|migrate_oneshot\.sh'`,
+# which matches the string ANYWHERE in the command line — so it flagged the shell wrapper that
+# launched the run (`zsh -c '... bash migrate_oneshot.sh ...'`), a `grep migrate_oneshot`, an
+# editor with the file open, even the `pkill -f migrate_keycloak_v3` from our own error message.
+# argv[0] of a real run is a shell and one later argv element is the script PATH; a mention lives
+# INSIDE a single -c blob or a grep pattern, never as its own argv element. Match the element.
+_kc_proc_runs_migration() {
+    local pid="$1" arg base
+    while IFS= read -r -d '' arg; do
+        base="${arg##*/}"
+        [[ "$base" == "migrate_keycloak_v3.sh" || "$base" == "migrate_oneshot.sh" ]] && return 0
+    done < "/proc/$pid/cmdline" 2>/dev/null
+    return 1
+}
+
+# kc_find_other_migration_procs — echo the PID of every OTHER process that is running a migration
+# script. Returns 1 when there are none.
+#
+# Walks /proc directly instead of pgrep: no PPID-ancestry walk (which broke the moment a launcher
+# was reparented to init — a detached shell, a pipeline, nohup).
+#
+# Exclusion is by PROCESS GROUP, not by a list of our own pids. Our run spawns several processes
+# that each inherit the script's argv and so match the "runs a migration script" test:
+#   - $$                     the main process;
+#   - the `x="$(...)"` command-substitution subshell this function runs in ($BASHPID);
+#   - the DB-lock coproc — a brace-group `coproc { … psql; }` keeps a bash WRAPPER with our argv
+#     (psql is its child), a pid that is neither $$ nor $BASHPID. This is what re-broke the scan.
+# All of them share our process group; a genuinely separate migration invocation has its own. So
+# skip any candidate whose pgid equals ours — that excludes the whole tree, coproc included, and
+# will keep excluding whatever we fork next.
+kc_find_other_migration_procs() {
+    local my_pgid pids=() f pid pgid
+    my_pgid="$(ps -o pgid= -p "$$" 2>/dev/null | tr -d ' ')"
+    for f in /proc/[0-9]*/cmdline; do
+        pid="${f#/proc/}"; pid="${pid%/cmdline}"
+        [[ "$pid" == "$$" ]] && continue
+        _kc_proc_runs_migration "$pid" || continue
+        if [[ -n "$my_pgid" ]]; then
+            pgid="$(ps -o pgid= -p "$pid" 2>/dev/null | tr -d ' ')"
+            [[ "$pgid" == "$my_pgid" ]] && continue   # our own process tree
+        fi
+        pids+=("$pid")
+    done
+    [[ ${#pids[@]} -gt 0 ]] || return 1
+    printf '%s\n' "${pids[@]}"
+}
+
+# kc_kill_stale_processes <pid>... — SIGTERM, then SIGKILL whatever survives.
+kc_kill_stale_processes() {
+    local p
+    for p in "$@"; do
+        log_warn "Terminating competing migration process PID $p"
+        kill -TERM "$p" 2>/dev/null || true
+    done
+    sleep 3
+    for p in "$@"; do
+        if kill -0 "$p" 2>/dev/null; then
+            log_warn "PID $p ignored SIGTERM — sending SIGKILL"
+            kill -KILL "$p" 2>/dev/null || true
+        fi
+    done
+}
+
+# ============================================================================
+# ADR-008 — STATE RECONCILIATION: the state is a FACT, not a journal.
+#
+# Checkpoints and the profile's `current_version` are CLAIMS about the past. Trusting them caused
+# real damage: a stale checkpoint made the tool "skip the start" of a container that no longer
+# existed, and the profile's claim would have re-run hops the database had already passed.
+#
+# Before deciding anything we now read the ACTUAL state:
+#   1. which Keycloak version really migrated this database (MIGRATION_MODEL),
+#   2. whether a crashed migration left a Liquibase lock held (DATABASECHANGELOGLOCK),
+#   3. which transient migration containers really exist.
+#
+# Returns: 0 = proceed, 1 = abort, 2 = nothing to do (already at target).
+# ============================================================================
+kc_reconcile_state() {
+    local target_major="$1"
+
+    log_section "State Reconciliation (reading the ACTUAL state — ADR-008)"
+
+    # --- 0. Competing / stale migration processes ---
+    # They would remove the kc-migrate-<version> container this run creates (same name) and kill a
+    # healthy migration mid-Liquibase. Catch them first.
+    local others
+    if others="$(kc_find_other_migration_procs)"; then
+        log_error "Other migration processes are running. They fight over the kc-migrate-<version>"
+        log_error "container name and will destroy each other's containers mid-migration:"
+        local _p
+        while IFS= read -r _p; do
+            [[ -n "$_p" ]] && ps -o pid=,etimes=,args= -p "$_p" 2>/dev/null | sed 's/^/    pid=/' || true
+        done <<< "$others"
+
+        if [[ "${DRY_RUN:-false}" == "true" ]]; then
+            log_warn "DRY-RUN: reporting only (a dry run neither blocks nor kills anything)"
+        elif [[ "${KILL_STALE:-false}" == "true" ]]; then
+            # shellcheck disable=SC2086  # intentional word-split of the PID list
+            kc_kill_stale_processes $others
+            log_success "Competing processes terminated"
+        else
+            log_error "Stop them first, or re-run with --kill-stale:"
+            log_error "    pkill -f migrate_keycloak_v3 ; pkill -f migrate_oneshot"
+            return 1
+        fi
+    else
+        log_success "No competing migration processes"
+    fi
+
+    # --- 1. Ground truth: which version last migrated THIS database? ---
+    local db_version=""
+    if declare -F kc_db_model_version >/dev/null 2>&1; then
+        db_version="$(kc_db_model_version || true)"
+    fi
+
+    if [[ -n "$db_version" ]]; then
+        log_success "Database (MIGRATION_MODEL) is at: $db_version"
+        local claimed="${PROFILE_KC_CURRENT_VERSION:-}"
+        if [[ -n "$claimed" && "$(_kc_major_minor "$claimed")" != "$(_kc_major_minor "$db_version")" ]]; then
+            log_warn "Profile claims current_version=${claimed}, but the DATABASE says ${db_version}."
+            log_warn "The database is the fact — recomputing the hop chain from ${db_version}."
+        fi
+        export PROFILE_KC_CURRENT_VERSION="$db_version"
+    else
+        log_warn "Cannot read MIGRATION_MODEL (DB not initialised by Keycloak, or unreachable)."
+        log_warn "Falling back to the profile's claim: current_version=${PROFILE_KC_CURRENT_VERSION:-<unset>}"
+    fi
+
+    # --- 2. Stale Liquibase lock: a crashed migration blocks every later Keycloak ---
+    if declare -F kc_db_changelog_locked >/dev/null 2>&1; then
+        local locked
+        if locked="$(kc_db_changelog_locked)"; then
+            log_error "Liquibase changelog lock is HELD (a previous migration crashed mid-flight):"
+            printf '%s\n' "$locked" | sed 's/^/    id|lockedby|since = /'
+            if [[ "${DRY_RUN:-false}" == "true" ]]; then
+                log_info "DRY-RUN: would NOT release the lock (a dry run mutates nothing)"
+                return 1
+            elif [[ "${FORCE_UNLOCK:-false}" == "true" ]]; then
+                log_warn "--force-unlock: releasing the stale lock"
+                if kc_db_clear_changelog_lock; then
+                    log_success "Changelog lock released"
+                else
+                    log_error "Failed to release the changelog lock"
+                    return 1
+                fi
+            else
+                log_error "Keycloak would block on this lock. Release it, then retry:"
+                log_error "  UPDATE databasechangeloglock SET locked=false, lockedby=null, lockgranted=null;"
+                log_error "  ...or re-run with --force-unlock"
+                return 1
+            fi
+        else
+            log_success "Liquibase changelog lock: free"
+        fi
+    fi
+
+    # --- 3. Existing transient migration containers ---
+    if [[ "${PROFILE_KC_DEPLOYMENT_MODE:-}" == "run" ]] && declare -F cr >/dev/null 2>&1; then
+        local leftovers
+        leftovers="$(cr ps -a --filter "name=kc-migrate-" --format '{{.Names}} {{.Status}}' 2>/dev/null | sed '/^[[:space:]]*$/d' || true)"
+        if [[ -n "$leftovers" ]]; then
+            log_warn "Existing migration containers:"
+            printf '%s\n' "$leftovers" | sed 's/^/    /'
+
+            # NEVER touch a RUNNING kc-migrate-* container. It belongs to a migration that is in
+            # flight, and removing it kills a healthy migration in the middle of Liquibase. This
+            # is not hypothetical: an earlier version of this cleanup did exactly that to a live
+            # run (even from a --dry-run process), which is why the guard exists.
+            local running
+            running="$(cr ps --filter "name=kc-migrate-" --format '{{.Names}}' 2>/dev/null | sed '/^[[:space:]]*$/d' || true)"
+            if [[ -n "$running" ]]; then
+                log_error "A migration container is RUNNING — another migration is in flight:"
+                printf '%s\n' "$running" | sed 's/^/    /'
+                log_error "Refusing to touch it. Stop that migration first, or remove the container"
+                log_error "yourself once you are sure it is dead."
+                return 1
+            fi
+
+            # A DRY RUN MUST MUTATE NOTHING.
+            if [[ "${DRY_RUN:-false}" == "true" ]]; then
+                log_info "DRY-RUN: would remove the stopped leftovers listed above (nothing changed)"
+            else
+                local _line
+                while IFS= read -r _line; do
+                    [[ -n "$_line" ]] && cr rm -f "${_line%% *}" >/dev/null 2>&1 || true
+                done <<< "$leftovers"
+                log_success "Removed the stopped leftovers (they would clash on name)"
+            fi
+        else
+            log_success "No leftover migration containers"
+        fi
+    fi
+
+    # --- 4. Already at the target? Then there is nothing to do. ---
+    local target_full="${MIGRATION_TARGET_FULL[$target_major]:-}"
+    if [[ -n "$db_version" && -n "$target_full" ]]; then
+        if [[ "$(_kc_major_minor "$db_version")" == "$(_kc_major_minor "$target_full")" ]]; then
+            log_success "Database is ALREADY at the target (${db_version}) — nothing to migrate."
+            return 2
+        fi
+    fi
+
+    return 0
 }
 
 # Gate: target major 26 (26.6) requires PostgreSQL >= MIN_PG_FOR_26 (PG13 dropped).
@@ -404,6 +775,44 @@ get_checkpoint() {
     fi
 }
 
+# clear_checkpoint <version>
+#   Forget everything we recorded about this hop.
+#
+#   A rollback restores the database to BEFORE the hop, but the checkpoints describing that hop
+#   used to survive it. On the next run should_skip_to would then read CHECKPOINT_26_6_3=migrated
+#   and skip backup/stop/start — asserting a migration that the restore had just undone, against
+#   a database that no longer had it. The state file must not outlive the state it describes.
+clear_checkpoint() {
+    local version="$1"
+    local key="CHECKPOINT_${version//\./_}"
+
+    [[ -f "$STATE_FILE" ]] || return 0
+
+    local tmp="${STATE_FILE}.tmp.$$"
+    grep -v -e "^${key}=" -e "^LAST_CHECKPOINT=${version}:" "$STATE_FILE" > "$tmp" 2>/dev/null || true
+    mv -f "$tmp" "$STATE_FILE"
+
+    # The in-memory copy comes from `source`ing the state file — stale exported values would
+    # otherwise outlive the line we just deleted.
+    unset "$key" LAST_CHECKPOINT
+    log_info "Checkpoints cleared for $version"
+}
+
+# kc_backup_dir — the one directory per-hop backups live in. Creates it.
+#
+#   Hop backups were written flat into $WORK_DIR while rotation swept $WORK_DIR/backups. Two
+#   different directories: rotation reported "Found 0 backup(s)" on every run and never deleted
+#   anything. A four-hop migration of a large database left four dumps on disk forever.
+#
+#   They now share this one path. Safety backups (safety_before_rollback_*.dump) stay OUT of it,
+#   in $WORK_DIR: rotation globs *.dump and would happily prune the emergency copy taken moments
+#   before a restore.
+kc_backup_dir() {
+    local dir="${WORK_DIR}/backups"
+    mkdir -p "$dir" 2>/dev/null || true
+    printf '%s' "$dir"
+}
+
 should_skip_to() {
     # Returns 0 (true) if we should skip to this phase (already done)
     local current_checkpoint="$1"
@@ -469,16 +878,24 @@ run_preflight_checks() {
 
     local errors=0
 
-    # 1. Disk space (15 GB minimum)
+    # 1. A FLOOR of working space (logs, state, temp) on the WORK_DIR filesystem — NOT a backup
+    #    budget. The real backup requirement is MEASURED from the database by the v3.5 preflight
+    #    that runs next (check_backup_space: table-data x 1.2 x hop-count). This used to hardcode
+    #    15 GB with "backup ~ DB size x3" reasoning and refused small migrations on roomy hosts —
+    #    the exact arbitrary gate ADR-010's sizing work removed from the library check. A fixed
+    #    number here re-introduced it, and only surfaced now because earlier runs skipped preflight.
     local target_path="$WORK_DIR"
     [[ ! -d "$target_path" ]] && target_path="$(dirname "$target_path")"
-    local available_gb=$(df -BG "$target_path" 2>/dev/null | tail -1 | awk '{print $4}' | tr -d 'G' || echo "0")
-    local required_gb=15
+    local avail_mb
+    avail_mb=$(df -BM "$target_path" 2>/dev/null | awk 'NR==2 { gsub(/M/, "", $4); print $4 + 0 }')
+    : "${avail_mb:=0}"
+    local floor_mb="${MIN_DISK_FREE_MB:-512}"
 
-    if [[ "${available_gb:-0}" -ge "$required_gb" ]]; then
-        log_success "Disk space: ${available_gb}GB available (need ${required_gb}GB)"
+    if (( avail_mb >= floor_mb )); then
+        log_success "Working space: ${avail_mb}MB on ${target_path} (floor ${floor_mb}MB; backups sized from the DB next)"
     else
-        log_error "Disk space: ${available_gb}GB < ${required_gb}GB required"
+        log_error "Working space: ${avail_mb}MB < ${floor_mb}MB floor on ${target_path} (WORK_DIR)"
+        log_info "  Point WORK_DIR at a roomier filesystem, or skip checks with --skip-preflight."
         errors=$((errors + 1))
     fi
 
@@ -562,7 +979,8 @@ run_preflight_checks() {
 
     # 5. Database connectivity (standalone only — K8s has its own networking)
     if [[ "${PROFILE_KC_DEPLOYMENT_MODE:-}" == "standalone" ]]; then
-        local db_pass="${PGPASSWORD:-${DB_PASSWORD:-}}"
+        # Same precedence as db_backup_keycloak/db_restore_keycloak: PROFILE_DB_PASSWORD first.
+        local db_pass="${PROFILE_DB_PASSWORD:-${PGPASSWORD:-${DB_PASSWORD:-}}}"
         if [[ -n "$db_pass" ]]; then
             if db_test_connection "${PROFILE_DB_TYPE}" "${PROFILE_DB_HOST}" \
                 "${PROFILE_DB_PORT}" "${PROFILE_DB_NAME}" "${PROFILE_DB_USER}" "$db_pass"; then
@@ -746,12 +1164,23 @@ db_backup_keycloak() {
     local port="${PROFILE_DB_PORT}"
     local db_name="${PROFILE_DB_NAME}"
     local user="${PROFILE_DB_USER}"
-    local pass="${PGPASSWORD:-${DB_PASSWORD:-}}"
+    # The rest of the tool (kc_run_migrating_container, _mv_psql, the PG-version gate) reads
+    # PROFILE_DB_PASSWORD — the backup MUST honour it too. It used to read only PGPASSWORD /
+    # DB_PASSWORD, so the password arrived EMPTY and pg_dump fell back to its interactive
+    # "Password:" prompt, hanging a non-interactive (--yes) migration forever.
+    local pass="${PROFILE_DB_PASSWORD:-${PGPASSWORD:-${DB_PASSWORD:-}}}"
     local parallel_jobs="${PROFILE_MIGRATION_PARALLEL_JOBS:-4}"
 
     log_info "Database: $db_type @ $host:$port/$db_name"
     log_info "Backup file: $backup_file"
     log_info "Parallel jobs: $parallel_jobs"
+
+    # Fail fast instead of blocking on a password prompt nobody can answer.
+    if [[ "$db_type" == "postgresql" && -z "$pass" ]]; then
+        log_error "Database password is not set — pg_dump would prompt interactively and hang."
+        log_error "  export PROFILE_DB_PASSWORD='<db-password>'    (PGPASSWORD also accepted)"
+        return 1
+    fi
 
     # Create backup using adapter
     if db_backup "$db_type" "$host" "$port" "$db_name" "$user" "$pass" "$backup_file" "$parallel_jobs"; then
@@ -760,6 +1189,16 @@ db_backup_keycloak() {
         # Calculate size
         local size=$(du -sh "$backup_file" 2>/dev/null | cut -f1 || echo "unknown")
         log_info "Backup size: $size"
+
+        # The adapter's "verification" is `pg_restore --list | grep -c "TABLE DATA"` — it proves the
+        # dump's table of contents parses, and nothing more. Opt in to PROVING it restores
+        # (PROFILE_VERIFY_BACKUP_RESTORE=true) before betting a production migration on it.
+        if declare -F kc_backup_restore_test >/dev/null 2>&1; then
+            kc_backup_restore_test "$backup_file" || {
+                log_error "Refusing to migrate behind a backup that will not restore."
+                return 1
+            }
+        fi
 
         return 0
     else
@@ -784,12 +1223,20 @@ db_restore_keycloak() {
     local port="${PROFILE_DB_PORT}"
     local db_name="${PROFILE_DB_NAME}"
     local user="${PROFILE_DB_USER}"
-    local pass="${PGPASSWORD:-${DB_PASSWORD:-}}"
+    # Same bug as db_backup_keycloak: without PROFILE_DB_PASSWORD, pg_restore would prompt for a
+    # password — and this is the ROLLBACK path, so a failed hop would hang instead of restoring.
+    local pass="${PROFILE_DB_PASSWORD:-${PGPASSWORD:-${DB_PASSWORD:-}}}"
     local parallel_jobs="${PROFILE_MIGRATION_PARALLEL_JOBS:-4}"
 
     log_info "Database: $db_type @ $host:$port/$db_name"
     log_info "Backup file: $backup_file"
     log_info "Parallel jobs: $parallel_jobs"
+
+    if [[ "$db_type" == "postgresql" && -z "$pass" ]]; then
+        log_error "Database password is not set — pg_restore would prompt interactively and hang."
+        log_error "  export PROFILE_DB_PASSWORD='<db-password>'    (PGPASSWORD also accepted)"
+        return 1
+    fi
 
     # Restore using adapter
     if db_restore "$db_type" "$host" "$port" "$db_name" "$user" "$pass" "$backup_file" "$parallel_jobs"; then
@@ -854,7 +1301,7 @@ kc_service_stop() {
             kc_stop "$mode" "${PROFILE_KC_CONTAINER_NAME:-keycloak}"
             ;;
         run)
-            kc_run_stop_container "${PROFILE_KC_RUN_CONTAINER_NAME:-kc-migrate-${version}}"
+            kc_run_stop_container "$(kc_run_container_name "$version")"
             ;;
         docker-compose)
             kc_stop "$mode" "${PROFILE_KC_COMPOSE_FILE:-docker-compose.yml}"
@@ -882,7 +1329,7 @@ kc_service_status() {
             kc_status "$mode" "${PROFILE_KC_CONTAINER_NAME:-keycloak}"
             ;;
         run)
-            kc_status "$mode" "${PROFILE_KC_RUN_CONTAINER_NAME:-kc-migrate-${KC_HOP_VERSION:-${PROFILE_KC_TARGET_VERSION:-}}}"
+            kc_status "$mode" "$(kc_run_container_name "${KC_HOP_VERSION:-${PROFILE_KC_TARGET_VERSION:-}}")"
             ;;
         docker-compose)
             kc_status "$mode" "${PROFILE_KC_COMPOSE_FILE:-docker-compose.yml}"
@@ -898,39 +1345,89 @@ kc_service_status() {
 }
 
 # ============================================================================
-# KEYCLOAK HEALTH CHECK
+# KEYCLOAK HEALTH CHECK — DIAGNOSTIC ONLY (ADR-009)
+#
+# A health probe answers "is this deployment's HTTP surface reachable and configured to expose
+# /health". That is a DIFFERENT question from "did the migration apply", which only the database
+# can answer (L2 / MIGRATION_MODEL — ADR-005). A probe cannot un-migrate a database, and a failed
+# probe must never be allowed to destroy a migration that L2 has already confirmed.
 # ============================================================================
 
-# shellcheck disable=SC2120 # auto: shellcheck 0.10 (CI) finding, behavior-preserving
+# Health outcome codes. Deliberately NOT 0/1: callers must be forced to distinguish "Keycloak is
+# up but health is switched off" from "Keycloak did not answer at all".
+# Plain assignments, not `readonly`: the test suite sources this file, and a second source of a
+# readonly would abort the shell.
+HEALTH_OK=0            # 200 — ready
+HEALTH_UNCONFIRMED=1   # answered, but never became ready within the retry budget
+HEALTH_NOT_SERVED=2    # 404 / not applicable — health is not exposed. Not a failure.
+
+# kc_health_endpoint <version> — the health URL this Keycloak version actually serves.
+#   KC >= 25 moved health to the MANAGEMENT interface: port 9000, path /health/ready.
+#   KC 17-24 serve /health on the HTTP port (8080).
+# Both only do so when KC_HEALTH_ENABLED=true. Probing :8080/health on a KC 26 is guaranteed to
+# 404 — which is exactly what the old default did, on every supported hop.
+kc_health_endpoint() {
+    local version="${1:-}" major
+    major="${version%%.*}"
+    [[ "$major" =~ ^[0-9]+$ ]] || major=0
+
+    if [[ "$major" -ge 25 ]]; then
+        printf 'http://localhost:9000/health/ready'
+    else
+        printf 'http://localhost:8080/health'
+    fi
+}
+
+# health_check [version] [endpoint]
+#   Returns HEALTH_OK / HEALTH_UNCONFIRMED / HEALTH_NOT_SERVED. NEVER gates a hop — see the
+#   Step 7 comment in migrate_to_version. For a real post-migration acceptance test (boots the
+#   target image with health enabled and exercises the Admin API), use the `verify` subcommand.
+# shellcheck disable=SC2120 # optional args: callers may rely on the profile defaults
 health_check() {
-    local endpoint="${1:-http://localhost:8080/health}"
+    local version="${1:-${PROFILE_KC_TARGET_VERSION:-}}"
+    local endpoint="${2:-$(kc_health_endpoint "$version")}"
     local max_attempts="${HEALTH_CHECK_RETRIES}"
     local interval="${HEALTH_CHECK_INTERVAL}"
     local mode="${PROFILE_KC_DEPLOYMENT_MODE}"
 
+    # In `run` mode the container is a TRANSIENT migration boot that we stop immediately after the
+    # hop. There is no service to health-check, and nothing downstream depends on the answer.
+    if [[ "$mode" == "run" ]]; then
+        log_info "Health check skipped (run mode: transient migration container, nothing to serve)"
+        return "$HEALTH_NOT_SERVED"
+    fi
+
     log_info "Health check: $endpoint (max $max_attempts attempts, ${interval}s interval)"
 
-    local attempt=1
+    local attempt=1 code="000"
     while [[ $attempt -le $max_attempts ]]; do
-        log_info "Attempt $attempt/$max_attempts..."
-
-        if kc_health_check "$mode" "$endpoint" \
+        code=$(kc_health_probe "$mode" "$endpoint" \
             "${PROFILE_KC_CONTAINER_NAME:-keycloak}" \
-            "${PROFILE_KC_COMPOSE_FILE:-docker-compose.yml}"; then
-            log_success "Health check passed"
-            return 0
-        fi
+            "${PROFILE_KC_COMPOSE_FILE:-docker-compose.yml}")
+
+        case "$code" in
+            200)
+                log_success "Health check passed (HTTP 200)"
+                return "$HEALTH_OK"
+                ;;
+            404)
+                log_info "Health endpoint answered HTTP 404 — Keycloak is UP but does not expose health."
+                log_info "  Keycloak serves it only with KC_HEALTH_ENABLED=true (KC>=25: port 9000)."
+                log_info "  This says nothing about the migration — L2/MIGRATION_MODEL is the gate."
+                return "$HEALTH_NOT_SERVED"
+                ;;
+        esac
 
         if [[ $attempt -lt $max_attempts ]]; then
-            log_warn "Health check failed, retrying in ${interval}s..."
+            log_info "Attempt $attempt/$max_attempts: HTTP $code — retrying in ${interval}s..."
             sleep "$interval"
         fi
-
         ((attempt++))
     done
 
-    log_error "Health check failed after $max_attempts attempts"
-    return 1
+    log_warn "Health check did not confirm readiness after $max_attempts attempts (last: HTTP $code)"
+    log_warn "  Run '$0 verify --profile <name>' for a real acceptance test against the target image."
+    return "$HEALTH_UNCONFIRMED"
 }
 
 # ============================================================================
@@ -1008,6 +1505,18 @@ wait_for_migration() {
     log_info "Monitoring Keycloak logs for Liquibase migration completion..."
     log_info "Timeout: ${timeout}s"
 
+    # The transient run-mode container is named by PROFILE_KC_RUN_CONTAINER_NAME (default
+    # kc-migrate-<version>) — NOT by PROFILE_KC_CONTAINER_NAME (the YAML `container_name`, used by
+    # the docker/compose modes). Reading the wrong variable made kc_logs fall back to the literal
+    # "keycloak", find no such container, return nothing — so the Liquibase marker was NEVER seen
+    # and every run-mode migration spun until the 900s timeout. (The harness only hid this by
+    # exporting both names.)
+    local log_target="${PROFILE_KC_CONTAINER_NAME:-}"
+    if [[ "${PROFILE_KC_DEPLOYMENT_MODE:-}" == "run" ]]; then
+        log_target="$(kc_run_container_name "$version")"
+    fi
+    log_info "Reading migration logs from: ${log_target:-<default>}"
+
     # Initial wait for startup
     sleep 10
 
@@ -1015,14 +1524,51 @@ wait_for_migration() {
     while [[ $elapsed -lt $timeout ]]; do
         elapsed=$(($(date +%s) - start_time))
 
+        # Fail fast if the transient container died / never existed, instead of waiting out the
+        # full timeout on a container that is not running Liquibase at all.
+        if [[ "${PROFILE_KC_DEPLOYMENT_MODE:-}" == "run" ]]; then
+            local cstate
+            # NB: `docker inspect -f` on a MISSING container prints an empty line to stdout and
+            # exits 1, so `$(... || echo missing)` yields $'\nmissing' — enumerating bad states
+            # ("exited"/"dead"/"missing") silently never matched. Strip whitespace and simply
+            # require "running": anything else (missing/exited/created/dead/paused) is a failure.
+            # `|| true`: the script runs under `set -euo pipefail`, and a failing `cr inspect`
+            # makes the whole pipeline non-zero — which would abort the run instead of reporting.
+            cstate=$(cr inspect -f '{{.State.Status}}' "$log_target" 2>/dev/null | tr -d '[:space:]' || true)
+            : "${cstate:=missing}"
+            if [[ "$cstate" != "running" ]]; then
+                log_error "Migration container '$log_target' is '${cstate}' — it is not running Liquibase."
+                log_warn "Last 30 log lines:"
+                kc_logs "${PROFILE_KC_DEPLOYMENT_MODE}" "false" "$log_target" 2>/dev/null \
+                    | tail -30 | sed 's/^/  /' || true
+                return 1
+            fi
+        fi
+
         # Check logs for migration markers
         local logs=$(kc_logs "${PROFILE_KC_DEPLOYMENT_MODE}" "false" \
-            "${PROFILE_KC_CONTAINER_NAME:-}" \
+            "$log_target" \
             "${PROFILE_KC_COMPOSE_FILE:-}" 2>/dev/null || echo "")
 
-        # Check for migration complete markers (Layer 1 — Liquibase).
-        # NOTE: a generic "Keycloak ... started" is NOT accepted as proof of migration;
-        # Layer 2 is confirmed separately via MIGRATION_MODEL (kc_verify_migration_model).
+        # --- PRIMARY signal: the DATABASE itself (ADR-005 / ADR-008) ---
+        # Waiting on a LOG LINE is fragile: the Liquibase wording differs between Keycloak
+        # generations (KC16/WildFly vs KC24+/Quarkus) and may not even reach INFO level. On the
+        # live run the container was up and had ALREADY migrated the database, yet this loop span
+        # for the full 900s timeout because the expected string never appeared. MIGRATION_MODEL
+        # advancing to this hop's major.minor is the FACT — poll that.
+        if declare -F kc_db_model_version >/dev/null 2>&1; then
+            local _dbv
+            _dbv="$(kc_db_model_version || true)"
+            if [[ -n "$_dbv" && "$(_kc_major_minor "$_dbv")" == "$(_kc_major_minor "$version")" ]]; then
+                migration_complete=true
+                MIGRATION_LOG_FILE="$WORK_DIR/kc_startup_${version}_$(date +%Y%m%d_%H%M%S).log"
+                printf '%s\n' "$logs" > "$MIGRATION_LOG_FILE" 2>/dev/null || true
+                log_success "Migration confirmed by the DATABASE: MIGRATION_MODEL=${_dbv} (${elapsed}s elapsed)"
+                break
+            fi
+        fi
+
+        # --- SECONDARY: the historical log marker (kept for setups without DB access) ---
         if echo "$logs" | grep -qi "Liquibase command 'update' was executed successfully\|Migration successful"; then
             migration_complete=true
             # Persist the startup log so skipped-index warnings can be recovered.
@@ -1099,7 +1645,7 @@ migrate_rolling_update() {
 
     # Step 1: Backup before migration
     if [[ "${PROFILE_MIGRATION_BACKUP:-true}" == "true" ]]; then
-        local backup_file="$WORK_DIR/backup_before_${target_version}_$(date +%Y%m%d_%H%M%S).dump"
+        local backup_file="$(kc_backup_dir)/backup_before_${target_version}_$(date +%Y%m%d_%H%M%S).dump"
         db_backup_keycloak "$backup_file" "before $target_version" || return 1
         update_state "LAST_BACKUP" "$backup_file"
     fi
@@ -1230,7 +1776,7 @@ migrate_blue_green() {
 
     # Step 1: Backup before migration
     if [[ "${PROFILE_MIGRATION_BACKUP:-true}" == "true" ]]; then
-        local backup_file="$WORK_DIR/backup_before_${target_version}_$(date +%Y%m%d_%H%M%S).dump"
+        local backup_file="$(kc_backup_dir)/backup_before_${target_version}_$(date +%Y%m%d_%H%M%S).dump"
         db_backup_keycloak "$backup_file" "before $target_version" || return 1
         update_state "LAST_BACKUP" "$backup_file"
     fi
@@ -1290,21 +1836,25 @@ migrate_blue_green() {
             return 1
         fi
 
-        # Port-forward to green pod for testing
+        # Port-forward to green pod for testing. Recorded so the EXIT/interrupt teardown kills it if
+        # we die during the sleep or the smoke tests — otherwise it leaks, still holding port 18080.
         kubectl port-forward "$green_pod" 18080:8080 -n "$namespace" &
         local pf_pid=$!
+        _KC_ACTIVE_PORT_FORWARD="$pf_pid"
         sleep 5
 
         export KC_URL="http://localhost:18080"
 
         if run_smoke_tests "$target_version"; then
             log_success "Green deployment smoke tests passed"
-            kill $pf_pid 2>/dev/null || true
+            _kc_kill_reap "$pf_pid"; _KC_ACTIVE_PORT_FORWARD=""
         else
             log_error "Green deployment smoke tests failed"
-            kill $pf_pid 2>/dev/null || true
+            _kc_kill_reap "$pf_pid"; _KC_ACTIVE_PORT_FORWARD=""
 
-            if _confirm "Delete green deployment?" "Y"; then
+            # Default NO: under --yes / non-TTY, _confirm auto-answers its default, and deleting a
+            # deployment unattended is the ADR-009 class of mistake.
+            if _confirm "Delete green deployment?" "N"; then
                 kubectl delete deployment/"${deployment}-green" -n "$namespace"
             fi
 
@@ -1325,8 +1875,9 @@ migrate_blue_green() {
     log_info "Waiting 30s for connections to drain..."
     sleep 30
 
-    # Step 8: Delete blue deployment
-    if _confirm "Delete blue deployment (old version)?" "Y"; then
+    # Step 8: Delete blue deployment. Default NO — deleting the old (rollback-target) deployment
+    # unattended under --yes/non-TTY removes your fallback right after a switch. Opt in explicitly.
+    if _confirm "Delete blue deployment (old version)?" "N"; then
         log_info "Deleting blue deployment..."
         kubectl delete deployment/"$deployment" -n "$namespace"
         log_success "Blue deployment deleted"
@@ -1367,7 +1918,12 @@ migrate_to_version() {
     log_section "Migration Step $step_num/$total_steps: Keycloak $target_version"
 
     # Check for existing checkpoint (resume support)
-    local existing_cp=$(get_checkpoint "$target_version")
+    local existing_cp=""
+    if [[ "${NO_RESUME:-false}" == "true" ]]; then
+        log_info "--no-resume: ignoring any checkpoint from a previous attempt"
+    else
+        existing_cp=$(get_checkpoint "$target_version")
+    fi
     if [[ -n "$existing_cp" ]]; then
         log_warn "Resuming step for $target_version from checkpoint: $existing_cp"
     fi
@@ -1378,7 +1934,7 @@ migrate_to_version() {
     # Step 1: Backup before migration
     if [[ "${PROFILE_MIGRATION_BACKUP:-true}" == "true" ]]; then
         if [[ -z "$existing_cp" ]] || ! should_skip_to "$existing_cp" "backup_done"; then
-            local backup_file="$WORK_DIR/backup_before_${target_version}_$(date +%Y%m%d_%H%M%S).dump"
+            local backup_file="$(kc_backup_dir)/backup_before_${target_version}_$(date +%Y%m%d_%H%M%S).dump"
             db_backup_keycloak "$backup_file" "before $target_version" || return 1
             update_state "LAST_BACKUP" "$backup_file"
             set_checkpoint "$target_version" "backup_done"
@@ -1391,6 +1947,10 @@ migrate_to_version() {
     if [[ -z "$existing_cp" ]] || ! should_skip_to "$existing_cp" "stopped"; then
         # shellcheck disable=SC2119 # auto: shellcheck 0.10 (CI) finding, behavior-preserving
         kc_service_stop || return 1
+        # From here until Step 5 brings it back, the user's Keycloak is DOWN because we took it
+        # down. If we die in this window the interrupt handler has to put it back — see
+        # _kc_on_interrupt. In `run` mode there is no such service, so the flag stays false.
+        [[ "${PROFILE_KC_DEPLOYMENT_MODE:-}" != "run" ]] && _KC_SERVICE_STOPPED_BY_US="true"
         set_checkpoint "$target_version" "stopped"
     else
         log_info "Skipping stop (already done)"
@@ -1427,12 +1987,41 @@ migrate_to_version() {
     fi
 
     # Step 5: Start Keycloak (triggers migration)
-    if [[ -z "$existing_cp" ]] || ! should_skip_to "$existing_cp" "started"; then
+    local _skip_start="false"
+    if [[ -n "$existing_cp" ]] && should_skip_to "$existing_cp" "started"; then
+        _skip_start="true"
+        # A checkpoint is a CLAIM, not a fact. In run mode the transient container may have died
+        # or been removed since the checkpoint was written — which is exactly what a failed
+        # attempt leaves behind. Trusting it blindly meant we "skipped the start" and then waited
+        # out the full timeout for logs from a container that no longer existed. Verify.
+        if [[ "${PROFILE_KC_DEPLOYMENT_MODE:-}" == "run" ]]; then
+            local _cname _cstate
+            _cname="$(kc_run_container_name "$target_version")"
+            _cstate=$(cr inspect -f '{{.State.Status}}' "$_cname" 2>/dev/null | tr -d '[:space:]' || true)
+            : "${_cstate:=missing}"
+            if [[ "$_cstate" != "running" ]]; then
+                log_warn "Checkpoint claims '$target_version' was started, but container '$_cname' is '${_cstate}' — starting it again."
+                cr rm -f "$_cname" >/dev/null 2>&1 || true
+                _skip_start="false"
+            fi
+        fi
+    fi
+
+    if [[ "$_skip_start" == "true" ]]; then
+        log_info "Skipping start (container verified running)"
+    else
         # shellcheck disable=SC2119 # auto: shellcheck 0.10 (CI) finding, behavior-preserving
         kc_service_start || return 1
+        # Keycloak is back up — the interrupt handler no longer owes anyone a restart.
+        _KC_SERVICE_STOPPED_BY_US="false"
         set_checkpoint "$target_version" "started"
-    else
-        log_info "Skipping start (already running)"
+    fi
+
+    # From here the transient container is live. Record it so it is removed on ANY exit — not only
+    # the happy path (Step 8) or a Ctrl-C. A hop that fails at wait/L2/L3/health returns before
+    # Step 8, and used to leave its container running; the EXIT trap now cleans it up.
+    if [[ "${PROFILE_KC_DEPLOYMENT_MODE}" == "run" ]]; then
+        _KC_ACTIVE_RUN_CONTAINER="$(kc_run_container_name "$target_version")"
     fi
 
     # Step 6: Wait for migration to complete
@@ -1441,16 +2030,34 @@ migrate_to_version() {
 
         # Step 6b: AUTHORITATIVE Layer 2 gate — MIGRATION_MODEL must advance to the hop
         # version. "Container started" != "realm migration applied".
+        #
+        # This is the ONE place a hop can be declared failed, and therefore the ONE place a
+        # rollback may be offered. The database itself says whether the migration applied.
         if declare -F kc_verify_migration_model >/dev/null 2>&1; then
             kc_verify_migration_model "$target_version" || {
                 log_error "MIGRATION_MODEL did not advance to $target_version — Layer 2 NOT confirmed"
+                log_error "The hop did NOT apply. The database is where it was before this hop began."
+                _kc_offer_rollback "$target_version"
                 return 1
             }
         else
             log_warn "kc_verify_migration_model unavailable — Layer 2 not independently confirmed"
         fi
 
-        # Step 6c: surface (and optionally apply) indexes skipped on large tables (>300k rows)
+        # Step 6c: AUTHORITATIVE Layer 3 gate — the DATA must have survived the hop.
+        #
+        # L2 says the migration ran. It does not say your realms are still there. A hop that
+        # emptied user_entity would pass every check above it and report complete success. Four
+        # COUNT(*) queries close that hole: realm and user_entity must be unchanged, client and
+        # keycloak_role may only grow (migrations add default clients/roles, never remove yours).
+        if declare -F kc_data_verify >/dev/null 2>&1; then
+            kc_data_verify "$target_version" || {
+                _kc_offer_rollback "$target_version"
+                return 1
+            }
+        fi
+
+        # Step 6d: surface (and optionally apply) indexes skipped on large tables (>300k rows)
         if declare -F kc_check_skipped_indexes >/dev/null 2>&1 && [[ -n "${MIGRATION_LOG_FILE:-}" ]]; then
             kc_check_skipped_indexes "$MIGRATION_LOG_FILE" "$target_version" || true
         fi
@@ -1460,22 +2067,23 @@ migrate_to_version() {
         log_info "Skipping migration wait (already migrated)"
     fi
 
-    # Step 7: Health check (with auto-rollback on failure)
+    # Step 7: Health check — DIAGNOSTIC ONLY, never a gate (ADR-009).
+    #
+    # L2 (Step 6b) has already confirmed this hop against the DATABASE: MIGRATION_MODEL says the
+    # realm migration ran. Whether an HTTP probe can reach /health is a fact about the deployment's
+    # configuration, not about the migration.
+    #
+    # This block used to roll back on a failed probe. Since KC 24+ serves /health only with
+    # KC_HEALTH_ENABLED=true — and KC>=25 moved it to port 9000 — the default probe 404'd on
+    # EVERY supported hop. And _confirm auto-answers its default under --yes or any non-TTY
+    # (CI, cron, pipe), where the default was "Y". So a 404 silently restored a backup over a
+    # migration that had just SUCCEEDED. In `run` mode this was papered over with an early return;
+    # the other five deployment modes carried the live defect.
+    #
+    # A failed probe now produces a warning and nothing else. `verify` is the real acceptance test.
     if [[ -z "$existing_cp" ]] || ! should_skip_to "$existing_cp" "health_ok"; then
-        # shellcheck disable=SC2119 # auto: shellcheck 0.10 (CI) finding, behavior-preserving
-        if ! health_check; then
-            log_error "Health check failed after migration to $target_version"
-            if [[ "${AUTO_ROLLBACK:-false}" == "true" ]]; then
-                log_warn "Auto-rollback enabled — rolling back..."
-                cmd_rollback_auto
-                return 1
-            else
-                if _confirm "Rollback to last backup?" "Y"; then
-                    cmd_rollback_auto
-                fi
-                return 1
-            fi
-        fi
+        # shellcheck disable=SC2119 # optional args: version comes from the profile
+        health_check "$target_version" || true
         set_checkpoint "$target_version" "health_ok"
     else
         log_info "Skipping health check (already passed)"
@@ -1497,7 +2105,8 @@ migrate_to_version() {
     # run topology: the transient migrating container has done its job — stop+remove it
     # before the next hop boots (single-instance migration; avoids DB lock contention).
     if [[ "${PROFILE_KC_DEPLOYMENT_MODE}" == "run" ]] && declare -F kc_run_stop_container >/dev/null 2>&1; then
-        kc_run_stop_container "${PROFILE_KC_RUN_CONTAINER_NAME:-kc-migrate-${target_version}}" || true
+        kc_run_stop_container "$(kc_run_container_name "$target_version")" || true
+        _KC_ACTIVE_RUN_CONTAINER=""   # cleaned up normally — nothing left for the EXIT trap to do
     fi
 
     # Mark step as fully successful
@@ -1560,6 +2169,37 @@ execute_migration() {
         exit 1
     fi
 
+    # Single-instance guard: a leftover migration process from a previous attempt would remove the
+    # kc-migrate-<version> container that THIS run creates (same name), killing a healthy migration.
+    # A dry run takes no lock — it changes nothing and must never block a real migration.
+    if [[ "${DRY_RUN:-false}" != "true" ]] && ! _kc_acquire_lock; then
+        return 1
+    fi
+
+    # ADR-011: one migration per DATABASE, enforced by the database. The file lock above only
+    # catches a re-run from the SAME work dir; this catches a second run against this database from
+    # ANY work dir or host, and — being a session advisory lock — releases itself if we crash.
+    # Taken before reconcile so two concurrent runs cannot even both read/rewrite the state.
+    if [[ "${DRY_RUN:-false}" != "true" ]] && declare -F kc_db_lock_acquire >/dev/null 2>&1; then
+        if ! kc_db_lock_acquire; then
+            return 1
+        fi
+    fi
+
+    # ADR-008: reconcile with REALITY before deciding anything. This may replace the profile's
+    # claimed current_version with the version the database is actually at, so that already-applied
+    # hops are skipped (kc_build_migration_path drops hops <= current) and a stale Liquibase lock or
+    # leftover container is caught here instead of hanging the run later.
+    local _rec_rc=0
+    kc_reconcile_state "$target_major" || _rec_rc=$?
+    case "$_rec_rc" in
+        0) ;;
+        2) log_success "Nothing to migrate — the database is already at the target."; return 0 ;;
+        *) log_error "State reconciliation failed — aborting"; return 1 ;;
+    esac
+    current_version="${PROFILE_KC_CURRENT_VERSION}"
+    log_info "Effective path (from ACTUAL db state): $current_version → $target_version"
+
     local migration_steps=()
     local _path
     if ! _path=$(kc_build_migration_path "$current_version" "$target_major"); then
@@ -1589,8 +2229,13 @@ execute_migration() {
         log_section "Preflight Checks (Production Safety v3.5)"
 
         # Determine backup directory
-        local backup_dir="${WORK_DIR}/backups"
+        local backup_dir="$(kc_backup_dir)"
         mkdir -p "$backup_dir"
+
+        # One backup is taken before EACH hop and they all stay on disk. The space check has to know
+        # how many there will be — sizing for one and then writing three is how a large migration
+        # fills the disk halfway through.
+        export PREFLIGHT_HOP_COUNT="${#migration_steps[@]}"
 
         # Get Keycloak URL if available
         local kc_url=""
@@ -1623,8 +2268,11 @@ execute_migration() {
         log_warn "Preflight checks not available (upgrade to v3.5 for production safety)"
     fi
 
-    # v3.6: Run security checks before migration
-    if declare -F run_comprehensive_security_scan >/dev/null 2>&1; then
+    # v3.6 security scan = STATIC ANALYSIS OF THIS TOOL'S OWN SOURCE (ShellCheck + gitleaks over
+    # scripts/). It says NOTHING about the user's database or environment, takes ~20s and floods
+    # the migration log — so as of v3.9.1 it is OPT-IN: --security-scan / ENABLE_SECURITY_SCAN=true.
+    if [[ "${ENABLE_SECURITY_SCAN:-false}" == "true" ]] &&
+       declare -F run_comprehensive_security_scan >/dev/null 2>&1; then
         log_section "Security Scan (v3.6 Security Hardening)"
 
         # Run comprehensive security scan (ShellCheck, gitleaks, hardcoded secrets)
@@ -1670,6 +2318,15 @@ execute_migration() {
     migration_start_ts=$(date +%s)
     # audit_migration_start(source, target, profile) — pass version transition + profile
     audit_migration_start "$current_version" "$target_version" "${PROFILE_NAME:-unknown}"
+
+    # Layer 3 baseline — taken ONCE, here, while the database is still untouched.
+    #
+    # Every hop is then compared against the state we STARTED from, not against the state left by
+    # the hop before it. Re-baselining per hop would forgive cumulative loss: hop 2 could delete
+    # what hop 1 left and still "match its baseline".
+    if declare -F kc_data_baseline >/dev/null 2>&1; then
+        kc_data_baseline
+    fi
 
     # Execute migration steps (strategy-dependent)
     local step_num=1
@@ -1752,7 +2409,7 @@ execute_migration() {
     if declare -F auto_rotate_backups >/dev/null 2>&1; then
         log_section "Backup Rotation (Production Safety v3.5)"
 
-        local backup_dir="${WORK_DIR}/backups"
+        local backup_dir="$(kc_backup_dir)"
 
         # Use rotation policy from profile or default
         local rotation_policy="${PROFILE_BACKUP_ROTATION_POLICY:-keep_last_n}"
@@ -1971,6 +2628,161 @@ find_latest_backup() {
     return 1
 }
 
+# ============================================================================
+# COMMAND: VERIFY — acceptance test of the migrated database against the TARGET image
+# ============================================================================
+
+# cmd_verify [version]
+#   The migration leaves no running Keycloak: the transient container is removed after the last hop
+#   (single-instance; it must not fight the next one for the Liquibase lock). So "is the result any
+#   good" had no answer — you were left with a database and no way to exercise it.
+#
+#   This boots the SAME sovereign image that performed the migration against the migrated database,
+#   with health enabled, exercises it, and removes the container again. Verifying against a stock
+#   Keycloak of the same version would test a different artifact than the one you are about to run.
+cmd_verify() {
+    local profile="${1:-${PROFILE_NAME:-}}"
+
+    # Load the profile so the DB coordinates and target version are populated — verify runs as its
+    # own subcommand, without going through cmd_migrate, so nothing has loaded it yet.
+    if [[ -n "$profile" ]] && declare -F load_profile_or_discover >/dev/null 2>&1; then
+        load_profile_or_discover "$profile" >/dev/null 2>&1 || true
+    fi
+
+    local version="${PROFILE_KC_TARGET_VERSION:-}"
+    if [[ -z "$version" ]]; then
+        log_error "verify: no target version — pass --profile <name> (or set PROFILE_KC_TARGET_VERSION)"
+        return 1
+    fi
+
+    log_section "Verify: Keycloak $version"
+
+    # L2 first, and from the host: if the database does not claim this version, booting a container
+    # to ask it the same question is a waste of two minutes.
+    if declare -F kc_verify_migration_model >/dev/null 2>&1; then
+        kc_verify_migration_model "$version" || {
+            log_error "The database is NOT at $version — nothing to verify."
+            return 1
+        }
+    fi
+
+    # L3: the data. Free, needs no container and no admin credentials.
+    if declare -F kc_data_verify >/dev/null 2>&1; then
+        kc_data_verify "$version" || return 1
+    fi
+
+    if [[ "${DRY_RUN:-false}" == "true" ]]; then
+        log_info "DRY-RUN: would boot kc-verify-${version}, probe health, run smoke tests, remove it"
+        return 0
+    fi
+
+    local cname="kc-verify-${version}"
+    kc_run_verify_container "$version" "$cname" || return 1
+
+    # Whatever happens below, the container does not outlive this function.
+    local rc=0
+    # shellcheck disable=SC2064 # expand $cname now: it is what we must clean up
+    trap "kc_run_stop_container '$cname' 2>/dev/null || true" RETURN
+
+    # Readiness from the STARTUP LOG, not a /health probe. Health is a build-time option the
+    # optimized sovereign image was not built with (forcing it makes the image refuse to start), so
+    # "started in NNs" / "Listening on" is the signal that works for the artifact we actually have.
+    local attempt=1 ready="false"
+    log_info "Waiting for Keycloak $version to finish starting (from the container log)"
+
+    while [[ $attempt -le ${VERIFY_READY_RETRIES:-60} ]]; do
+        # The container must still be alive AND have logged the started marker.
+        local st
+        st=$(cr inspect -f '{{.State.Status}}' "$cname" 2>/dev/null | tr -d '[:space:]' || true)
+        if [[ "$st" != "running" ]]; then
+            log_error "Verification container '$cname' is '${st:-gone}' — it failed to start. Logs:"
+            cr logs "$cname" 2>&1 | tail -40 | sed 's/^/  /' || true
+            return 1
+        fi
+        if cr logs "$cname" 2>&1 | grep -qiE 'Listening on|started in [0-9]|Running the server'; then
+            ready="true"; break
+        fi
+        sleep "${VERIFY_READY_INTERVAL:-5}"
+        ((attempt++))
+    done
+
+    if [[ "$ready" != "true" ]]; then
+        log_error "Keycloak $version did not report readiness within the budget. Container logs:"
+        cr logs "$cname" 2>&1 | tail -40 | sed 's/^/  /' || true
+        return 1
+    fi
+    log_success "Keycloak $version is up and serving (startup confirmed in the log)"
+
+    # If the image happens to serve health, note it — but never gate on it (ADR-009).
+    local hep hcode
+    hep="$(kc_health_endpoint "$version")"
+    hcode=$(kc_health_probe "run" "$hep" "$cname")
+    if [[ "$hcode" == "200" ]]; then
+        log_success "Health endpoint also ready (${hep##*/})"
+    else
+        log_info "Health not served (HTTP ${hcode}) — expected on an optimized image; not a failure"
+    fi
+
+    # Admin API. This needs the realm's admin credentials, which the tool does not know and cannot
+    # derive — KC_BOOTSTRAP_ADMIN_* only creates an admin on a database that has none, and a
+    # migrated database has plenty. Without them, say what was NOT checked rather than implying it
+    # passed.
+    local admin_user="${PROFILE_KC_ADMIN_USER:-}"
+    local admin_pass="${PROFILE_KC_ADMIN_PASSWORD:-}"
+
+    if [[ -z "$admin_user" || -z "$admin_pass" ]]; then
+        log_warn "No admin credentials — skipping the Admin API smoke tests."
+        log_warn "  Verified: L2 (MIGRATION_MODEL), L3 (data integrity), and readiness."
+        log_warn "  NOT verified: realms/clients/users over the Admin API, token issuance."
+        log_warn "  Set PROFILE_KC_ADMIN_USER / PROFILE_KC_ADMIN_PASSWORD to include them."
+        log_success "Verify PASSED (without Admin API coverage)"
+        return 0
+    fi
+
+    local smoke="$SCRIPT_DIR/smoke_test.sh"
+    if [[ ! -f "$smoke" ]]; then
+        log_warn "smoke_test.sh not found at $smoke — skipping Admin API tests"
+        return 0
+    fi
+
+    # Invoke via `bash` so a missing +x bit (common after checkout/copy) does not skip the tests.
+    local base="http://localhost:${VERIFY_HTTP_PORT:-8080}"
+    log_info "Running Admin API smoke tests against $base"
+    if KC_URL="$base" ADMIN_USER="$admin_user" ADMIN_PASS="$admin_pass" bash "$smoke"; then
+        log_success "Verify PASSED: $version is migrated, ready, and serving the Admin API"
+    else
+        log_error "Admin API smoke tests FAILED against $version"
+        rc=1
+    fi
+
+    return "$rc"
+}
+
+# _kc_offer_rollback <version>
+#   The ONLY path by which a failed hop may restore the database. Reached solely from the L2 gate
+#   (Step 6b), i.e. only when the database itself says the migration did not apply.
+#
+#   The default is NO, deliberately. _confirm auto-answers its DEFAULT under --yes, under
+#   ASSUME_DEFAULTS, and in any non-TTY (CI, cron, pipe) — and migrate_oneshot always passes
+#   --yes. A "Y" default here therefore means: restore a database, unattended, without anyone
+#   seeing the question. Restoring a database is not something to do by accident.
+_kc_offer_rollback() {
+    local version="$1"
+
+    if [[ "${AUTO_ROLLBACK:-false}" == "true" ]]; then
+        log_warn "AUTO_ROLLBACK=true — restoring the pre-${version} backup"
+        cmd_rollback_auto
+        return
+    fi
+
+    if _confirm "Restore the pre-${version} backup?" "N"; then
+        cmd_rollback_auto
+    else
+        log_warn "Not rolling back. The pre-${version} backup is kept in ${WORK_DIR}."
+        log_warn "  Restore it later with: $0 rollback --profile <name>"
+    fi
+}
+
 cmd_rollback_auto() {
     # Non-interactive rollback (called from auto-rollback or --force)
     log_section "Auto-Rollback"
@@ -1985,6 +2797,11 @@ cmd_rollback_auto() {
 
     log_warn "Restoring from: $last_backup"
 
+    # The backup is named backup_before_<version>_<timestamp>.dump — the version it names is the
+    # hop this restore undoes, and therefore the hop whose checkpoints must not survive it.
+    local undone_version=""
+    undone_version=$(basename "$last_backup" | sed -n 's/^backup_before_\(.*\)_[0-9]\{8\}_[0-9]\{6\}\.dump$/\1/p')
+
     # Safety backup before rollback
     local safety_backup="$WORK_DIR/safety_before_rollback_$(date +%Y%m%d_%H%M%S).dump"
     db_backup_keycloak "$safety_backup" "safety backup before rollback" || true
@@ -1998,6 +2815,16 @@ cmd_rollback_auto() {
     }
     # shellcheck disable=SC2119 # auto: shellcheck 0.10 (CI) finding, behavior-preserving
     kc_service_start || true
+
+    # The database is now BEFORE this hop. Any checkpoint claiming the hop was reached is a lie,
+    # and a resume that believed it would skip straight past the migration it needs to redo.
+    if [[ -n "$undone_version" ]]; then
+        clear_checkpoint "$undone_version"
+        update_state "RESUME_SAFE" "false"
+    else
+        log_warn "Could not derive the hop version from '$(basename "$last_backup")' — checkpoints"
+        log_warn "  were NOT cleared. Re-run with --no-resume to avoid trusting stale state."
+    fi
 
     log_success "Auto-rollback completed from: $last_backup"
     return 0
@@ -2042,6 +2869,10 @@ USAGE:
 COMMANDS:
     plan                    Show migration plan without executing
     migrate                 Execute migration
+    verify                  Acceptance-test the migrated database: boots the TARGET image against
+                            it with health enabled, checks L2 + data integrity + readiness, runs the
+                            Admin API smoke tests (needs PROFILE_KC_ADMIN_USER/PASSWORD), removes
+                            the container. This is what to run after a migration completes.
     rollback                Rollback to last backup
 
 OPTIONS:
@@ -2049,6 +2880,14 @@ OPTIONS:
     --dry-run               Show what would be done without executing
     --skip-tests            Skip smoke tests after each migration step
     --yes, -y               Assume "yes" for confirmation prompts (non-interactive)
+    --security-scan         Run ShellCheck/gitleaks over THIS TOOL's own source (off by default;
+                            it analyses the tool, not your database)
+    --no-resume             Ignore checkpoints from a previous (failed) attempt and redo each step
+    --force-unlock          Release a stale Liquibase changelog lock left by a crashed migration
+    --kill-stale            Terminate competing/hung migration processes instead of refusing to run
+    --apply-indexes         Create the indexes Keycloak SKIPS on tables above ~300k rows (it logs
+                            the DDL instead of blocking the boot, so the migration succeeds with
+                            indexes missing). Applied CONCURRENTLY, so no table is locked.
     --monitor               Enable live migration monitor (if available)
     -h, --help              Show this help message
 
@@ -2091,7 +2930,10 @@ PROFILES:
 ENVIRONMENT VARIABLES:
     PGPASSWORD              PostgreSQL password (if using PostgreSQL)
     DB_PASSWORD             Database password (generic)
-    WORK_DIR                Workspace directory (default: ./migration_workspace)
+    WORK_DIR                Workspace directory (default: ./migration_workspace).
+                            Preflight checks FREE SPACE on this path's filesystem.
+    MIN_DISK_FREE_MB        Preflight FLOOR of free working space on WORK_DIR's fs (default: 512).
+                            The backup requirement is measured from the DB, not fixed here.
     ASSUME_DEFAULTS         If "true": run non-interactively with safe defaults (like --yes)
 
 EOF
@@ -2102,6 +2944,10 @@ EOF
 # ============================================================================
 
 main() {
+    # Installed here (not at source time) so sourcing the script for tests/wrappers is inert.
+    trap _kc_on_interrupt INT TERM
+    trap _kc_release_all_locks EXIT
+
     local command="${1:-}"
     shift || true
 
@@ -2144,6 +2990,29 @@ main() {
                 AUTO_CONFIRM=true
                 shift
                 ;;
+            --security-scan)
+                ENABLE_SECURITY_SCAN=true
+                shift
+                ;;
+            --no-resume)
+                NO_RESUME=true
+                shift
+                ;;
+            --force-unlock)
+                FORCE_UNLOCK=true
+                shift
+                ;;
+            --kill-stale)
+                KILL_STALE=true
+                shift
+                ;;
+            --apply-indexes)
+                # Keycloak skips CREATE INDEX on tables above ~300k rows and only logs the DDL. The
+                # migration then reports success with indexes missing. This creates them (CONCURRENTLY,
+                # so it does not lock the table) after each hop.
+                export PROFILE_APPLY_SKIPPED_INDEXES=true
+                shift
+                ;;
             -h|--help)
                 usage
                 exit 0
@@ -2163,6 +3032,9 @@ main() {
             ;;
         rollback)
             cmd_rollback
+            ;;
+        verify)
+            cmd_verify "$PROFILE_NAME"
             ;;
         -h|--help)
             usage

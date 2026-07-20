@@ -429,50 +429,97 @@ dist_container_update() {
             ;;
 
         docker|podman)
-            local container_name="${PROFILE_KC_RUN_CONTAINER_NAME:-${PROFILE_KC_CONTAINER_NAME:-keycloak}}"
+            # PROFILE_KC_RUN_CONTAINER_NAME is the TRANSIENT migration container of `run` mode.
+            # Reading it first here meant that if anything had exported it (a profile, the harness,
+            # a previous oneshot), docker mode would recreate the wrong container — and destroy it
+            # in the process. In docker/podman mode the user's container is PROFILE_KC_CONTAINER_NAME.
+            local container_name="${PROFILE_KC_CONTAINER_NAME:-keycloak}"
 
-            # Capture current env and mounts so the replacement keeps its config.
-            local env_args=() mount_args=()
-            local captured=false
-            if cr inspect "$container_name" &>/dev/null; then
-                local env_lines mount_lines line
-                env_lines="$(cr inspect -f '{{range .Config.Env}}{{println .}}{{end}}' "$container_name" 2>/dev/null || true)"
-                mount_lines="$(cr inspect -f '{{range .Mounts}}{{.Source}}:{{.Destination}}{{println}}{{end}}' "$container_name" 2>/dev/null || true)"
-
-                while IFS= read -r line; do
-                    [[ -n "$line" ]] && env_args+=(-e "$line")
-                done <<< "$env_lines"
-                while IFS= read -r line; do
-                    [[ "$line" == *:* ]] && mount_args+=(-v "$line")
-                done <<< "$mount_lines"
-
-                if [[ ${#env_args[@]} -gt 0 || ${#mount_args[@]} -gt 0 ]]; then
-                    captured=true
-                fi
+            if [[ "${DRY_RUN:-false}" == "true" ]]; then
+                log_info "DRY-RUN: would recreate container '$container_name' on image $full_image"
+                return 0
             fi
 
-            if $captured; then
-                log_info "Captured $(( ${#env_args[@]} / 2 )) env var(s) and $(( ${#mount_args[@]} / 2 )) mount(s) from $container_name"
-
-                cr stop "$container_name" 2>/dev/null || true
-                cr rm "$container_name" 2>/dev/null || true
-
-                cr run -d --name "$container_name" \
-                    "${env_args[@]}" \
-                    "${mount_args[@]}" \
-                    "$full_image" || {
-                    log_error "Failed to start replacement container with image: $full_image"
-                    return 1
-                }
-                log_success "Container $container_name updated to image: $full_image"
-                log_warn "Note: published ports/networks are NOT auto-captured — verify reachability"
-            else
-                # Inspect data insufficient — fall back to manual guidance.
-                cr stop "$container_name" 2>/dev/null || true
-                cr rm "$container_name" 2>/dev/null || true
-                log_warn "Container mode update requires manual run with preserved config"
-                log_info "Please update your run command to use image: $full_image"
+            if ! cr inspect "$container_name" &>/dev/null; then
+                log_error "Container '$container_name' not found — cannot update it to $full_image"
+                log_error "  Set PROFILE_KC_CONTAINER_NAME to the name of your Keycloak container."
+                return 1
             fi
+
+            # Recreating a container means DESTROYING the original: there is no in-place image
+            # swap. Everything needed to rebuild it must therefore be in hand BEFORE the first
+            # destructive call. This block used to stop+rm the container and only then discover it
+            # had nothing to recreate it with — logging "please update your run command manually"
+            # over the wreckage of the user's Keycloak, and returning 0 as if that were fine.
+            local env_args=() mount_args=() port_args=() nets=() line
+            local env_lines mount_lines port_lines net_lines
+
+            env_lines="$(cr inspect -f '{{range .Config.Env}}{{println .}}{{end}}' "$container_name" 2>/dev/null || true)"
+            mount_lines="$(cr inspect -f '{{range .Mounts}}{{.Source}}:{{.Destination}}{{println}}{{end}}' "$container_name" 2>/dev/null || true)"
+            # Published ports and networks: without these the replacement comes up unreachable —
+            # no listener on the host, and no route to the database.
+            # shellcheck disable=SC2016  # Go template vars ($p, $conf, $net) — the runtime expands
+            # them, not the shell; double quotes here would let bash eat them first.
+            port_lines="$(cr inspect \
+                -f '{{range $p, $conf := .HostConfig.PortBindings}}{{range $conf}}{{.HostPort}}:{{$p}}{{println}}{{end}}{{end}}' \
+                "$container_name" 2>/dev/null || true)"
+            # shellcheck disable=SC2016  # Go template var — see above
+            net_lines="$(cr inspect \
+                -f '{{range $net, $_ := .NetworkSettings.Networks}}{{println $net}}{{end}}' \
+                "$container_name" 2>/dev/null || true)"
+
+            while IFS= read -r line; do
+                [[ -n "$line" ]] && env_args+=(-e "$line")
+            done <<< "$env_lines"
+            while IFS= read -r line; do
+                [[ "$line" == *:* ]] && mount_args+=(-v "$line")
+            done <<< "$mount_lines"
+            while IFS= read -r line; do
+                # "8080:8080/tcp" -> -p 8080:8080/tcp
+                [[ "$line" == *:* ]] && port_args+=(-p "$line")
+            done <<< "$port_lines"
+            while IFS= read -r line; do
+                [[ -n "$line" ]] && nets+=("$line")
+            done <<< "$net_lines"
+
+            # A Keycloak with no environment at all is not a Keycloak we know how to rebuild —
+            # it has no DB coordinates. Refuse BEFORE touching anything.
+            if [[ ${#env_args[@]} -eq 0 ]]; then
+                log_error "Could not read the configuration of '$container_name' (no env captured)."
+                log_error "Recreating it would destroy a container we cannot rebuild — refusing."
+                log_error "Update it yourself to image: $full_image, then re-run with --no-resume."
+                return 1
+            fi
+
+            log_info "Captured ${#env_args[@]} env, $(( ${#mount_args[@]} / 2 )) mount(s), $(( ${#port_args[@]} / 2 )) port(s), ${#nets[@]} network(s)"
+
+            # `docker run` attaches ONE network at creation (podman likewise); the rest are joined
+            # afterwards. Passing --network twice silently keeps only one of them.
+            local first_net_arg=()
+            [[ ${#nets[@]} -gt 0 ]] && first_net_arg=(--network "${nets[0]}")
+
+            cr stop "$container_name" 2>/dev/null || true
+            cr rm "$container_name" 2>/dev/null || true
+
+            cr run -d --name "$container_name" \
+                "${env_args[@]}" \
+                "${mount_args[@]}" \
+                "${port_args[@]}" \
+                "${first_net_arg[@]}" \
+                "$full_image" || {
+                log_error "Failed to start replacement container with image: $full_image"
+                log_error "The previous container '$container_name' has already been removed."
+                log_error "Recreate it from your own run command, or restore from backup."
+                return 1
+            }
+
+            local i
+            for (( i = 1; i < ${#nets[@]}; i++ )); do
+                cr network connect "${nets[i]}" "$container_name" 2>/dev/null \
+                    || log_warn "Could not reattach network '${nets[i]}' to $container_name"
+            done
+
+            log_success "Container $container_name updated to image: $full_image"
             ;;
 
         docker-compose)
