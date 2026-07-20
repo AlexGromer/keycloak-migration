@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Planned
+- AWS RDS / GCP Cloud SQL / Azure Database migration examples
+- Ansible playbook wrapper
+- Terraform module
+- Helm chart
+- Sovereign KC16 runtime datasource validation (harness live run)
+- Live validation of the blue-green and multi-tenant paths on a real k8s cluster (the leak/hang/
+  safe-default fixes landed; only structural tests cover them so far — no cluster to run them on)
+
+---
+
+## [3.9.2] - 2026-07-20
+
 ### Fixed (surfaced by a full live 16→26 run on the new code)
 
 - **The competing-process scan flagged the DB-lock coproc and aborted every `--go`.** ADR-011 holds
@@ -109,19 +122,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **The harness no longer aborts if the base KC16 exits before seeding anyway.** Seeding is
   best-effort: it warns, dumps the base container's logs to explain the exit, and continues — the
   integrity gate still checks the default realm across every hop.
-
-### Planned
-- AWS RDS / GCP Cloud SQL / Azure Database migration examples
-- Ansible playbook wrapper
-- Terraform module
-- Helm chart
-- Sovereign KC16 runtime datasource validation (harness live run)
-- Live validation of the blue-green and multi-tenant paths on a real k8s cluster (the leak/hang/
-  safe-default fixes landed; only structural tests cover them so far — no cluster to run them on)
-
----
-
-## [3.9.2] - 2026-07-14
 
 ### Release and packaging
 
