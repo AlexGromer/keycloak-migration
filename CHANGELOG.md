@@ -33,10 +33,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   ancestry walk broke when a launcher was reparented to init. Rewritten to match only processes with
   the script as an actual argv element, excluding both `$$` and `$BASHPID`, with no PPID walk. The
   single-instance lock remains the authoritative concurrent-run guard.
-- **The harness aborted when the base KC16 image exits after schema-init.** `astra-16.1.1`
-  initialises the schema and exits, so seeding via `kcadm exec` found no running container.
-  Seeding is now best-effort: it warns, dumps the base container's logs to explain the exit, and
-  continues — the integrity gate still checks the default realm across every hop.
+- **The harness base KC16 never created a schema — JGroups could not bind.** The WildFly-based
+  `astra-16.1.1` boots an HA profile whose JGroups subsystem binds UDP to the auto-detected private
+  interface; in a container that resolves to the bridge/gateway address (e.g. `172.x.0.1`) and fails
+  with "not a valid address on any local network interface". The failure cascaded — dozens of
+  services stayed down and Keycloak never reached its Liquibase step, so the database came up empty
+  and the seeder had nothing to attach to. The harness now boots KC16 with
+  `JAVA_OPTS_APPEND=-Djboss.bind.address.private=127.0.0.1 -Djgroups.bind_addr=127.0.0.1`
+  (overridable via `HARNESS_KC16_JAVA_OPTS`); the schema initialises and the kcadm seed runs. The
+  same env fixes a manual KC16 seed boot — see QUICKSTART.
+- **The harness no longer aborts if the base KC16 exits before seeding anyway.** Seeding is
+  best-effort: it warns, dumps the base container's logs to explain the exit, and continues — the
+  integrity gate still checks the default realm across every hop.
 
 ### Planned
 - AWS RDS / GCP Cloud SQL / Azure Database migration examples

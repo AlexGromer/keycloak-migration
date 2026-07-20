@@ -116,6 +116,9 @@ assert_equals "0" "$PLAN_RC" "harness dry-run exits 0"
 assert_contains "$PLAN" "DRY-RUN: cr network create"        "plan: bridge network"
 assert_contains "$PLAN" "POSTGRES_PASSWORD=\*\*\*"           "plan: fresh PG (password masked)"
 assert_contains "$PLAN" "DB_VENDOR=postgres"                 "plan: KC16 WildFly base boot"
+# JGroups pinned to loopback: the HA WildFly KC16 otherwise binds UDP to the bridge/gateway address,
+# fails, cascades dozens of dead services, and never reaches Liquibase — leaving an empty schema.
+assert_contains "$PLAN" "jgroups.bind_addr=127.0.0.1"        "plan: KC16 JGroups pinned to loopback"
 assert_contains "$PLAN" "create realms"                      "plan: kcadm random seed"
 assert_contains "$PLAN" "baseline COUNT"                     "plan: data-integrity baseline"
 assert_contains "$PLAN" "img_build 24.0.5"                   "plan: build hop 24.0.5"

@@ -63,11 +63,22 @@ harness_boot_base16() {
     local kc="${HARNESS_KC16_NAME:-kc-harness-16}"
     local img="${HARNESS_KC16_IMAGE:-quay.io/keycloak/keycloak:16.1.1}"
     local admin="${HARNESS_KC_ADMIN:-admin}"
-    _step "cr run -d --name $kc --network $net -e DB_VENDOR=postgres -e DB_ADDR=$pg -e DB_DATABASE=keycloak -e DB_USER=keycloak -e DB_PASSWORD=*** -e KEYCLOAK_USER=$admin -e KEYCLOAK_PASSWORD=*** $img" -- \
+
+    # Pin JGroups to loopback. The WildFly-based KC16 images boot in an HA profile whose JGroups
+    # subsystem binds a UDP socket to the private interface; left to auto-detect it picks the
+    # container's bridge/gateway address (e.g. 172.x.0.1) and fails with "not a valid address on any
+    # local network interface". That failure cascades — dozens of services stay down and Keycloak
+    # never reaches its Liquibase step, so the schema is never created and the seeder finds an empty
+    # database. Loopback is always a valid bind here, and this container talks to Postgres over the
+    # bridge, not JGroups. Overridable for images that need different opts.
+    local jopts="${HARNESS_KC16_JAVA_OPTS:--Djboss.bind.address.private=127.0.0.1 -Djgroups.bind_addr=127.0.0.1}"
+
+    _step "cr run -d --name $kc --network $net -e DB_VENDOR=postgres -e DB_ADDR=$pg -e DB_DATABASE=keycloak -e DB_USER=keycloak -e DB_PASSWORD=*** -e KEYCLOAK_USER=$admin -e KEYCLOAK_PASSWORD=*** -e JAVA_OPTS_APPEND='$jopts' $img" -- \
         cr run -d --name "$kc" --network "$net" \
             -e DB_VENDOR=postgres -e DB_ADDR="$pg" -e DB_DATABASE=keycloak \
             -e DB_USER=keycloak -e DB_PASSWORD="${HARNESS_DB_PASSWORD:-}" \
-            -e KEYCLOAK_USER="$admin" -e KEYCLOAK_PASSWORD="${HARNESS_KC_ADMIN_PASSWORD:-}" "$img"
+            -e KEYCLOAK_USER="$admin" -e KEYCLOAK_PASSWORD="${HARNESS_KC_ADMIN_PASSWORD:-}" \
+            -e JAVA_OPTS_APPEND="$jopts" "$img"
     _step "wait: KC16 schema init (log 'Admin console listening' / Liquibase update) on $kc" -- harness_wait_kc16
 }
 
