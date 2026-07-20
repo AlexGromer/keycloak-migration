@@ -218,15 +218,40 @@ _kc_release_lock() {
 # running container, and neither does any other error path.
 _KC_ACTIVE_RUN_CONTAINER=""
 
+# Other background children that must not outlive the run:
+#   the blue-green smoke-test `kubectl port-forward` (a leaked one keeps holding its local port),
+#   and the multi-tenant parallel workers (a run interrupted before its wait loop would otherwise
+#   leave them migrating in the background). Set while live, cleared when reaped normally.
+_KC_ACTIVE_PORT_FORWARD=""
+_KC_MT_WORKER_PIDS=()
+
+# _kc_kill_reap <pid>... — SIGTERM each, then reap so none is left running or defunct.
+_kc_kill_reap() {
+    local p
+    for p in "$@"; do
+        [[ -n "$p" ]] || continue
+        kill "$p" 2>/dev/null || true
+        wait "$p" 2>/dev/null || true
+    done
+}
+
 # The one teardown, run from the EXIT trap on EVERY exit — success, error, or the interrupt
 # handler's exit. It must leave NOTHING behind: no running transient container, no held lock, and
-# no orphaned/defunct child process (the DB-lock psql, the metrics exporter). Each child is killed
-# AND reaped by its own release function; we do not `wait` with no args (a child that ignored the
-# signal would hang the exit).
+# no orphaned/defunct child process (the DB-lock psql, the metrics exporter, the port-forward, the
+# parallel workers). Each child is killed AND reaped; we do not `wait` with no args (a child that
+# ignored the signal would hang the exit).
 _kc_release_all_locks() {
     if [[ -n "${_KC_ACTIVE_RUN_CONTAINER:-}" ]] && declare -F kc_run_stop_container >/dev/null 2>&1; then
         kc_run_stop_container "$_KC_ACTIVE_RUN_CONTAINER" 2>/dev/null || true
         _KC_ACTIVE_RUN_CONTAINER=""
+    fi
+    if [[ -n "${_KC_ACTIVE_PORT_FORWARD:-}" ]]; then
+        _kc_kill_reap "$_KC_ACTIVE_PORT_FORWARD"
+        _KC_ACTIVE_PORT_FORWARD=""
+    fi
+    if [[ ${#_KC_MT_WORKER_PIDS[@]} -gt 0 ]]; then
+        _kc_kill_reap "${_KC_MT_WORKER_PIDS[@]}"
+        _KC_MT_WORKER_PIDS=()
     fi
     declare -F prom_stop_exporter >/dev/null 2>&1 && prom_stop_exporter >/dev/null 2>&1
     _kc_release_lock
@@ -1811,21 +1836,25 @@ migrate_blue_green() {
             return 1
         fi
 
-        # Port-forward to green pod for testing
+        # Port-forward to green pod for testing. Recorded so the EXIT/interrupt teardown kills it if
+        # we die during the sleep or the smoke tests — otherwise it leaks, still holding port 18080.
         kubectl port-forward "$green_pod" 18080:8080 -n "$namespace" &
         local pf_pid=$!
+        _KC_ACTIVE_PORT_FORWARD="$pf_pid"
         sleep 5
 
         export KC_URL="http://localhost:18080"
 
         if run_smoke_tests "$target_version"; then
             log_success "Green deployment smoke tests passed"
-            kill $pf_pid 2>/dev/null || true
+            _kc_kill_reap "$pf_pid"; _KC_ACTIVE_PORT_FORWARD=""
         else
             log_error "Green deployment smoke tests failed"
-            kill $pf_pid 2>/dev/null || true
+            _kc_kill_reap "$pf_pid"; _KC_ACTIVE_PORT_FORWARD=""
 
-            if _confirm "Delete green deployment?" "Y"; then
+            # Default NO: under --yes / non-TTY, _confirm auto-answers its default, and deleting a
+            # deployment unattended is the ADR-009 class of mistake.
+            if _confirm "Delete green deployment?" "N"; then
                 kubectl delete deployment/"${deployment}-green" -n "$namespace"
             fi
 
@@ -1846,8 +1875,9 @@ migrate_blue_green() {
     log_info "Waiting 30s for connections to drain..."
     sleep 30
 
-    # Step 8: Delete blue deployment
-    if _confirm "Delete blue deployment (old version)?" "Y"; then
+    # Step 8: Delete blue deployment. Default NO — deleting the old (rollback-target) deployment
+    # unattended under --yes/non-TTY removes your fallback right after a switch. Opt in explicitly.
+    if _confirm "Delete blue deployment (old version)?" "N"; then
         log_info "Deleting blue deployment..."
         kubectl delete deployment/"$deployment" -n "$namespace"
         log_success "Blue deployment deleted"

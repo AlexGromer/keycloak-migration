@@ -203,6 +203,24 @@ assert_true "[[ $has_mode_detection -gt 0 ]]" \
     "Mode detection logic present in cmd_migrate"
 
 # ============================================================================
+describe "process lifecycle: parallel workers do not leak or hang"
+# ============================================================================
+# The workers are launched as `( mt_worker ... ) &`. Two hazards: an interrupt before the wait loop
+# would leave them running, and a plain `wait` on a hung worker would hang the whole migration.
+mt_src="$(sed -n '/^mt_execute_parallel()/,/^}/p' "$PROJECT_ROOT/scripts/lib/multi_tenant.sh")"
+assert_contains "$mt_src" "_KC_MT_WORKER_PIDS" \
+    "worker pids are recorded so the run's EXIT/interrupt teardown can kill them"
+assert_contains "$mt_src" "deadline" \
+    "the wait loop is bounded by a deadline (a hung worker cannot hang the run)"
+assert_contains "$mt_src" "exceeded the" \
+    "a worker past its timeout is killed and counted failed, not waited on forever"
+
+# The teardown in the main script actually kills the recorded workers.
+teardown="$(sed -n '/^_kc_release_all_locks()/,/^}/p' "$PROJECT_ROOT/scripts/migrate_keycloak_v3.sh")"
+assert_contains "$teardown" "_KC_MT_WORKER_PIDS" \
+    "the EXIT teardown reaps the parallel workers"
+
+# ============================================================================
 # Report
 # ============================================================================
 

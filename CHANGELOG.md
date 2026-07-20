@@ -44,6 +44,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   pre-set `PROFILE_CONTAINER_IMAGE_REF` still wins. `verify --profile <name>` — the documented
   post-migration step — works out of the box; before, it fell back to `registry/image:version` and
   could not find the os-prefixed image.
+- **The blue-green and multi-tenant paths had the same leak/hang/unsafe-default classes; fixed
+  too.** `blue_green.sh` and `canary.sh` themselves spawn nothing, but the blue-green PATH in
+  `migrate_keycloak_v3.sh` runs a `kubectl port-forward` for the green smoke test that was killed on
+  the happy paths but never reaped and never in a trap — a Ctrl-C during the test leaked it (and its
+  port). And its two "Delete green/blue deployment?" prompts defaulted to **Y** (unattended deletion
+  under `--yes`/non-TTY — the ADR-009 class). `multi_tenant.sh`'s parallel workers were reaped only
+  on the happy path (an interrupt before the wait loop left N migrations running) and `wait` had no
+  timeout (a hung worker hung the whole run). The port-forward and the worker pids are now recorded
+  and killed+reaped by the single EXIT/interrupt teardown; the multi-tenant wait is deadline-bounded
+  (a worker past its timeout is killed and counted failed); the delete prompts default to N.
+  Structural tests added (these k8s/multi-tenant paths still await a live cluster run).
 - **Process lifecycle: no orphans, no zombies, no leaked ports on any exit.** The run spawns two
   long-lived children — the DB-lock connection and (with `--monitor`) the metrics exporter — and
   neither was torn down cleanly. The DB-lock coproc was a bash wrapper around psql: killing it left
@@ -105,7 +116,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Terraform module
 - Helm chart
 - Sovereign KC16 runtime datasource validation (harness live run)
-- Port the v3.9.1/v3.9.2 fixes to `blue_green.sh` / `canary.sh` (untested, out of scope so far)
+- Live validation of the blue-green and multi-tenant paths on a real k8s cluster (the leak/hang/
+  safe-default fixes landed; only structural tests cover them so far — no cluster to run them on)
 
 ---
 

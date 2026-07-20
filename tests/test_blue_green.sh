@@ -156,6 +156,26 @@ declare -F bluegreen_rollback >/dev/null && \
     assert_true "true" "Rollback function exists"
 
 # ============================================================================
+# ============================================================================
+test_report "Test Suite 7: Process lifecycle & safe defaults"
+# ============================================================================
+# blue_green.sh (the lib) has no background processes. The blue-green PATH in migrate_keycloak_v3.sh
+# does: a `kubectl port-forward` for the green smoke test, plus two destructive delete prompts.
+bg_fn="$(sed -n '/^migrate_blue_green()/,/^}/p' "$PROJECT_ROOT/scripts/migrate_keycloak_v3.sh")"
+assert_contains "$bg_fn" "_KC_ACTIVE_PORT_FORWARD" \
+    "the port-forward is recorded so the EXIT/interrupt teardown kills it (no leaked port)"
+assert_contains "$bg_fn" "_kc_kill_reap" \
+    "the port-forward is killed AND reaped, not just killed"
+# Destructive prompts default to NO — under --yes/non-TTY _confirm auto-answers its default, and
+# deleting a deployment unattended is the ADR-009 class of mistake.
+assert_true "! grep -qE '_confirm \"Delete (green|blue).*\" \"Y\"' <<< \"\$bg_fn\"" \
+    "no destructive delete prompt defaults to Y"
+assert_contains "$bg_fn" '_confirm "Delete green deployment?" "N"' \
+    "delete-green defaults to N"
+assert_contains "$bg_fn" '_confirm "Delete blue deployment (old version)?" "N"' \
+    "delete-blue defaults to N"
+
+# ============================================================================
 # Cleanup
 # ============================================================================
 
