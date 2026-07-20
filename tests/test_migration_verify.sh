@@ -62,6 +62,26 @@ assert_contains "$(cat "$WORK_DIR/skipped_indexes_26.6.3.sql")" \
     "CREATE INDEX IDX_USER_ATTR" \
     "captured DDL contains the deferred CREATE INDEX"
 
+# Dedup: Keycloak logs each skipped index from TWO subsystems
+# (CustomCreateIndexChange during migration + DatabaseIndexChecker at startup),
+# so the same CREATE INDEX must be captured only once.
+dup_log="$WORK_DIR/kc_startup_dup.log"
+{
+    echo "WARN [CustomCreateIndexChange] Following index should be created: CREATE INDEX IDX_DUP ON public.USER_ENTITY(REALM_ID, CREATED_TIMESTAMP);"
+    echo "WARN [DatabaseIndexChecker] Missing database index IDX_DUP on table USER_ENTITY. Create the index manually: CREATE INDEX IDX_DUP ON public.USER_ENTITY(REALM_ID, CREATED_TIMESTAMP);"
+} >"$dup_log"
+kc_check_skipped_indexes "$dup_log" dup >/dev/null 2>&1
+assert_equals "1" "$(grep -c 'CREATE INDEX IDX_DUP' "$WORK_DIR/skipped_indexes_dup.sql")" \
+    "the same skipped index logged twice (two KC subsystems) is captured once"
+
+# _mv_to_concurrent rewrites to the idempotent, non-blocking form.
+assert_equals "CREATE INDEX CONCURRENTLY IF NOT EXISTS IDX_X ON T (A);" \
+    "$(_mv_to_concurrent 'CREATE INDEX IDX_X ON T (A);')" \
+    "plain CREATE INDEX becomes CONCURRENTLY IF NOT EXISTS"
+assert_equals "CREATE INDEX CONCURRENTLY IF NOT EXISTS IDX_X ON T (A);" \
+    "$(_mv_to_concurrent 'CREATE INDEX CONCURRENTLY IF NOT EXISTS IDX_X ON T (A);')" \
+    "already-idempotent statement is left unchanged"
+
 rm -rf "$WORK_DIR"
 
 # ============================================================================

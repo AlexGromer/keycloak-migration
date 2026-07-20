@@ -17,7 +17,7 @@ set -euo pipefail
 # The single source of truth for the tool's version. The release workflow refuses to publish a tag
 # that disagrees with this line — the versions in this repo had drifted to four different answers
 # (code 3.0.0, README 3.8, Dockerfile 3.0.0, CHANGELOG 3.9.1) with no 3.9 tag existing at all.
-VERSION="3.9.3"
+VERSION="3.9.4"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 LIB_DIR="$SCRIPT_DIR/lib"
 # shellcheck disable=SC2034  # PROJECT_ROOT kept for external/sourced use

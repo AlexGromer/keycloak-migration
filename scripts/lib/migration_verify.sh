@@ -92,18 +92,29 @@ kc_db_clear_changelog_lock() {
     _mv_psql "UPDATE databasechangeloglock SET locked=false, lockedby=null, lockgranted=null WHERE locked;" >/dev/null 2>&1
 }
 
-# Rewrite a "CREATE INDEX ..." statement into a CONCURRENTLY variant
-# (case-insensitive). Already-concurrent or non-matching statements pass through.
+# Rewrite a "CREATE INDEX ..." statement into the idempotent, non-blocking
+# "CREATE INDEX CONCURRENTLY IF NOT EXISTS ..." variant (case-insensitive).
+# IF NOT EXISTS makes a re-apply (or an index Keycloak already created) a no-op
+# instead of a "relation already exists" error. Non-matching statements pass
+# through unchanged.
 _mv_to_concurrent() {
-    local stmt="$1" upper
+    local stmt="$1" upper rest
     upper="$(printf '%s' "$stmt" | tr '[:lower:]' '[:upper:]')"
     case "$upper" in
-        *"CREATE INDEX CONCURRENTLY"*)
+        "CREATE INDEX CONCURRENTLY IF NOT EXISTS "*)
             printf '%s' "$stmt"
             ;;
+        "CREATE INDEX CONCURRENTLY "*)
+            rest="${stmt#[Cc][Rr][Ee][Aa][Tt][Ee] [Ii][Nn][Dd][Ee][Xx] [Cc][Oo][Nn][Cc][Uu][Rr][Rr][Ee][Nn][Tt][Ll][Yy] }"
+            printf 'CREATE INDEX CONCURRENTLY IF NOT EXISTS %s' "$rest"
+            ;;
+        "CREATE INDEX IF NOT EXISTS "*)
+            rest="${stmt#[Cc][Rr][Ee][Aa][Tt][Ee] [Ii][Nn][Dd][Ee][Xx] [Ii][Ff] [Nn][Oo][Tt] [Ee][Xx][Ii][Ss][Tt][Ss] }"
+            printf 'CREATE INDEX CONCURRENTLY IF NOT EXISTS %s' "$rest"
+            ;;
         "CREATE INDEX "*)
-            printf 'CREATE INDEX CONCURRENTLY %s' \
-                "${stmt#[Cc][Rr][Ee][Aa][Tt][Ee] [Ii][Nn][Dd][Ee][Xx] }"
+            rest="${stmt#[Cc][Rr][Ee][Aa][Tt][Ee] [Ii][Nn][Dd][Ee][Xx] }"
+            printf 'CREATE INDEX CONCURRENTLY IF NOT EXISTS %s' "$rest"
             ;;
         *)
             printf '%s' "$stmt"
@@ -214,11 +225,21 @@ kc_check_skipped_indexes() {
     # Keycloak emits the deferred DDL on the same log line as the warning, e.g.
     #   "... index IDX_x was not created ... CREATE INDEX IDX_x ON tbl (...);"
     #   "... Adding the index IDX_x to ... concurrently ..."
+    # Keycloak logs each skipped index from TWO subsystems — CustomCreateIndexChange
+    # (during the migration) and DatabaseIndexChecker (at startup) — so the same
+    # CREATE INDEX statement is emitted twice. Dedup on a normalised key (uppercased,
+    # whitespace-collapsed, trailing ';' stripped) so we capture each index once and
+    # --apply-indexes does not attempt to create it twice.
     local -a statements=()
-    local line sql
+    local -A _mv_seen=()
+    local line sql key
     while IFS= read -r line; do
         sql="$(printf '%s\n' "$line" | grep -oiE 'CREATE INDEX[^;]*;?' | head -1)"
-        [[ -n "$sql" ]] && statements+=("$sql")
+        [[ -n "$sql" ]] || continue
+        key="$(printf '%s' "$sql" | tr '[:lower:]' '[:upper:]' | tr -s '[:space:]' ' ' | sed 's/[[:space:]]*;*[[:space:]]*$//')"
+        [[ -n "${_mv_seen[$key]:-}" ]] && continue
+        _mv_seen[$key]=1
+        statements+=("$sql")
     done < <(grep -iE 'index .* was not created|Adding the index .* concurrently|CREATE INDEX' \
                  "$logfile" 2>/dev/null || true)
 
