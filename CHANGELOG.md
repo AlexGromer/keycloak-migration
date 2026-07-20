@@ -18,6 +18,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [3.9.5] - 2026-07-20
+
+### Fixed
+
+- **A reused work dir made the tool report a SUCCESSFUL migration that never ran (false success).**
+  State reconciliation (ADR-008) correctly reads the database version and rebuilds the hop list, but
+  it did not invalidate the per-hop *phase* checkpoints in the work dir. A work dir carried over from
+  an earlier run (against a different or rebuilt database) could hold `CHECKPOINT_<hop>=migrated` /
+  `health_ok` / `tests_ok` for a hop the current database never reached; the resume logic trusted it,
+  skipped `wait_for_migration` + the L2/L3 gates + the index capture, restarted the containers, and
+  reported the hop migrated — while the database stayed exactly where it was (e.g. still 16.1.1).
+  Reconciliation now treats the database as the fact: any checkpoint claiming a migration the
+  database does not have is invalidated, and the stale run state (`migration_state.env`,
+  `data_baseline.env` — which would otherwise mis-seed the L3 baseline — and the `.preflight_passed`
+  marker) is archived into `<work-dir>/stale_<timestamp>/` (audit trail, not deleted) so the affected
+  hops run for real. A legitimate resume — a hop interrupted before `migrated` and consistent with the
+  database — is left untouched. Verified live: a fresh 16.1.1 DB with a work dir pre-seeded with stale
+  `tests_ok` checkpoints now archives the state and migrates all the way to 26.6.3 instead of
+  reporting a false success. VERSION 3.9.4 -> 3.9.5.
+
+---
+
 ## [3.9.4] - 2026-07-20
 
 ### Fixed

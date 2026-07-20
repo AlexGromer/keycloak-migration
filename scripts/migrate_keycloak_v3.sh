@@ -17,7 +17,7 @@ set -euo pipefail
 # The single source of truth for the tool's version. The release workflow refuses to publish a tag
 # that disagrees with this line — the versions in this repo had drifted to four different answers
 # (code 3.0.0, README 3.8, Dockerfile 3.0.0, CHANGELOG 3.9.1) with no 3.9 tag existing at all.
-VERSION="3.9.4"
+VERSION="3.9.5"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 LIB_DIR="$SCRIPT_DIR/lib"
 # shellcheck disable=SC2034  # PROJECT_ROOT kept for external/sourced use
@@ -512,6 +512,51 @@ kc_kill_stale_processes() {
 #
 # Returns: 0 = proceed, 1 = abort, 2 = nothing to do (already at target).
 # ============================================================================
+# _kc_invalidate_stale_checkpoints <target_major> <db_version>
+#   ADR-008 guard against FALSE SUCCESS. A work dir reused across runs can carry
+#   CHECKPOINT_<hop>=migrated/health_ok for a hop THIS database never actually reached (the dir
+#   survived from an earlier run — against a different or rebuilt database). The resume logic would
+#   then trust the checkpoint, SKIP wait_for_migration + the L2/L3 gates + the index capture, and
+#   report the hop "migrated" while the database stayed exactly where it was. The database is the
+#   fact. When any to-run hop carries a checkpoint claiming it already migrated, the whole run state
+#   is stale: archive it (audit trail, not deleted) into $WORK_DIR/stale_<ts>/ and reset, so the
+#   hops run for real. A legitimate resume — a hop interrupted BEFORE 'migrated', with the DB
+#   consistent with it — is left untouched.
+_kc_invalidate_stale_checkpoints() {
+    local target_major="$1" db_version="$2"
+    [[ -n "$db_version" ]] || return 0                       # no DB truth to judge against
+    [[ -f "$STATE_FILE" ]] || return 0                       # no state file -> nothing stale
+    local hops="${MIGRATION_HOPS[$target_major]:-}"
+    [[ -n "$hops" ]] || return 0
+
+    local -a stale=()
+    local v cp s ts archive f
+    for v in $hops; do
+        _ver_le "$v" "$db_version" && continue               # DB already has this hop -> checkpoint legit
+        cp="$(get_checkpoint "$v")"
+        [[ -n "$cp" ]] || continue
+        should_skip_to "$cp" "migrated" && stale+=("${v} claims '${cp}'")
+    done
+    [[ ${#stale[@]} -gt 0 ]] || return 0
+
+    log_warn "Work dir has checkpoints claiming a migration the DATABASE (${db_version}) does not have:"
+    for s in "${stale[@]}"; do log_warn "    (stale) ${s}"; done
+    log_warn "Trusting them would SKIP the migration and report a false success (ADR-008: the DB is the fact)."
+
+    if [[ "${DRY_RUN:-false}" == "true" ]]; then
+        log_info "DRY-RUN: would archive the stale run state to \$WORK_DIR/stale_<ts>/ and start these hops clean"
+        return 0
+    fi
+
+    ts="$(date -u +%Y%m%d_%H%M%S)"
+    archive="${WORK_DIR}/stale_${ts}"
+    mkdir -p "$archive"
+    for f in migration_state.env data_baseline.env .preflight_passed; do
+        [[ -e "${WORK_DIR}/${f}" ]] && mv -f "${WORK_DIR}/${f}" "${archive}/" 2>/dev/null || true
+    done
+    log_success "Stale run state archived to ${archive} (state/baseline/preflight-marker reset) — hops will run for real"
+}
+
 kc_reconcile_state() {
     local target_major="$1"
 
@@ -562,6 +607,12 @@ kc_reconcile_state() {
         log_warn "Cannot read MIGRATION_MODEL (DB not initialised by Keycloak, or unreachable)."
         log_warn "Falling back to the profile's claim: current_version=${PROFILE_KC_CURRENT_VERSION:-<unset>}"
     fi
+
+    # --- 1b. Stale checkpoints vs the DATABASE (false-success guard, ADR-008) ---
+    # A reused work dir can carry CHECKPOINT_<hop>=migrated/health_ok while THIS database never
+    # reached that hop. Trusting it makes the run SKIP the migration and report a false success.
+    # The database is the fact; invalidate (archive) any such state before planning the hops.
+    _kc_invalidate_stale_checkpoints "$target_major" "$db_version"
 
     # --- 2. Stale Liquibase lock: a crashed migration blocks every later Keycloak ---
     if declare -F kc_db_changelog_locked >/dev/null 2>&1; then
