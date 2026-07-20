@@ -111,6 +111,14 @@ profile_load() {
     # last ':'). So a value pre-set in the ENVIRONMENT WINS over the YAML value — this lets
     # wrappers/CI drive the exact image ref without re-tagging. Empty env => YAML as before.
     export PROFILE_CONTAINER_IMAGE_REF="${PROFILE_CONTAINER_IMAGE_REF:-$(parse_yaml_value "image_ref" "$profile_file")}"
+    # …and, if still unset, from a SIDECAR file next to the profile. The flat YAML cannot hold a
+    # ':'-bearing ref, so profile_save writes the template (e.g. ghcr.io/ns/img:astra-{version}) to
+    # <profile>.image-ref and we read it verbatim here. This is what lets `verify --profile <name>`
+    # resolve the sovereign image without the caller having to re-set PROFILE_CONTAINER_IMAGE_REF.
+    if [[ -z "${PROFILE_CONTAINER_IMAGE_REF:-}" ]]; then
+        local _ref_sidecar="${profile_file%.yaml}.image-ref"
+        [[ -f "$_ref_sidecar" ]] && export PROFILE_CONTAINER_IMAGE_REF="$(tr -d '[:space:]' < "$_ref_sidecar")"
+    fi
     export PROFILE_CONTAINER_IMAGE_TAR="${PROFILE_CONTAINER_IMAGE_TAR:-$(parse_yaml_value "image_tar" "$profile_file")}"
     export PROFILE_CONTAINER_ACQUISITION=$(parse_yaml_value "acquisition" "$profile_file")
     export PROFILE_CONTAINER_ACQUISITION="${PROFILE_CONTAINER_ACQUISITION:-pull}"
@@ -219,8 +227,13 @@ EOF
     runtime: ${PROFILE_CONTAINER_RUNTIME:-}
     acquisition: ${PROFILE_CONTAINER_ACQUISITION:-pull}
 EOF
-        # NOTE: image_ref carries ':' and CANNOT be stored in this flat YAML — pass it via
-        # the PROFILE_CONTAINER_IMAGE_REF env var (profile_load honors a pre-set value).
+        # image_ref carries ':' (e.g. ghcr.io/ns/img:astra-{version}) which the flat YAML parser
+        # truncates, so it CANNOT live in the profile. Persist it to a sidecar file that
+        # profile_load reads verbatim — without this, a re-run or `verify --profile` could not
+        # resolve the sovereign image and fell back to registry/image:version (no os-prefixed tag).
+        if [[ -n "${PROFILE_CONTAINER_IMAGE_REF:-}" ]]; then
+            printf '%s\n' "${PROFILE_CONTAINER_IMAGE_REF}" > "${profile_file%.yaml}.image-ref"
+        fi
         [[ -n "${PROFILE_CONTAINER_IMAGE_TAR:-}" ]] && \
             printf '    image_tar: %s\n' "${PROFILE_CONTAINER_IMAGE_TAR}" >> "$profile_file"
         printf '\n' >> "$profile_file"

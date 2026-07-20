@@ -36,4 +36,36 @@ unset PROFILE_CONTAINER_ACQUISITION
 profile_load "savetest" >/dev/null 2>&1
 assert_equals "preloaded" "${PROFILE_CONTAINER_ACQUISITION:-}" "acquisition reloaded from YAML"
 
+describe "image_ref round-trips through a SIDECAR (flat YAML cannot hold the ':')"
+# The sovereign tag ghcr.io/ns/img:astra-{version} carries ':' and '{}', which the flat YAML parser
+# truncates. Without persistence, `verify --profile <name>` could not resolve the image and fell
+# back to registry/image:version (no os-prefixed tag). profile_save now writes a sidecar.
+export PROFILE_CONTAINER_IMAGE_REF='ghcr.io/alexgromer/keycloak-migration:astra-{version}'
+profile_save "reftest" >/dev/null
+assert_file_exists "$PROFILE_DIR/reftest.image-ref" "sidecar written next to the profile"
+assert_equals 'ghcr.io/alexgromer/keycloak-migration:astra-{version}' \
+    "$(cat "$PROFILE_DIR/reftest.image-ref")" "sidecar holds the ref verbatim (':' and {} intact)"
+
+# The ref must NOT be smuggled into the flat YAML (it would corrupt the parser).
+assert_true "! grep -q 'image_ref:' '$PROFILE_DIR/reftest.yaml'" \
+    "the ':'-bearing ref is kept OUT of the flat YAML"
+
+# profile_load restores it from the sidecar when the environment does not already carry it.
+unset PROFILE_CONTAINER_IMAGE_REF
+profile_load "reftest" >/dev/null 2>&1
+assert_equals 'ghcr.io/alexgromer/keycloak-migration:astra-{version}' \
+    "${PROFILE_CONTAINER_IMAGE_REF:-}" "profile_load reads the ref back from the sidecar"
+
+# dist_image_ref then resolves the per-hop image without any env priming — the verify --profile fix.
+source "$PROJECT_ROOT/scripts/lib/distribution_handler.sh"
+assert_equals 'ghcr.io/alexgromer/keycloak-migration:astra-26.6.3' \
+    "$(dist_image_ref 26.6.3)" "the sovereign image resolves from the profile alone"
+
+# A pre-set environment value still WINS over the sidecar (CI / wrapper override).
+PROFILE_CONTAINER_IMAGE_REF='override/img:{version}' profile_load "reftest" >/dev/null 2>&1 || true
+export PROFILE_CONTAINER_IMAGE_REF='override/img:{version}'
+profile_load "reftest" >/dev/null 2>&1
+assert_equals 'override/img:{version}' "${PROFILE_CONTAINER_IMAGE_REF:-}" \
+    "a pre-set env ref overrides the sidecar"
+
 test_report

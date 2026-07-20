@@ -31,12 +31,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   informational, and increments with assignments. Verified end-to-end: `verify` boots the target
   sovereign image, confirms readiness from the log, and passes all 7 Admin-API smoke tests.
 
-### Known gaps
-
-- `verify --profile <oneshot-profile>` needs `PROFILE_CONTAINER_IMAGE_REF='<ns>:<os>-{version}'` in
-  the environment: the sovereign image tag (`astra-<version>`) is not persisted in the profile,
-  because the flat-YAML parser cannot hold a value containing `:`. A sidecar for the ref is the
-  planned fix.
+- **A failed hop leaked its transient container, and cleanup ran only on the happy path or Ctrl-C.**
+  The transient `kc-migrate-<version>-<token>` container was removed at the end of a successful hop
+  and by the interrupt handler, but a hop that failed at wait/L2/L3/health returned before that and
+  left the container running; the EXIT trap released the locks but not the container. The run now
+  records the live container in `_KC_ACTIVE_RUN_CONTAINER` and the EXIT handler removes it on ANY
+  exit — success, error, or interrupt. (Both locks were already released on every exit; this closes
+  the container half.)
+- **`verify --profile` now resolves the sovereign image without an env var (sidecar).** The
+  `:`-bearing tag (`ghcr.io/ns/img:astra-{version}`) cannot live in the flat-YAML profile, so
+  `profile_save` writes it to a `<profile>.image-ref` sidecar and `profile_load` reads it back. A
+  pre-set `PROFILE_CONTAINER_IMAGE_REF` still wins. `verify --profile <name>` — the documented
+  post-migration step — works out of the box; before, it fell back to `registry/image:version` and
+  could not find the os-prefixed image.
+- **`/auth` is a per-instance runtime setting, and the tool no longer assumes it.** The HTTP
+  relative path is `/auth` on KC16 (WildFly) and `/` on KC17+ (Quarkus), freely changeable via
+  `KC_HTTP_RELATIVE_PATH`. `smoke_test.sh`'s default `KC_URL` dropped its stale `/auth` suffix (the
+  tool targets 25/26, which serve at the root); pass `KC_URL=.../auth` for an instance configured
+  that way.
 
 ### Added
 

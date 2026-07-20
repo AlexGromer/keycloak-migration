@@ -70,6 +70,23 @@ assert_true "MIGRATION_LOCK_FILE='$_lockdir/migration.lock' _kc_acquire_lock >/d
     "reclaims a stale lock from a dead process"
 rm -rf "$_lockdir"
 
+describe "REGRESSION: the EXIT trap removes a transient container left by a FAILED hop"
+# A hop that fails at wait/L2/L3/health returns before the normal end-of-hop stop, so the transient
+# kc-migrate-<v>-<token> container used to keep running (only the happy path and Ctrl-C removed it).
+# The EXIT handler now cleans up whatever _KC_ACTIVE_RUN_CONTAINER still names.
+assert_true "declare -F _kc_release_all_locks" "_kc_release_all_locks defined"
+_stopped=""
+# shellcheck disable=SC2329  # invoked indirectly by _kc_release_all_locks
+kc_run_stop_container() { _stopped="$1"; }   # stub: record what would be removed
+export MIGRATION_LOCK_FILE="$(mktemp -u)"    # a lock path that does not exist -> release is a no-op
+_KC_ACTIVE_RUN_CONTAINER="kc-migrate-26.6.3-deadbeef"
+_kc_release_all_locks
+assert_equals "kc-migrate-26.6.3-deadbeef" "$_stopped" \
+    "the EXIT handler stops the still-live transient container"
+assert_empty "${_KC_ACTIVE_RUN_CONTAINER}" \
+    "and clears the tracker so it is not stopped twice"
+unset -f kc_run_stop_container
+
 describe "REGRESSION: competing-process detection has no FALSE POSITIVES"
 # The old scan was `pgrep -f 'migrate_..._v3\.sh|migrate_oneshot\.sh'` plus a PPID-ancestry walk.
 # It flagged a lone run as its own competitor and REFUSED TO START, because:

@@ -16,8 +16,12 @@ CYAN='\033[0;36m'
 NC='\033[0m'
 BOLD='\033[1m'
 
-# Configuration
-KC_URL="${KC_URL:-http://localhost:8080/auth}"
+# Configuration.
+# Default has NO /auth: KC 17+ (Quarkus) serves at the root context, and this tool targets 25/26.
+# The relative path is a per-instance runtime setting (KC_HTTP_RELATIVE_PATH). If your instance
+# serves under /auth (KC16-style, or an instance configured that way), pass it in the URL:
+#   KC_URL=http://host:8080/auth
+KC_URL="${KC_URL:-http://localhost:8080}"
 ADMIN_USER="${ADMIN_USER:-admin}"
 ADMIN_PASS="${ADMIN_PASS:-admin}"
 TIMEOUT=10

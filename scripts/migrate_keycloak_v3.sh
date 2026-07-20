@@ -212,10 +212,21 @@ _kc_release_lock() {
     _KC_LOCK_HELD="false"
 }
 
-# Release BOTH locks — the workspace file lock and the database advisory lock. Used by the EXIT
-# trap and the interrupt handler so neither lock outlives the run. The DB lock also self-releases
-# when our connection drops, but dropping it explicitly frees the database the instant we finish.
+# The transient run-mode container of the CURRENT hop, while it is live. Set once the container is
+# started, cleared when it is stopped normally. The EXIT trap removes whatever is still named here —
+# so a hop that fails at wait/L2/L3/health (returning before the normal stop) does not leak a
+# running container, and neither does any other error path.
+_KC_ACTIVE_RUN_CONTAINER=""
+
+# Release BOTH locks AND remove any still-live transient container. Runs from the EXIT trap (every
+# exit: success, error, or the interrupt handler's exit) so nothing outlives the run. The DB lock
+# also self-releases when our connection drops, but dropping it explicitly frees the database the
+# instant we finish.
 _kc_release_all_locks() {
+    if [[ -n "${_KC_ACTIVE_RUN_CONTAINER:-}" ]] && declare -F kc_run_stop_container >/dev/null 2>&1; then
+        kc_run_stop_container "$_KC_ACTIVE_RUN_CONTAINER" 2>/dev/null || true
+        _KC_ACTIVE_RUN_CONTAINER=""
+    fi
     _kc_release_lock
     declare -F kc_db_lock_release >/dev/null 2>&1 && kc_db_lock_release
     return 0
@@ -1974,6 +1985,13 @@ migrate_to_version() {
         set_checkpoint "$target_version" "started"
     fi
 
+    # From here the transient container is live. Record it so it is removed on ANY exit — not only
+    # the happy path (Step 8) or a Ctrl-C. A hop that fails at wait/L2/L3/health returns before
+    # Step 8, and used to leave its container running; the EXIT trap now cleans it up.
+    if [[ "${PROFILE_KC_DEPLOYMENT_MODE}" == "run" ]]; then
+        _KC_ACTIVE_RUN_CONTAINER="$(kc_run_container_name "$target_version")"
+    fi
+
     # Step 6: Wait for migration to complete
     if [[ -z "$existing_cp" ]] || ! should_skip_to "$existing_cp" "migrated"; then
         wait_for_migration "$target_version" || return 1
@@ -2056,6 +2074,7 @@ migrate_to_version() {
     # before the next hop boots (single-instance migration; avoids DB lock contention).
     if [[ "${PROFILE_KC_DEPLOYMENT_MODE}" == "run" ]] && declare -F kc_run_stop_container >/dev/null 2>&1; then
         kc_run_stop_container "$(kc_run_container_name "$target_version")" || true
+        _KC_ACTIVE_RUN_CONTAINER=""   # cleaned up normally — nothing left for the EXIT trap to do
     fi
 
     # Mark step as fully successful
