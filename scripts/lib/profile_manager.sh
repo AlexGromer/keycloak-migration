@@ -135,7 +135,11 @@ profile_load() {
     export PROFILE_MIGRATION_TIMEOUT=$(parse_yaml_value "timeout_per_version" "$profile_file")
     export PROFILE_MIGRATION_RUN_TESTS=$(parse_yaml_value "run_smoke_tests" "$profile_file")
     export PROFILE_MIGRATION_BACKUP=$(parse_yaml_value "backup_before_step" "$profile_file")
-    export PROFILE_APPLY_SKIPPED_INDEXES=$(parse_yaml_value "apply_skipped_indexes" "$profile_file")
+    # v3.9.6: env WINS over the YAML value (same precedence as image_ref above). The `--apply-indexes`
+    # flag exports PROFILE_APPLY_SKIPPED_INDEXES=true BEFORE profile_load runs; the old unconditional
+    # assignment clobbered it back to the profile default (false), so --apply-indexes was silently
+    # ignored and skipped indexes were captured but never applied. Empty env => YAML => false.
+    export PROFILE_APPLY_SKIPPED_INDEXES="${PROFILE_APPLY_SKIPPED_INDEXES:-$(parse_yaml_value "apply_skipped_indexes" "$profile_file")}"
     export PROFILE_APPLY_SKIPPED_INDEXES="${PROFILE_APPLY_SKIPPED_INDEXES:-false}"
 
     # Multi-instance settings (v3.2)

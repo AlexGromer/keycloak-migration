@@ -51,4 +51,17 @@ assert_equals "/media/kc-astra-26.6.3.tar" \
 assert_equals "registry.astralinux.ru/library/astra/ubi18:1.8" \
     "${PROFILE_CONTAINER_BASE_IMAGE:-}" "env base_image survives profile_load"
 
+describe "REGRESSION: --apply-indexes (env PROFILE_APPLY_SKIPPED_INDEXES=true) survives profile_load"
+# Bug: profile_load UNCONDITIONALLY set PROFILE_APPLY_SKIPPED_INDEXES from the YAML, clobbering the
+# `--apply-indexes` flag (which exports =true BEFORE profile_load runs). Skipped indexes were then
+# captured but NEVER applied despite the flag. Env must win — same precedence as image_ref above.
+unset PROFILE_APPLY_SKIPPED_INDEXES
+profile_load envtest >/dev/null 2>&1
+assert_equals "false" "${PROFILE_APPLY_SKIPPED_INDEXES:-}" \
+    "no env + no YAML -> false (back-compat)"
+export PROFILE_APPLY_SKIPPED_INDEXES=true
+profile_load envtest >/dev/null 2>&1
+assert_equals "true" "${PROFILE_APPLY_SKIPPED_INDEXES:-}" \
+    "env =true (from --apply-indexes) survives profile_load (was clobbered to false)"
+
 test_report
