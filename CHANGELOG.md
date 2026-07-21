@@ -18,6 +18,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [3.9.6] - 2026-07-21
+
+### Fixed
+
+- **`--apply-indexes` was silently ignored — skipped indexes were captured but never created.**
+  The `--apply-indexes` flag exports `PROFILE_APPLY_SKIPPED_INDEXES=true` *before* `profile_load` runs,
+  but `profile_load` then **unconditionally** re-read `apply_skipped_indexes` from the profile YAML
+  (unset → `false`), clobbering the flag. A migration run with `--apply-indexes` therefore captured the
+  skipped-index DDL to `skipped_indexes_<version>.sql` but never applied it, and the index stayed
+  missing (`0 rows`). `profile_load` now gives the **environment precedence** over the YAML for
+  `PROFILE_APPLY_SKIPPED_INDEXES` — the same rule already used for `image_ref` / `image_tar` /
+  `base_image` (env wins, else YAML, else `false`). Verified live: `migrate_oneshot … --apply-indexes
+  --go` on a 350 000-row table now creates `IDX_USER_CREATED_TIMESTAMP` (`CONCURRENTLY IF NOT EXISTS`)
+  after the hop instead of only logging it. VERSION 3.9.5 -> 3.9.6.
+
+---
+
 ## [3.9.5] - 2026-07-20
 
 ### Fixed
