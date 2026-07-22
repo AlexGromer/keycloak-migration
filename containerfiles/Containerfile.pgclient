@@ -1,0 +1,51 @@
+# Containerfile.pgclient — sovereign-OS PostgreSQL CLIENT image for pg-client autonomy (ADR-013).
+#
+# Built FROM a sovereign base (Astra SE ubi18 / RED OS ubi8) + postgresql-client-<PG_MAJOR> from
+# PGDG (apt.postgresql.org / yum.postgresql.org). The PGDG packages are pulled at BUILD time only —
+# the resulting image is self-contained and ships in the air-gap bundle, so an offline node needs
+# nothing further. Rationale: the sovereign OS repos cap at an older PostgreSQL client (Astra 1.8.5
+# ships only postgresql-client-15), too old to `pg_dump` a PG16/17/18 server; PGDG provides a client
+# whose major is >= the server major. See ADR-013.
+#
+# Used by the migration tool as:  cr run --rm -i ... <this-image> psql|pg_dump|pg_restore <args>
+# (PROFILE_PG_CLIENT_IMAGE). The tool passes the client tool + args as the container command, so the
+# image must NOT carry a server entrypoint.
+#
+# Build (per OS):
+#   cr build --build-arg PGCLIENT_BASE_IMAGE=<astra-ubi18|redos-ubi8> --build-arg PG_MAJOR=17 \
+#            -t <ns>:astra-pgclient-17 -f containerfiles/Containerfile.pgclient .
+ARG PGCLIENT_BASE_IMAGE
+FROM ${PGCLIENT_BASE_IMAGE}
+
+ARG PG_MAJOR=17
+# Astra codename is not a Debian one (VERSION_CODENAME=1.8_x86-64); Astra 1.8.5 == Debian 12 bookworm.
+ARG DEB_CODENAME=bookworm
+
+# apt (Astra / Debian) OR dnf|yum (RED OS / RHEL) autodetect — mirrors Containerfile.kc.
+RUN set -eux; \
+    if command -v apt-get >/dev/null 2>&1; then \
+        export DEBIAN_FRONTEND=noninteractive; \
+        apt-get update; \
+        apt-get install -y --no-install-recommends ca-certificates gnupg curl; \
+        install -d /usr/share/keyrings; \
+        curl -fsSL https://www.postgresql.org/media/keys/ACCC4CF8.asc | gpg --dearmor -o /usr/share/keyrings/pgdg.gpg; \
+        echo "deb [signed-by=/usr/share/keyrings/pgdg.gpg] http://apt.postgresql.org/pub/repos/apt ${DEB_CODENAME}-pgdg main" > /etc/apt/sources.list.d/pgdg.list; \
+        printf 'Package: libpq5 libpq-dev postgresql-client-* postgresql-client-common postgresql-common\nPin: origin apt.postgresql.org\nPin-Priority: 1001\n' > /etc/apt/preferences.d/pgdg.pref; \
+        apt-get update; \
+        apt-get install -y --no-install-recommends "postgresql-client-${PG_MAJOR}"; \
+        apt-get purge -y gnupg curl; apt-get autoremove -y; apt-get clean; rm -rf /var/lib/apt/lists/*; \
+    elif command -v dnf >/dev/null 2>&1 || command -v yum >/dev/null 2>&1; then \
+        PKG="$(command -v dnf || command -v yum)"; \
+        "$PKG" -y install "https://download.postgresql.org/pub/repos/yum/reporpms/EL-8-x86_64/pgdg-redhat-repo-latest.noarch.rpm"; \
+        "$PKG" -qy module disable postgresql || true; \
+        "$PKG" -y install "postgresql${PG_MAJOR}"; \
+        "$PKG" clean all; \
+        for b in psql pg_dump pg_restore; do ln -sf "/usr/pgsql-${PG_MAJOR}/bin/$b" "/usr/bin/$b"; done; \
+    else \
+        echo "Containerfile.pgclient: base has neither apt nor dnf/yum" >&2; exit 1; \
+    fi; \
+    psql --version && pg_dump --version && pg_restore --version
+
+# No server entrypoint — the tool supplies the client command (psql/pg_dump/pg_restore) itself.
+ENTRYPOINT []
+CMD ["psql", "--version"]

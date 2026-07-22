@@ -10,7 +10,7 @@
 # image. Images, bases and registry are configured in config/images.conf (KEY=value).
 #
 # Usage:
-#   build_matrix.sh [--build] [--publish] [--config FILE]
+#   build_matrix.sh [--build] [--publish] [--pgclient] [--config FILE]
 #                   [--os astra,redos] [--versions 16.1.1,24.0.5,25.0.6,26.6.3]
 #                   [--astra-base REF] [--astra-base-kc16 REF]
 #                   [--redos-base REF] [--redos-base-kc16 REF]
@@ -49,6 +49,9 @@ REDOS_BASE_KC16="${REDOS_BASE_KC16:-registry.red-soft.ru/ubi8/ubi}"
 ASTRA_JDK="${ASTRA_JDK:-21}"
 REDOS_JDK="${REDOS_JDK:-21}"
 JDK_KC16="${JDK_KC16:-11}"
+# pg-client image (ADR-013): postgresql-client major baked in (must be >= DB server major).
+PG_CLIENT_MAJOR="${PG_CLIENT_MAJOR:-17}"
+BUILD_PGCLIENT=false
 
 _bm_usage() { sed -n '2,21p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; }
 
@@ -144,6 +147,31 @@ _bm_cell() {
     fi
 }
 
+# Build the per-OS PostgreSQL CLIENT image for pg-client autonomy (ADR-013): FROM the OS ubi base +
+# postgresql-client-<PG_CLIENT_MAJOR> (PGDG). One image per OS, not per KC version. Saved + checksummed
+# like a cell; pushed under --publish.
+_bm_pgclient() {
+    local os="$1" base ghcr_ref tar
+    case "$os" in
+        astra) base="$ASTRA_BASE" ;;
+        redos) base="$REDOS_BASE" ;;
+        *) log_error "unknown OS: $os (expected astra|redos)"; return 1 ;;
+    esac
+    ghcr_ref="${GHCR_IMAGE}:${os}-pgclient-${PG_CLIENT_MAJOR}"
+    tar="${OUT_DIR}/kc-${os}-pgclient-${PG_CLIENT_MAJOR}.tar"
+    echo ""
+    log_info "== PGCLIENT ${os}  base=${base}  pg=${PG_CLIENT_MAJOR}  ->  ${ghcr_ref}"
+    _bm_run "$EXECUTE" "cr build --build-arg PGCLIENT_BASE_IMAGE=${base} --build-arg PG_MAJOR=${PG_CLIENT_MAJOR} -t ${ghcr_ref} -f containerfiles/Containerfile.pgclient ." -- \
+        cr build --build-arg PGCLIENT_BASE_IMAGE="$base" --build-arg PG_MAJOR="$PG_CLIENT_MAJOR" \
+            -t "$ghcr_ref" -f containerfiles/Containerfile.pgclient . \
+        || { log_error "pgclient build failed: ${os}"; return 1; }
+    _bm_run "$EXECUTE" "cr save -o ${tar} ${ghcr_ref}" -- cr save -o "$tar" "$ghcr_ref" || return 1
+    _bm_run "$EXECUTE" "sha256sum ${tar} > ${tar}.sha256" -- _bm_sha256 "$tar" || return 1
+    if [[ "$PUBLISH" == "true" ]]; then
+        _bm_run "$EXECUTE" "cr push ${ghcr_ref}" -- cr push "$ghcr_ref" || return 1
+    fi
+}
+
 build_matrix_main() {
     # Pre-scan for --config so the file loads before flag parsing (flags then win).
     local _a _i; local -a _argv=("$@")
@@ -167,6 +195,7 @@ build_matrix_main() {
             --astra-base-kc16)  ASTRA_BASE_KC16="${2:-}"; shift 2 ;;
             --redos-base)       REDOS_BASE="${2:-}"; shift 2 ;;
             --redos-base-kc16)  REDOS_BASE_KC16="${2:-}"; shift 2 ;;
+            --pgclient)         BUILD_PGCLIENT=true; shift ;;
             --ghcr-image)       GHCR_IMAGE="${2:-}"; shift 2 ;;
             --out-dir)          OUT_DIR="${2:-}"; shift 2 ;;
             -h|--help)          _bm_usage; return 0 ;;
@@ -208,6 +237,12 @@ build_matrix_main() {
             _bm_cell "$os" "$version" || failed+=("${os}/${version}")
         done
     done
+
+    if [[ "$BUILD_PGCLIENT" == "true" ]]; then
+        for os in "${oses[@]}"; do
+            _bm_pgclient "$os" || failed+=("${os}/pgclient")
+        done
+    fi
 
     echo ""
     if [[ ${#failed[@]} -gt 0 ]]; then
