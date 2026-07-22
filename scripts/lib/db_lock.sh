@@ -192,18 +192,26 @@ _kc_db_lock_release() {
     _KC_DBLOCK_PID=""
     _KC_DBLOCK_CONTAINER=""
     _KC_DBLOCK_HELD="false"
-    # Killing the client closes its connection, and Postgres frees any advisory lock it held.
-    if [[ -n "$pid" ]]; then
-        kill "$pid" 2>/dev/null || true
-        # Reap it so it never lingers as a zombie. `wait` succeeds because the coproc is a direct
-        # child; the redirect swallows the "terminated" status.
-        wait "$pid" 2>/dev/null || true
-    fi
-    # Containerized transport: killing the engine client can leave the --rm container (and its live
-    # DB connection) running detached; force-remove it so the connection drops and the advisory lock
-    # is released at once.
+    # Containerized transport FIRST: force-remove the lock container. That drops its DB connection —
+    # so Postgres releases the advisory lock at once — AND makes the `docker run -i` client (the
+    # coproc) exit, so the reap below cannot block on it.
+    #
+    # Order matters and was a real hang: `kill` does NOT reliably terminate a `docker run -i` client
+    # (docker keeps the detached --rm container, and its connection, alive), so a `wait "$pid"` placed
+    # BEFORE this removal blocked for the entire rest of the run — until an external timeout — and this
+    # line, the actual release, was never reached. Remove the container first, then reap.
     if [[ -n "$container" ]] && declare -F cr >/dev/null 2>&1; then
         cr rm -f "$container" >/dev/null 2>&1 || true
+    fi
+    # Kill and REAP the client (a host psql, or the now-exiting docker-run). Bounded so a client that
+    # ignores SIGTERM can never hang the release: SIGTERM, poll up to ~3s, escalate to SIGKILL, then
+    # `wait` (guaranteed to reap a dead process at once — no zombie).
+    if [[ -n "$pid" ]]; then
+        kill "$pid" 2>/dev/null || true
+        local _w=0
+        while kill -0 "$pid" 2>/dev/null && (( _w < 30 )); do sleep 0.1; _w=$((_w + 1)); done
+        if kill -0 "$pid" 2>/dev/null; then kill -9 "$pid" 2>/dev/null || true; fi
+        wait "$pid" 2>/dev/null || true
     fi
 }
 
