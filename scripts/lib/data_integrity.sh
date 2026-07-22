@@ -29,6 +29,12 @@ declare -F log_warn    >/dev/null 2>&1 || log_warn()    { echo "[WARN] $*"; }
 declare -F log_error   >/dev/null 2>&1 || log_error()   { echo "[ERROR] $*" >&2; }
 declare -F log_success >/dev/null 2>&1 || log_success() { echo "[OK] $*"; }
 
+# pg_client / pg_client_available live in container_runtime.sh (include-guarded; safe to re-source).
+if ! declare -F pg_client >/dev/null 2>&1; then
+    # shellcheck source=/dev/null
+    source "$(dirname "${BASH_SOURCE[0]}")/container_runtime.sh" 2>/dev/null || true
+fi
+
 # The tables we assert on, and the policy for each.
 #   eq  — the count must not change at all
 #   gte — the count may grow (the migration adds defaults) but must never shrink
@@ -101,7 +107,7 @@ kc_data_baseline() {
         return 0
     fi
 
-    if ! command -v psql >/dev/null 2>&1; then
+    if ! pg_client_available psql; then
         log_warn "psql not available — data-integrity checks DISABLED for this run"
         printf 'DI_ENABLED=false\n' > "$file"
         return 0
@@ -204,7 +210,7 @@ kc_data_verify() {
 # _di_psql_maintenance <sql> — run SQL against the maintenance DB ('postgres'), not the Keycloak
 # one. CREATE/DROP DATABASE cannot run from inside the database being created or dropped.
 _di_psql_maintenance() {
-    PGPASSWORD="${PROFILE_DB_PASSWORD:-}" psql \
+    PGPASSWORD="${PROFILE_DB_PASSWORD:-}" pg_client psql \
         -h "${PROFILE_DB_HOST:-localhost}" \
         -p "${PROFILE_DB_PORT:-5432}" \
         -U "${PROFILE_DB_USER:-keycloak}" \
@@ -215,7 +221,7 @@ _di_psql_maintenance() {
 # _di_count_in <database> <table> — COUNT(*) against an arbitrary database.
 _di_count_in() {
     local db="$1" table="$2" n
-    n="$(PGPASSWORD="${PROFILE_DB_PASSWORD:-}" psql \
+    n="$(PGPASSWORD="${PROFILE_DB_PASSWORD:-}" pg_client psql \
             -h "${PROFILE_DB_HOST:-localhost}" \
             -p "${PROFILE_DB_PORT:-5432}" \
             -U "${PROFILE_DB_USER:-keycloak}" \
@@ -240,7 +246,7 @@ kc_backup_restore_test() {
         log_error "restore-test: backup not found: $backup_file"
         return 1
     fi
-    if ! command -v pg_restore >/dev/null 2>&1 || ! command -v psql >/dev/null 2>&1; then
+    if ! pg_client_available pg_restore || ! pg_client_available psql; then
         log_warn "restore-test: pg_restore/psql unavailable — SKIPPED (backup NOT proven restorable)"
         return 0
     fi
@@ -264,7 +270,7 @@ kc_backup_restore_test() {
     trap "_di_psql_maintenance 'DROP DATABASE IF EXISTS \"${scratch}\";' >/dev/null 2>&1 || true" RETURN
 
     log_info "Restoring (this takes as long as a real restore would — that is the point)"
-    if ! PGPASSWORD="${PROFILE_DB_PASSWORD:-}" pg_restore \
+    if ! PG_CLIENT_MOUNT="$(dirname "$backup_file")" PGPASSWORD="${PROFILE_DB_PASSWORD:-}" pg_client pg_restore \
             -h "${PROFILE_DB_HOST:-localhost}" \
             -p "${PROFILE_DB_PORT:-5432}" \
             -U "${PROFILE_DB_USER:-keycloak}" \

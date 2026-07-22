@@ -96,6 +96,7 @@
 | tests/test_build_bundle.sh | Tests | — |
 | scripts/lib/db_lock.sh | Shell script | — |
 | tests/test_db_lock.sh | Tests | — |
+| tests/test_pg_client.sh | Tests | — |
 ## Directory Structure
 
 ```

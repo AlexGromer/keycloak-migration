@@ -29,6 +29,12 @@ declare -F log_warn    >/dev/null 2>&1 || log_warn()    { echo "[WARN] $*"; }
 declare -F log_error   >/dev/null 2>&1 || log_error()   { echo "[ERROR] $*" >&2; }
 declare -F log_success >/dev/null 2>&1 || log_success() { echo "[OK] $*"; }
 
+# pg_client / pg_client_available live in container_runtime.sh (include-guarded; safe to re-source).
+if ! declare -F pg_client >/dev/null 2>&1; then
+    # shellcheck source=/dev/null
+    source "$(dirname "${BASH_SOURCE[0]}")/container_runtime.sh" 2>/dev/null || true
+fi
+
 # ----------------------------------------------------------------------------
 # Internal helpers
 # ----------------------------------------------------------------------------
@@ -45,7 +51,7 @@ _mv_major_minor() {
 # kc_detect_version() Method 3 (DATABASECHANGELOG lookup).
 _mv_psql() {
     local sql="$1"
-    PGPASSWORD="${PROFILE_DB_PASSWORD:-}" psql \
+    PGPASSWORD="${PROFILE_DB_PASSWORD:-}" pg_client psql \
         -h "${PROFILE_DB_HOST:-localhost}" \
         -p "${PROFILE_DB_PORT:-5432}" \
         -U "${PROFILE_DB_USER:-keycloak}" \
@@ -64,7 +70,7 @@ _mv_psql() {
 #   database, really". Returns 1 (echoing nothing) when the table/rows are absent (the DB was never
 #   initialised by Keycloak) or the database is unreachable.
 kc_db_model_version() {
-    command -v psql >/dev/null 2>&1 || return 1
+    pg_client_available psql || return 1
     local raw
     raw="$(_mv_psql "SELECT version FROM MIGRATION_MODEL ORDER BY update_time DESC LIMIT 1;" || true)"
     [[ -n "$raw" ]] || raw="$(_mv_psql "SELECT version FROM MIGRATION_MODEL LIMIT 1;" || true)"
@@ -79,7 +85,7 @@ kc_db_model_version() {
 #   SEVERAL lock ids (1, 1000, 1001, …), so all rows are checked.
 #   Echoes "id|lockedby|lockgranted" per held lock; returns 1 when nothing is locked.
 kc_db_changelog_locked() {
-    command -v psql >/dev/null 2>&1 || return 1
+    pg_client_available psql || return 1
     local rows
     rows="$(_mv_psql "SELECT id || '|' || COALESCE(lockedby,'?') || '|' || COALESCE(lockgranted::text,'?') FROM databasechangeloglock WHERE locked;" || true)"
     rows="$(printf '%s\n' "$rows" | sed '/^[[:space:]]*$/d')"
@@ -128,7 +134,7 @@ _mv_apply_skipped_indexes() {
     local -a statements=("$@")
     local stmt concurrent rc=0
 
-    if ! command -v psql >/dev/null 2>&1; then
+    if ! pg_client_available psql; then
         log_error "psql not available; cannot apply skipped indexes"
         return 1
     fi
@@ -136,7 +142,7 @@ _mv_apply_skipped_indexes() {
     for stmt in "${statements[@]}"; do
         concurrent="$(_mv_to_concurrent "$stmt")"
         log_info "Applying index: $concurrent"
-        if ! PGPASSWORD="${PROFILE_DB_PASSWORD:-}" psql \
+        if ! PGPASSWORD="${PROFILE_DB_PASSWORD:-}" pg_client psql \
                 -h "${PROFILE_DB_HOST:-localhost}" \
                 -p "${PROFILE_DB_PORT:-5432}" \
                 -U "${PROFILE_DB_USER:-keycloak}" \
@@ -165,7 +171,7 @@ kc_verify_migration_model() {
         return 1
     fi
 
-    if ! command -v psql >/dev/null 2>&1; then
+    if ! pg_client_available psql; then
         log_error "kc_verify_migration_model: psql not available; cannot reach DB"
         return 1
     fi

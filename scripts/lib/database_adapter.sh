@@ -4,6 +4,12 @@
 
 set -euo pipefail
 
+# pg_client / pg_client_available live in container_runtime.sh (include-guarded; safe to re-source).
+if ! declare -F pg_client >/dev/null 2>&1; then
+    # shellcheck source=/dev/null
+    source "$(dirname "${BASH_SOURCE[0]}")/container_runtime.sh" 2>/dev/null || true
+fi
+
 # Database type registry
 declare -A DB_ADAPTERS=(
     [postgresql]="PostgreSQL"
@@ -152,12 +158,12 @@ db_test_connection() {
 
     case "$db_type" in
         postgresql)
-            PGPASSWORD="$pass" psql -h "$host" -p "$port" -U "$user" -d "$db_name" \
+            PGPASSWORD="$pass" pg_client psql -h "$host" -p "$port" -U "$user" -d "$db_name" \
                 -c "SELECT 1;" &>/dev/null
             ;;
         cockroachdb)
             # CockroachDB uses PostgreSQL protocol
-            PGPASSWORD="$pass" psql -h "$host" -p "$port" -U "$user" -d "$db_name" \
+            PGPASSWORD="$pass" pg_client psql -h "$host" -p "$port" -U "$user" -d "$db_name" \
                 -c "SELECT 1;" &>/dev/null
             ;;
         mysql|mariadb)
@@ -219,7 +225,7 @@ db_backup() {
 
             # Use pg_dump with appropriate format
             local pg_version
-            pg_version=$(psql --version | grep -oP '\d+' | head -1)
+            pg_version=$(pg_client psql --version | grep -oP '\d+' | head -1)
 
             # Parallel dump requires directory format (-Fd), not custom (-Fc)
             local dump_format="-Fc"
@@ -241,7 +247,7 @@ db_backup() {
             # failure below was downgraded to a "skipped" warning — so a failed dump produced a
             # 0-byte file, the tool logged "Backup created" and migrated the database ANYWAY,
             # leaving nothing to roll back to.
-            if ! PGPASSWORD="$pass" pg_dump "${dump_opts[@]}"; then
+            if ! PG_CLIENT_MOUNT="$(dirname "$backup_file")" PGPASSWORD="$pass" pg_client pg_dump "${dump_opts[@]}"; then
                 log_error "pg_dump FAILED — refusing to migrate without a valid backup"
                 return 1
             fi
@@ -365,7 +371,7 @@ db_backup() {
 
             # Fallback: CockroachDB uses pg_dump (PostgreSQL compatible)
             log_info "Using pg_dump for CockroachDB backup"
-            PGPASSWORD="$pass" pg_dump -h "$host" -p "$port" -U "$user" -d "$db_name" \
+            PG_CLIENT_MOUNT="$(dirname "$backup_file")" PGPASSWORD="$pass" pg_client pg_dump -h "$host" -p "$port" -U "$user" -d "$db_name" \
                 -F c -f "$backup_file"
             ;;
 
@@ -407,11 +413,11 @@ db_restore() {
             fi
 
             # Terminate active connections first
-            PGPASSWORD="$pass" psql -h "$host" -p "$port" -U "$user" -d postgres -c \
+            PGPASSWORD="$pass" pg_client psql -h "$host" -p "$port" -U "$user" -d postgres -c \
                 "SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname='$db_name' AND pid <> pg_backend_pid();"
 
             # Restore with pg_restore
-            local pg_version=$(psql --version | grep -oP '\d+' | head -1)
+            local pg_version=$(pg_client psql --version | grep -oP '\d+' | head -1)
             # -w: never prompt for a password (see dump_opts) — this is the rollback path.
             local restore_opts="-h $host -p $port -U $user -d $db_name -w --clean"
 
@@ -420,7 +426,7 @@ db_restore() {
                 log_info "Using parallel restore with $parallel_jobs jobs"
             fi
 
-            PGPASSWORD="$pass" pg_restore $restore_opts "$backup_file"
+            PG_CLIENT_MOUNT="$(dirname "$backup_file")" PGPASSWORD="$pass" pg_client pg_restore $restore_opts "$backup_file"
 
             # Run VACUUM ANALYZE after restore
             log_info "Running post-restore optimizations..."
@@ -449,7 +455,7 @@ db_restore() {
 
         cockroachdb)
             # CockroachDB uses pg_restore (PostgreSQL compatible)
-            PGPASSWORD="$pass" pg_restore -h "$host" -p "$port" -U "$user" -d "$db_name" \
+            PG_CLIENT_MOUNT="$(dirname "$backup_file")" PGPASSWORD="$pass" pg_client pg_restore -h "$host" -p "$port" -U "$user" -d "$db_name" \
                 --clean "$backup_file"
             ;;
 
@@ -480,7 +486,7 @@ db_get_version() {
 
     case "$db_type" in
         postgresql)
-            PGPASSWORD="$pass" psql -h "$host" -p "$port" -U "$user" -d "$db_name" \
+            PGPASSWORD="$pass" pg_client psql -h "$host" -p "$port" -U "$user" -d "$db_name" \
                 -t -c "SHOW server_version;" | xargs
             ;;
         mysql|mariadb)
@@ -512,7 +518,7 @@ db_get_size() {
 
     case "$db_type" in
         postgresql)
-            PGPASSWORD="$pass" psql -h "$host" -p "$port" -U "$user" -d "$db_name" \
+            PGPASSWORD="$pass" pg_client psql -h "$host" -p "$port" -U "$user" -d "$db_name" \
                 -t -c "SELECT pg_size_pretty(pg_database_size('$db_name'));" | xargs
             ;;
         mysql|mariadb)

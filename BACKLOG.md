@@ -4,6 +4,11 @@
 
 - [ ] Tier-3 architecture refactor: extract scripts/lib/logging.sh (638 log_* calls live only in callers); add source-guards to re-sourced libs; remove/integrate 3 unused libs + ~70 orphan functions (P3) @general-purpose — 2026-06-23
 - [ ] [W1] Автоматизация миграции: F1 фикс IMAGE_REF clobber (profile_load env-wins), F4 неинтерактивный режим (--yes/ASSUME_DEFAULTS/_confirm), F3 генератор профиля (profile_save acquisition/runtime + config_wizard run+acquisition), F2 scripts/migrate_oneshot.sh; тесты + docs; ветка feat/migration-automation, PR, CI green, не мержить без ОК (P2) @systems-programmer — 2026-06-26
+- [ ] [1] [W1] Поток B: автономность pg-клиента (helper pg_client + PROFILE_PG_CLIENT_IMAGE, маршрутизация call-sites, dep-checks, тесты) → v3.9.7 (P1) @systems-programmer — 2026-07-21
+- [ ] [2] [W2] Поток A: 4 docx поставки (перегенерация HANDOVER с A2 + 3 дока из QUICKSTART/MIGRATION_GUIDE/AIRGAP) + QA-гейт ×4 (P2) @tech-writer — 2026-07-21
+- [ ] [3] [W3] Поток C: air-gap релиз — расширить build-images.yml под 2 приватных per-OS prerelease (alsebased/redosbased) + гард размера (P2) @ci-cd-engineer — 2026-07-21
+- [ ] [1] [W1.5] Суверенный pg-client образ (ALSE+RED OS база + postgresql-client мажора сервера): containerfiles, per-OS дефолт PROFILE_PG_CLIENT_IMAGE, интеграция в build-images.yml + air-gap бандл, ADR. Собирается на sovereign-раннере (P1) @ci-cd-engineer — 2026-07-21
+- [ ] [1] [W1] Полный паритет лока: контейнеризованный advisory-lock в db_lock.sh (coproc через cr run --rm -i, release через cr rm -f, per-DB container name) — заменяет файловый fallback v1. Требует live-валидации (P1) @systems-programmer — 2026-07-21
 
 ## Completed Archive
 
