@@ -85,6 +85,18 @@ rel="$(sed -n '/^_kc_db_lock_release()/,/^}/p' "$dblib")"
 assert_contains "$rel" "wait " \
     "release reaps the killed psql (no zombie)"
 
+# Containerized lock holder is a `docker run -i` client that `kill` does NOT reliably terminate;
+# release MUST force-remove the container (drops the connection -> lock released -> client exits)
+# BEFORE the wait, or `wait "$pid"` hangs for the rest of the run. Guard the ORDER + SIGKILL escalation.
+# CODE lines only — the explanatory comments mention `wait "$pid"`, which would fool a raw grep.
+_rel_code="$(printf '%s\n' "$rel" | grep -v '^[[:space:]]*#')"
+_crrm_ln="$(printf '%s\n' "$_rel_code" | grep -n 'cr rm -f' | head -1 | cut -d: -f1)"
+_wait_ln="$(printf '%s\n' "$_rel_code" | grep -n 'wait ' | head -1 | cut -d: -f1)"
+assert_true "[[ -n '$_crrm_ln' && -n '$_wait_ln' && '$_crrm_ln' -lt '$_wait_ln' ]]" \
+    "release force-removes the lock container BEFORE reaping the client (no wait-hang)"
+assert_contains "$rel" "kill -9" \
+    "release escalates to SIGKILL so a client ignoring SIGTERM can never hang the reap"
+
 # The metrics exporter — a background subshell with an nc child — is stopped and reaped, and is
 # wired into the single EXIT teardown so it never leaks on error (it was previously never stopped).
 promlib="$PROJECT_ROOT/scripts/lib/prometheus_exporter.sh"

@@ -19,6 +19,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   split, never failed). New inputs `pg_client_major` (default `17`), `build_pgclient` (default
   `true`). Tool `VERSION` unchanged (CI/delivery only, no migration-logic change).
 
+### Fixed
+
+- **Containerized advisory-lock release could hang the whole run** (`scripts/lib/db_lock.sh`,
+  `_kc_db_lock_release`). When the lock is held by a `docker run -i … psql` coproc (autonomy path, no
+  host psql), `kill "$pid"` does not reliably terminate the `docker run` client, so a `wait "$pid"`
+  placed *before* the container removal blocked until an external timeout — and `cr rm -f`, the line
+  that actually drops the connection and releases the lock, was never reached. An autonomous
+  migration reached its target version and printed "Migration Complete", then hung ~13 min on
+  teardown (intermittent). Fix: force-remove the lock container **first** (releases the lock and makes
+  the client exit), then reap with a bounded SIGTERM → SIGKILL → `wait` (can never hang). Live-proven:
+  an autonomous `16 → 24 → 26` run went from a 900 s hang (rc=124) to a clean **rc=0 in ~108 s**. Host
+  psql path unchanged. New regression guards in `tests/test_db_lock.sh` (removal-before-wait order +
+  SIGKILL escalation).
+
 ### Planned
 - AWS RDS / GCP Cloud SQL / Azure Database migration examples
 - Ansible playbook wrapper
