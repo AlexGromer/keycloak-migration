@@ -1,174 +1,255 @@
-# Keycloak Migration Tool v3.9.2
+> ЯЗЫК: 🇷🇺 Русский | [🇬🇧 English](README.en.md)
 
-**One-command Keycloak migration utility** with auto-detection, multi-tenant support, clustered deployments, real-time monitoring, production hardening, **security hardening** (SAST, secrets scanning, input validation, audit logging), **container-hop migration** (boots a real Keycloak container per hop and verifies the MIGRATION_MODEL Layer-2 advance), **sovereign-OS images** (Astra Linux SE / RED OS) with **air-gapped** offline distribution, and support for all Keycloak-supported databases.
+# Keycloak Migration Tool v3.9.7
+
+**Утилита миграции Keycloak «в одну команду»** с авто-детектированием окружения, поддержкой мультитенантных и кластерных развёртываний, мониторингом в реальном времени, производственной закалкой (production hardening), **security-закалкой** (SAST, сканирование секретов, валидация ввода, аудит-логирование), **контейнерной поэтапной миграцией** (container-hop — на каждом шаге поднимается настоящий контейнер Keycloak и проверяется продвижение уровня MIGRATION_MODEL, Layer-2), **суверенными образами ОС** (Astra Linux SE / RED OS) с **air-gap** офлайн-дистрибуцией и поддержкой всех БД, официально поддерживаемых Keycloak.
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
-[![Tests](https://img.shields.io/badge/tests-428%20total-success)](tests/)
+[![Tests](https://img.shields.io/badge/tests-31%20suites-success)](tests/)
 [![Bash](https://img.shields.io/badge/bash-5.0%2B-green.svg)](scripts/)
-[![Databases](https://img.shields.io/badge/databases-7-blue.svg)](scripts/lib/database_adapter.sh)
-[![Version](https://img.shields.io/badge/version-v3.9.2-blue.svg)](CHANGELOG.md)
+[![Databases](https://img.shields.io/badge/databases-6-blue.svg)](scripts/lib/database_adapter.sh)
+[![Version](https://img.shields.io/badge/version-v3.9.7-blue.svg)](CHANGELOG.md)
 [![Images](https://img.shields.io/badge/sovereign%20images-Astra%20SE%20%7C%20RED%20OS-blue.svg)](docs/AIRGAP.md)
 
 ---
 
-## 🚀 Quick Start (90% of cases)
+## 🚀 Быстрый старт (90% случаев)
 
-### 1. Clone Repository
+### 1. Клонировать репозиторий
 
 ```bash
 git clone https://github.com/AlexGromer/keycloak-migration
 cd keycloak-migration
 ```
 
-### 2. Run Migration Wizard
+### 2. Запустить мастер настройки
 
 ```bash
 ./scripts/config_wizard.sh
 ```
 
-The wizard will:
-1. **Auto-detect** existing Keycloak installation
-2. **Auto-detect** current version from database/deployment
-3. **Prompt** for target version selection
-4. **Generate** migration profile
-5. **Execute** migration with one command
+Мастер:
+1. **Авто-детектирует** существующую установку Keycloak;
+2. **Определяет** текущую версию по БД / развёртыванию;
+3. **Спрашивает** целевую версию;
+4. **Генерирует** профиль миграции;
+5. **Выполняет** миграцию одной командой.
 
-### 3. Or Use Direct Command
-
-If you already have a profile:
+### 3. Либо прямой вызов с готовым профилем
 
 ```bash
 ./scripts/migrate_keycloak_v3.sh migrate --profile=my-profile.yaml
 ```
 
-### 4. Container-hop in one command (sovereign images, v3.9)
+### 4. Container-hop одной командой (суверенные образы, v3.9)
 
-For the `16→24.0.5→26.6.3` (target 26) or `16→25.0.6` (target 25) container-hop migration,
-`migrate_oneshot.sh` does everything — acquire images → generate a run+container profile → migrate
-— non-interactively. Default dry-run; `--go` for live:
+Для цепочек `16.1.1 → 24.0.5 → 26.6.3` (target 26) или `16.1.1 → 25.0.6` (target 25) скрипт
+`migrate_oneshot.sh` делает всё неинтерактивно — получает образы → генерирует профиль запуска и
+контейнеров → мигрирует. По умолчанию dry-run; для боевого прогона добавьте `--go`:
 
 ```bash
 export CONTAINER_RUNTIME=docker
-# Plan only (mutates nothing):
+# Только план (ничего не меняет):
 scripts/migrate_oneshot.sh --target 26 --os astra --db-host <pg-host> --dry-run
-# Live (target 26 = 16.1.1 → 24.0.5 → 26.6.3):
+# Боевой прогон (target 26 = 16.1.1 → 24.0.5 → 26.6.3):
 export PROFILE_DB_PASSWORD=...
 scripts/migrate_oneshot.sh --target 26 --os astra --db-host <pg-host> --source pull --go
 ```
 
-See **`docs/MIGRATION_GUIDE.md`** for the full runbook (both paths, air-gap, verification, rollback).
+Полный runbook (оба пути, air-gap, верификация, откат) — в **`docs/MIGRATION_GUIDE.md`**.
 
-**That's it!** The tool handles everything automatically.
+**Готово!** Остальное инструмент делает автоматически.
 
 ---
 
-## 📦 Sovereign Container Images (GHCR + Air-gap)
+## 🧩 Автономность pg-client (новое в v3.9.7)
 
-Keycloak hop images built FROM sovereign OS bases (**Astra Linux SE / RED OS**), published to **private GHCR** and shippable as **air-gapped tarballs**. Multistage + non-root (uid 1000); the Quarkus images bake `--db=postgres` at build time.
+Начиная с **v3.9.7** узлу миграции **больше не нужны установленные `psql` / `pg_dump` /
+`pg_restore`**. Каждый вызов PostgreSQL-клиента проходит через helper `pg_client`
+(`scripts/lib/container_runtime.sh`):
 
-| Image tag | KC version | OS |
+- если бинарник есть на хосте — он запускается на хосте (прежний быстрый путь, сохраняет `-Fd`/`-j`);
+- если бинарника нет — вызов исполняется **внутри контейнерного образа** (переменная
+  `PROFILE_PG_CLIENT_IMAGE`, по умолчанию `postgres:16`) поверх host-сети `--network=host`, с
+  проброшенным паролем БД (`PGPASSWORD`) и bind-монтированием файлов бэкапа тем же путём
+  (`PG_CLIENT_MOUNT`, relabel `:z` для SELinux). Флаг `--user` добавляется только на явно
+  rootful-движке.
+
+**Advisory-lock по БД тоже стал автономным.** Межхостовая блокировка «одна миграция на одну
+базу» (ADR-011) теперь удерживается через контейнер, когда `psql` на хосте отсутствует — **без
+деградации** до более слабой пофайловой блокировки рабочего каталога. Долгоживущий `psql` живёт
+в pg-client-контейнере как coproc поверх `docker/podman run --rm -i` и освобождается принудительным
+удалением контейнера (проверены и аварийное, и штатное освобождение).
+
+Требование совместимости: **мажор клиента должен быть ≥ мажора сервера БД** (`pg_dump` отказывается
+работать с более новым сервером). `PROFILE_PG_CLIENT_IMAGE` переопределяется; решения зафиксированы в
+**ADR-012** (автономность) и **ADR-013** (суверенный per-OS образ pg-client по умолчанию, собранный
+FROM базы ALSE / RED OS) — см. `ARCHITECTURE.md`.
+
+**Пример полностью автономного прогона** (на узле только контейнерный движок, `postgresql-client` не
+установлен):
+
+```bash
+export PROFILE_DB_PASSWORD='...'
+export PROFILE_PG_CLIENT_IMAGE=postgres:17   # мажор ≥ мажора сервера БД
+scripts/migrate_oneshot.sh --target 26 --os astra --source preloaded \
+  --image-ns ghcr.io/<you>/keycloak-migration \
+  --db-host <db-host> --db-port 5432 --db-name keycloak --db-user keycloak --go
+```
+
+Бэкап, reconcile-запросы и advisory-lock — всё выполняется внутри pg-client-контейнера автоматически.
+
+---
+
+## 📦 Суверенные контейнерные образы (GHCR + Air-gap)
+
+Hop-образы Keycloak собираются FROM суверенных баз ОС (**Astra Linux SE / RED OS**), публикуются в
+**приватный GHCR** и поставляются как **air-gap tar-архивы**. Multistage + non-root (uid 1000);
+Quarkus-образы запекают `--db=postgres` на этапе сборки.
+
+| Тег образа | Версия KC | ОС |
 |---|---|---|
 | `ghcr.io/<owner>/keycloak-migration:astra-26.6.3` | 26.6.3 (Quarkus) | Astra SE |
 | `…:redos-26.6.3` | 26.6.3 (Quarkus) | RED OS |
-| `…:{astra,redos}-{16.1.1,24.0.5,25.0.6}` | hop chain (16→24→26 / 16→25) | both |
+| `…:{astra,redos}-{16.1.1,24.0.5,25.0.6}` | звенья цепочки (16→24→26 / 16→25) | обе |
 
 ```bash
-# Online (private GHCR — Connect the package to this repo in Package settings):
+# Онлайн (приватный GHCR):
 docker login ghcr.io && docker pull ghcr.io/<owner>/keycloak-migration:redos-26.6.3
-# Offline (air-gap):
+# Офлайн (air-gap):
 docker load -i kc-redos-26.6.3.tar.xz
 ```
 
-**Build the matrix yourself** (operator-supplied licensed bases): edit `config/images.conf` → `scripts/build_matrix.sh --build [--publish]`. Full build → export → transfer → consume runbook: **[docs/AIRGAP.md](docs/AIRGAP.md)**.
+**Собрать матрицу самостоятельно** (на своих лицензионных базах): отредактируйте `config/images.conf`
+→ `scripts/build_matrix.sh --build [--publish]`. Полный runbook сборка → экспорт → перенос →
+потребление: **[docs/AIRGAP.md](docs/AIRGAP.md)**.
 
 ---
 
-## 🎯 Features
+## 🧪 Матрица испытаний
 
-### Auto-Detection
-- **Current Version** — Detects from JAR manifest, database, Docker image, or Kubernetes deployment
-- **Database Type** — Auto-detects from JDBC URL or CLI tools
-- **Deployment Mode** — Identifies Standalone, Docker, Kubernetes automatically
-- **Target Version** — Interactive selection with Java requirements shown
+Прогон живьём на `docker` с засеянной базой Keycloak 16:
 
-### Multi-Database Support
-- ✅ **PostgreSQL** (recommended)
+| Путь | 16→24→26 (target 26) | 16→25.0.6 (target 25) |
+|---|---|---|
+| `psql` присутствует на хосте | PASS (Complete) | PASS (Complete) |
+| автономный (host-клиенты скрыты) | PASS (Complete) | PASS (Complete) |
+
+Дополнительно проверен контейнерный путь: бэкап через контейнерный `pg_dump` + проверка целостности,
+restore-into-scratch, `CREATE INDEX CONCURRENTLY`; advisory-lock — захват / удержание /
+аварийное освобождение (`SIGKILL → EOF на stdin → контейнер завершается → блокировка снимается
+автоматически) / штатное освобождение.
+
+**Контроль качества:** 31/31 test suites; два независимых состязательных (adversarial) прохода
+верификации закрыли 1 critical и 3 high дефекта до релиза.
+
+> **Известное ограничение (честно):** второй **параллельный** захват контейнерной блокировки может
+> «зависнуть» и затем упасть **fail-closed** (то есть по-прежнему отказывает — корректность
+> сохраняется) под `docker run -i`. Одиночный прогон это не затрагивает. Рекомендуется
+> перепроверить на `podman`.
+
+---
+
+## 🎯 Возможности
+
+### Авто-детектирование
+- **Текущая версия** — из JAR-манифеста, БД, Docker-образа или Kubernetes-развёртывания;
+- **Тип БД** — из JDBC URL или CLI-инструментов;
+- **Режим развёртывания** — Standalone / Docker / Kubernetes определяется автоматически;
+- **Целевая версия** — интерактивный выбор с показом требований к Java.
+
+### Поддержка нескольких БД
+- ✅ **PostgreSQL** (рекомендуется)
 - ✅ **MySQL / MariaDB**
 - ✅ **CockroachDB** (v18+)
 - ✅ **Oracle Database**
 - ✅ **Microsoft SQL Server**
-- ✅ **H2** (dev only, with warnings)
+- ✅ **H2** (только dev, с предупреждениями)
 
-### Multi-Deployment Support
-- ✅ **Standalone** (systemd, init.d, manual)
-- ✅ **Docker** (single container)
-- ✅ **Docker Compose** (multi-container)
+### Поддержка нескольких режимов развёртывания
+- ✅ **Standalone** (systemd, init.d, вручную)
+- ✅ **Docker** (одиночный контейнер)
+- ✅ **Docker Compose** (мультиконтейнер)
 - ✅ **Kubernetes** (Deployment, StatefulSet)
-- ✅ **Custom** (bring your own scripts)
+- ✅ **Custom** (свои скрипты)
 
 ### Production-Ready
-- ✅ **Extended Pre-flight Checks** — 15 comprehensive checks (disk, memory, network, DB health, Keycloak status, dependencies, credentials) (v3.5)
-- ✅ **Rate Limiting** — Prevents production database overload with adaptive throttling (v3.5)
-- ✅ **Backup Rotation** — Automatic cleanup with multiple policies (keep-last-N, time-based, size-based, GFS) (v3.5)
-- ✅ **Connection Leak Detection** — Auto-detect and report idle connections (v3.5)
-- ✅ **Circuit Breaker** — Automatic failure protection with retry logic (v3.5)
-- ✅ **SAST Integration** — ShellCheck static analysis on pre-commit (v3.6)
-- ✅ **Secrets Scanning** — gitleaks integration prevents credential leaks (v3.6)
-- ✅ **Input Validation** — SQL/command/path injection prevention (v3.6)
-- ✅ **Secrets Management** — Universal interface for Vault, K8s, AWS, Azure (v3.6)
-- ✅ **HMAC Audit Logging** — Tamper-proof cryptographic signatures (v3.6)
-- ✅ **Atomic Checkpoints** — Resume from any step if interrupted
-- ✅ **Auto-Rollback** — Automatic rollback on failure
-- ✅ **Airgap Mode** — Pre-validate all artifacts available
-- ✅ **JSON Audit Logging** — Full traceability
-- ✅ **Real-Time Monitoring** — Prometheus metrics + Grafana dashboards (v3.1)
-- ✅ **Multi-Tenant Support** — Parallel migration of isolated instances (v3.2)
-- ✅ **Clustered Deployments** — Zero-downtime rolling updates (v3.2)
-- ✅ **Test Coverage** — 428 tests, 99.8% pass rate (v3.6)
+- ✅ **Расширенные preflight-проверки** — 15 проверок (диск, память, сеть, здоровье БД, статус Keycloak, зависимости, учётные данные) (v3.5)
+- ✅ **Rate Limiting** — защита боевой БД от перегрузки с адаптивным троттлингом (v3.5)
+- ✅ **Ротация бэкапов** — авто-очистка по политикам (keep-last-N, по времени, по размеру, GFS) (v3.5)
+- ✅ **Детекция утечек соединений** — обнаружение idle-in-transaction (v3.5)
+- ✅ **Circuit Breaker** — защита от каскадных сбоев с retry-логикой (v3.5)
+- ✅ **SAST** — ShellCheck на pre-commit (v3.6)
+- ✅ **Сканирование секретов** — gitleaks (v3.6)
+- ✅ **Валидация ввода** — защита от SQL/command/path-инъекций (v3.6)
+- ✅ **Управление секретами** — единый интерфейс Vault, K8s, AWS, Azure (v3.6)
+- ✅ **HMAC-аудит-логирование** — криптографические подписи от подмены (v3.6)
+- ✅ **Атомарные checkpoint'ы** — возобновление с любого шага
+- ✅ **Авто-откат** при сбое
+- ✅ **Airgap-режим** — предварительная валидация артефактов
+- ✅ **JSON-аудит-логирование** — полная трассируемость
+- ✅ **Мониторинг в реальном времени** — Prometheus + Grafana (v3.1)
+- ✅ **Мультитенантность** — параллельная миграция изолированных инстансов (v3.2)
+- ✅ **Кластерные развёртывания** — rolling update без простоя (v3.2)
+- ✅ **Container-hop миграция** — на каждом шаге поднимается реальный контейнер Keycloak, проверяются Layer-1 (`DATABASECHANGELOG`) и Layer-2 (`MIGRATION_MODEL`)
+- ✅ **verify** — приёмка после миграции: L2+L3+readiness+Admin API (ADR-010)
+- ✅ **Layer-3 gate целостности данных** на каждом шаге (счётчики realm/user/client/role) (ADR-010)
+- ✅ **Advisory-lock по БД** — одна миграция на одну базу, межхостово (ADR-011)
+- ✅ **`--apply-indexes`** — создание индексов, пропущенных Keycloak, через `CONCURRENTLY` (v3.9.4/3.9.6)
+- ✅ **Автономность pg-client** — `psql`/`pg_dump`/`pg_restore` на хосте не обязательны (v3.9.7, ADR-012/013)
+- ✅ **Покрытие тестами** — 31 test suite (`tests/run_all_tests.sh`)
 
-### Migration Path
-Supports Keycloak **16.1.1 → 26.0.7** via safe intermediate versions:
+### Стратегии миграции
+in-place, rolling update (K8s), blue-green, canary (v3.3).
+
+### Оптимизации под конкретную БД (v3.4)
+Параллельные jobs, `VACUUM ANALYZE`, XtraBackup / mariabackup, zone-aware backup CockroachDB, оценка
+времени миграции.
+
+### Путь миграции (реальные цепочки)
+Инструмент поднимает версии Keycloak по проверенным промежуточным звеньям:
+
 ```
-16.1.1 → 17.0.1 → 22.0.5 → 25.0.6 → 26.0.7
+target 26:  16.1.1 → 24.0.5 → 26.6.3
+target 25:  16.1.1 → 25.0.6
 ```
 
-Java requirements automatically validated per version (11 → 11 → 17 → 17 → 21).
+Требования к Java проверяются автоматически на каждом звене (Java 11 / 17 / 21). Целевые версии
+зафиксированы в **ADR-002** (target 26 = **26.6.3**; версии 26.6.0 / 26.6.1 запрещены).
 
 ---
 
-## 📖 How It Works
+## 📖 Как это работает
 
-This tool **migrates** your Keycloak installation, not deploys it. You need an existing Keycloak instance to migrate.
+Инструмент **мигрирует** существующую установку Keycloak, а не разворачивает её с нуля. Нужен уже
+работающий инстанс Keycloak.
 
-**The tool works by:**
-1. Detecting your current Keycloak version and environment
-2. Backing up the database
-3. Stopping Keycloak service
-4. Downloading/building the target version
-5. Updating the database schema
-6. Restarting with new version
-7. Validating health and rollback if needed
+**Что делает инструмент:**
+1. Определяет текущую версию Keycloak и окружение;
+2. Делает бэкап БД;
+3. Останавливает сервис Keycloak;
+4. Скачивает / собирает целевую версию;
+5. Обновляет схему БД;
+6. Перезапускает на новой версии;
+7. Валидирует и при необходимости откатывает.
 
-**What it doesn't do:**
-- ❌ Install Keycloak from scratch
-- ❌ Provision infrastructure
-- ❌ Configure networking/DNS
-
-For infrastructure provisioning, see [Advanced Deployment Options](#advanced-deployment-options).
+**Чего инструмент НЕ делает:**
+- ❌ Не ставит Keycloak с нуля;
+- ❌ Не provision'ит инфраструктуру;
+- ❌ Не настраивает сеть / DNS.
 
 ---
 
-## 📦 Installation
+## 📦 Установка
 
-### Prerequisites
+### Требования
+- Bash 5.0+;
+- существующая установка Keycloak (16.1.1+);
+- клиент БД (`psql`, `mysql`, `cockroach`, …) — **или** контейнерный движок (см. автономность pg-client);
+- Java (версия по требованиям Keycloak);
+- для Kubernetes — `kubectl`.
 
-- Bash 5.0+
-- Existing Keycloak installation (16.1.1+)
-- Database client (`psql`, `mysql`, `cockroach`, etc.)
-- Java (version per Keycloak requirements)
-- For Kubernetes: `kubectl`
-
-### Clone and Run
+### Клонирование и запуск
 
 ```bash
 git clone https://github.com/AlexGromer/keycloak-migration
@@ -178,54 +259,53 @@ cd keycloak-migration
 
 ---
 
-## 🎮 Usage Examples
+## 🎮 Примеры использования
 
-### 1. Interactive Wizard (Recommended)
+### 1. Интерактивный мастер (рекомендуется)
 ```bash
 ./scripts/config_wizard.sh
 ```
+Авто-обнаружение установок и генерация YAML-профиля.
 
-Auto-discovers existing installations and generates YAML profile.
-
-### 2. Non-Interactive (CI/CD)
+### 2. Неинтерактивный режим (CI/CD)
 ```bash
 export PROFILE_DB_TYPE=postgresql
 export PROFILE_KC_DEPLOYMENT_MODE=kubernetes
 export PROFILE_KC_CURRENT_VERSION=16.1.1
-export PROFILE_KC_TARGET_VERSION=26.0.7
+export PROFILE_KC_TARGET_VERSION=26.6.3
 
 ./scripts/config_wizard.sh --non-interactive --profile-name ci-migration
 ./scripts/migrate_keycloak_v3.sh migrate --profile ci-migration
 ```
 
-### 3. Auto-Discovery Only
+### 3. Только авто-обнаружение
 ```bash
 ./scripts/kc_discovery.sh
 ```
-
-Scans environment and creates profile automatically.
+Сканирует окружение и создаёт профиль автоматически.
 
 ---
 
-## 🚁 Advanced Usage
+## 🚁 Продвинутые сценарии
 
-### Multi-Tenant Migration (v3.2)
+> Ниже — сжатые примеры. Полные профили лежат в каталоге `profiles/`, подробные runbook'и —
+> в **[docs/MIGRATION_GUIDE.md](docs/MIGRATION_GUIDE.md)** и **[docs/AIRGAP.md](docs/AIRGAP.md)**.
 
-**Scenario:** SaaS platform with multiple isolated Keycloak instances.
+### Мультитенантная миграция (v3.2)
 
-**Profile Example:** `profiles/multi-tenant-example.yaml`
+**Сценарий:** SaaS-платформа с несколькими изолированными инстансами Keycloak.
+**Профиль:** `profiles/multi-tenant-example.yaml`
 
 ```yaml
 profile:
   name: multi-tenant-saas
-  mode: multi-tenant  # Enable multi-tenant mode
+  mode: multi-tenant
 
 migration:
   strategy: rolling_update
-  parallel: true  # Migrate all tenants simultaneously
+  parallel: true
 
 tenants:
-  # Tenant 1: Enterprise customer
   - name: enterprise-corp
     database:
       host: db1.example.com
@@ -234,8 +314,6 @@ tenants:
       mode: kubernetes
       namespace: keycloak-enterprise
       replicas: 3
-
-  # Tenant 2: SMB customer
   - name: smb-startup
     database:
       host: db2.example.com
@@ -246,52 +324,40 @@ tenants:
       replicas: 2
 
 rollout:
-  type: parallel  # Options: parallel, sequential
-  max_concurrent: 3  # Maximum tenants migrated simultaneously
+  type: parallel        # parallel | sequential
+  max_concurrent: 3
 ```
 
-**Execute:**
-
-```bash
-./scripts/migrate_keycloak_v3.sh migrate --profile=multi-tenant-saas.yaml
-```
-
-**Live Monitoring:**
+Живой прогресс по тенантам:
 ```
 ┌─ MIGRATION PROGRESS (3/3 tenants) ────────────────────────────┐
 │ enterprise-corp  |  87% [████████████████████░░░░░░] 16→26    │
-│ smb-startup      |  92% [██████████████████████░░░] 16→26    │
-│ trial-demo       | 100% [████████████████████████] 16→26 ✓   │
+│ smb-startup      |  92% [██████████████████████░░░]  16→26    │
+│ trial-demo       | 100% [████████████████████████]   16→26 ✓ │
 └────────────────────────────────────────────────────────────────┘
 ```
 
-**Features:**
-- ✅ Parallel or sequential execution
-- ✅ Per-tenant checkpoints and rollback
-- ✅ Aggregated audit logging
-- ✅ Real-time progress monitoring for all tenants
-- ✅ Independent failure handling (one fails, others continue)
+**Возможности:** параллельное/последовательное выполнение, per-tenant checkpoint'ы и откат,
+агрегированный аудит, прогресс по каждому тенанту, независимая обработка сбоев (один упал — остальные
+продолжают).
 
----
+### Кластерное развёртывание (v3.2)
 
-### Clustered Deployment Migration (v3.2)
-
-**Scenario:** 4 Keycloak standalone instances in cluster (bare-metal servers).
-
-**Profile Example:** `profiles/clustered-bare-metal-example.yaml`
+**Сценарий:** 4 standalone-узла Keycloak на bare-metal за HAProxy с общей БД.
+**Профиль:** `profiles/clustered-bare-metal-example.yaml`
 
 ```yaml
 profile:
   name: clustered-bare-metal
-  mode: clustered  # Enable clustered mode
+  mode: clustered
 
 migration:
-  strategy: rolling_update  # One node at a time
+  strategy: rolling_update
   auto_rollback: true
 
 database:
   type: postgresql
-  host: db-cluster.example.com  # Shared database
+  host: db-cluster.example.com
   name: keycloak
 
 cluster:
@@ -300,620 +366,187 @@ cluster:
     host: lb.example.com
     admin_socket: /var/run/haproxy/admin.sock
     backend_name: keycloak_backend
-
   nodes:
     - name: kc-node-1
       host: 192.168.1.101
       ssh_user: keycloak
       keycloak_home: /opt/keycloak
-
-    - name: kc-node-2
-      host: 192.168.1.102
-      ssh_user: keycloak
-      keycloak_home: /opt/keycloak
-
-    - name: kc-node-3
-      host: 192.168.1.103
-      ssh_user: keycloak
-      keycloak_home: /opt/keycloak
-
-    - name: kc-node-4
-      host: 192.168.1.104
-      ssh_user: keycloak
-      keycloak_home: /opt/keycloak
+    # kc-node-2..4 аналогично
 
 rollout:
-  type: sequential  # Rolling update (recommended)
-  nodes_at_once: 1  # Migrate one node at a time
-  drain_timeout: 60  # Seconds to wait for connection drain
-  startup_timeout: 120  # Seconds to wait for node health
+  type: sequential
+  nodes_at_once: 1
+  drain_timeout: 60      # сек на слив соединений
+  startup_timeout: 120   # сек на здоровье узла
 ```
 
-**Execute:**
+**Процесс rolling update:** drain узла из LB → ждём завершения активных соединений → миграция узла →
+health check → возврат в LB → следующий узел.
+**Возможности:** zero-downtime, интеграция с LB (HAProxy / Nginx), connection draining, health-check
+перед возвратом, авто-откат, мониторинг по узлам.
 
-```bash
-./scripts/migrate_keycloak_v3.sh migrate --profile=clustered-bare-metal.yaml
-```
+### Стратегии Blue-Green и Canary (v3.3)
 
-**Rolling Update Process:**
-1. **Drain** node from load balancer (HAProxy)
-2. **Wait** for active connections to finish
-3. **Migrate** node to new version
-4. **Health check** new version
-5. **Enable** node in load balancer
-6. **Repeat** for next node
-
-**Features:**
-- ✅ Zero-downtime rolling update
-- ✅ Load balancer integration (HAProxy, Nginx)
-- ✅ Connection draining before migration
-- ✅ Health checks before re-enabling
-- ✅ Automatic rollback on failure
-- ✅ Per-node monitoring
-
----
-
-### Advanced Migration Strategies (v3.3)
-
-#### Blue-Green Deployment
-
-**Scenario:** Zero-downtime migration with instant traffic switch.
-
-**Profile Example:** `profiles/blue-green-k8s-istio.yaml`
+**Blue-Green** (`profiles/blue-green-k8s-istio.yaml`) — миграция без простоя с мгновенным
+переключением трафика. Оба окружения (blue v16 / green v26) используют одну БД, поэтому конфликтов
+миграции схемы нет; откат — мгновенное переключение обратно.
 
 ```yaml
 profile:
   name: blue-green-k8s-istio
-  strategy: blue_green  # Enable Blue-Green mode
+  strategy: blue_green
 
 migration:
   current_version: "16.1.1"
-  target_version: "26.0.7"
+  target_version: "26.6.3"
 
 blue_green:
-  old_environment: "blue"   # Current production
-  new_environment: "green"  # New version deployment
-
+  old_environment: "blue"
+  new_environment: "green"
   deployment:
     type: kubernetes
     namespace: keycloak
     replicas: 3
-
   traffic_router:
-    type: istio  # Supports: istio, nginx, haproxy
+    type: istio          # istio | nginx | haproxy
     virtualservice: keycloak-vs
-    namespace: keycloak
     subset_blue: v16
     subset_green: v26
-
-  readiness_timeout: 600  # seconds
-  keep_old: false  # Destroy blue after successful switch
-  cleanup_delay: 300  # Wait 5 minutes before cleanup
-
-database:
-  type: postgresql
-  host: postgres.keycloak.svc.cluster.local
-  name: keycloak
+  readiness_timeout: 600
+  keep_old: false
+  cleanup_delay: 300
 ```
 
-**Execute:**
-
-```bash
-./scripts/migrate_keycloak_v3.sh migrate --profile=blue-green-k8s-istio.yaml
-```
-
-**Blue-Green Process:**
-1. **Deploy** green environment (new version) alongside blue
-2. **Wait** for green to be fully ready
-3. **Validate** green environment (smoke tests, health checks)
-4. **Switch** traffic from blue (100% → 0%) to green (0% → 100%)
-5. **Cleanup** old blue environment (optional, configurable delay)
-
-**Benefits:**
-- ✅ Instant traffic switch (zero downtime)
-- ✅ Easy rollback (switch back to blue)
-- ✅ Full validation before cutover
-- ✅ No database migration conflicts (both versions use same DB)
-
----
-
-#### Canary Deployment
-
-**Scenario:** Progressive rollout with validation at each phase.
-
-**Profile Example:** `profiles/canary-k8s-istio.yaml`
+**Canary** (`profiles/canary-k8s-istio.yaml`) — прогрессивное развёртывание с валидацией по
+Prometheus на каждой фазе (10% → 50% → 100%). Авто-откат по порогам: `error_rate` > 0.01, `p99` >
+500 мс, недостаточно запросов, либо 3 подряд неуспешные валидации.
 
 ```yaml
-profile:
-  name: canary-k8s-istio
-  strategy: canary  # Enable Canary mode
-
 migration:
   current_version: "16.1.1"
-  target_version: "26.0.7"
+  target_version: "26.6.3"
 
 canary:
   deployment:
     namespace: keycloak
     deployment: keycloak
-    replicas: 10  # Total replicas
-
+    replicas: 10
   traffic_router:
     type: istio
     virtualservice: keycloak-vs
     subset_old: v16
     subset_new: v26
-
-  # Progressive rollout phases
   phases:
     - name: phase-1-initial
-      percentage: 10       # 10% traffic to canary
-      replicas: 1          # 1 canary replica
-      duration: 3600       # 1 hour observation
+      percentage: 10
+      replicas: 1
+      duration: 3600
       validation:
-        error_rate_threshold: 0.01    # Max 1% errors
-        latency_p99_threshold: 500    # Max 500ms p99
-        min_requests: 100             # Min requests to evaluate
-
+        error_rate_threshold: 0.01
+        latency_p99_threshold: 500
+        min_requests: 100
     - name: phase-2-half
       percentage: 50
       replicas: 5
-      duration: 7200  # 2 hours
-      validation:
-        error_rate_threshold: 0.01
-        latency_p99_threshold: 500
-        min_requests: 500
-
+      duration: 7200
     - name: phase-3-full
       percentage: 100
       replicas: 10
-      duration: 1800  # 30 min final check
-      validation:
-        error_rate_threshold: 0.01
-        latency_p99_threshold: 500
-        min_requests: 1000
-
-  auto_rollback: true  # Auto-rollback on validation failure
+      duration: 1800
+  auto_rollback: true
 
 validation:
   prometheus_url: http://prometheus.monitoring.svc.cluster.local:9090
 ```
 
-**Execute:**
+### Оптимизации под конкретную БД (v3.4)
 
-```bash
-./scripts/migrate_keycloak_v3.sh migrate --profile=canary-k8s-istio.yaml
-```
+Все оптимизации **автоматические**, конфигурация не нужна — инструмент определяет тип БД и применяет
+подходящие настройки:
+- PostgreSQL: авто-подбор параллельных jobs по формуле `min(cpu_cores, max(1, db_size_gb / 2))`,
+  учёт размера БД, `VACUUM ANALYZE` после миграции, рекомендации по пулу соединений;
+- MySQL: Percona **XtraBackup** (горячий бэкап, до 10× быстрее `mysqldump`);
+- MariaDB: **mariabackup**;
+- CockroachDB: zone-aware backup (multi-region);
+- оценка времени миграции до старта.
 
-**Canary Process:**
-1. **Phase 1:** Deploy 1 canary replica (10% traffic)
-   - Migrate 1 replica to new version
-   - Route 10% traffic to canary
-   - **Validate:** error rate, latency, minimum requests
-   - **Observe:** 1 hour
-2. **Phase 2:** Scale to 5 replicas (50% traffic)
-   - Migrate 4 more replicas
-   - Route 50% traffic to canary
-   - **Validate:** same metrics
-   - **Observe:** 2 hours
-3. **Phase 3:** Full rollout (100% traffic)
-   - Migrate remaining replicas
-   - Route 100% traffic to new version
-   - **Validate:** final check
-   - **Observe:** 30 minutes
-
-**Auto-Rollback Triggers:**
-- Error rate > threshold
-- p99 latency > threshold
-- Insufficient requests (unreliable metrics)
-- 3 consecutive validation failures
-
-**Benefits:**
-- ✅ Risk mitigation through gradual rollout
-- ✅ Automated validation at each phase (Prometheus metrics)
-- ✅ Early detection of issues (10% exposure first)
-- ✅ Automatic rollback on failure
-- ✅ Continuous monitoring during observation periods
-
----
-
-### Database-Specific Optimizations (v3.4)
-
-#### Automatic Performance Tuning
-
-**Features:**
-- ✅ Auto-tuned parallel jobs (PostgreSQL backup/restore)
-- ✅ Database size-aware optimization
-- ✅ Post-migration VACUUM ANALYZE (PostgreSQL)
-- ✅ Connection pool recommendations
-- ✅ Percona XtraBackup integration (MySQL)
-- ✅ MariaDB mariabackup support
-- ✅ CockroachDB zone-aware backup
-- ✅ Migration time estimation
-
-**Usage:**
-
-All optimizations are **automatic** — no configuration needed. The tool detects database type and applies appropriate optimizations.
-
-**PostgreSQL:**
-
-```bash
-# Parallel backup/restore auto-tuned based on:
-# - CPU cores available
-# - Database size
-# - Formula: min(cpu_cores, max(1, db_size_gb / 2))
-
-# Example output during migration:
-# [INFO] Auto-tuned parallel jobs: 4 (based on CPU cores and DB size)
-# [INFO] Using parallel backup with 4 jobs
-# [INFO] Database size: 12.5GB
-# [INFO] Estimated backup time: 4 minutes (at 50MB/s)
-
-# Post-migration optimizations:
-# [INFO] Running VACUUM ANALYZE on database: keycloak
-# [✓] VACUUM ANALYZE completed in 45s
-
-# Configuration recommendations:
-# [INFO] Recommended postgresql.conf settings:
-#   max_connections = 208
-#   shared_buffers = 2048MB
-#   work_mem = 8MB
-#   maintenance_work_mem = 512MB
-#   effective_cache_size = 6144MB
-```
-
-**MySQL/MariaDB:**
-
-```bash
-# Percona XtraBackup (if available):
-# [INFO] Using Percona XtraBackup for hot backup
-# [✓] XtraBackup completed: /opt/backups/keycloak
-
-# MariaDB mariabackup:
-# [INFO] Using MariaDB mariabackup for hot backup
-
-# InnoDB recommendations:
-# [INFO] Recommended my.cnf settings:
-#   innodb_buffer_pool_size = 6144M  # 75% of RAM
-#   innodb_buffer_pool_instances = 6
-#   innodb_log_file_size = 512M
-#   innodb_flush_log_at_trx_commit = 2
-#   innodb_flush_method = O_DIRECT
-
-# Binary log management:
-# [INFO] Purging old binary logs...
-```
-
-**CockroachDB:**
-
-```bash
-# Cluster information:
-# [INFO] Cluster nodes: 3
-# [INFO] Regions: us-east-1, us-west-1
-
-# Native backup (zone-aware, multi-region):
-# [INFO] Using CockroachDB native backup (zone-aware)
-# [✓] Zone-aware backup completed
-
-# Node draining (for rolling update):
-# [INFO] Draining CockroachDB node 1...
-# [✓] Node 1 drained
-```
-
-**Manual Override:**
-
-If you want to disable auto-tuning and use specific values:
-
+Ручное переопределение авто-тюнинга:
 ```yaml
-# In profile YAML:
 database:
   type: postgresql
   backup:
-    parallel_jobs: 8  # Override auto-tuning (default: auto)
-    verify: true      # Verify backup integrity (default: true)
-
+    parallel_jobs: 8      # переопределить авто-подбор
+    verify: true          # проверка целостности бэкапа
   optimization:
-    vacuum_analyze: true  # Run after migration (default: true)
-    show_recommendations: true  # Show config tips (default: true)
+    vacuum_analyze: true
+    show_recommendations: true
 ```
 
-**Benefits:**
-- ⚡ **2-4x faster backups** (PostgreSQL parallel jobs)
-- ⚡ **Up to 10x faster** (MySQL XtraBackup vs mysqldump)
-- 🎯 **Optimized query performance** (VACUUM ANALYZE)
-- 📊 **Right-sized configuration** (automatic recommendations)
-- 🔒 **Backup verification** (integrity checks)
-- ⏱️ **Accurate time estimates** (before starting migration)
+Выигрыш: 2–4× быстрее бэкапы PostgreSQL, до 10× MySQL XtraBackup, оптимизированные запросы после
+`VACUUM ANALYZE`, right-sized конфигурация, верификация бэкапов, точные оценки времени.
 
----
+### Производственная закалка (v3.5)
 
-### Production Hardening (v3.5)
+**(A) 15 preflight-проверок** выполняются автоматически перед каждой миграцией и группируются как:
+*System Resources* (диск, память, сеть), *Database Health* (доступность, версия, размер, статус
+репликации PRIMARY/REPLICA), *Keycloak Health* (статус сервиса, учётные данные Admin API), *Backup
+Validation* (место под бэкап, права каталога), *Dependencies* (нужные утилиты, версия Java),
+*Configuration* (синтаксис YAML, учётные данные). При провале критичных проверок миграция
+**блокируется**.
 
-#### Comprehensive Preflight Checks
-
-**15 Production Safety Checks** run automatically before migration:
-
-**System Resources:**
-- ✅ Disk space (backup directory + minimum requirements)
-- ✅ Memory availability
-- ✅ Network connectivity
-
-**Database Health:**
-- ✅ Database connectivity
-- ✅ Database version detection
-- ✅ Database size calculation
-- ✅ Replication status (PRIMARY vs REPLICA warning)
-
-**Keycloak Health:**
-- ✅ Keycloak service status
-- ✅ Admin API credentials validation
-
-**Backup Validation:**
-- ✅ Backup space availability (3x database size)
-- ✅ Backup directory permissions
-
-**Dependencies:**
-- ✅ Required tools (psql, mysql, cockroach, etc.)
-- ✅ Java version compatibility
-
-**Configuration:**
-- ✅ Profile YAML syntax
-- ✅ Credentials validation
-
-**Usage:**
-
-Preflight checks run **automatically** before every migration:
-
-```bash
-./scripts/migrate_keycloak_v3.sh migrate --profile=prod.yaml
-
-# Output:
-# ═══════════════════════════════════════════════════════════════
-#   PREFLIGHT CHECKS — PRODUCTION SAFETY v3.5
-# ═══════════════════════════════════════════════════════════════
-#
-# 1. DISK SPACE CHECK
-# [INFO] Checking disk space on: /opt/backups
-# [INFO] Required: 10GB minimum
-# [INFO] Available space: 250GB
-# [✓ PREFLIGHT] Disk space: 250GB (OK)
-#
-# 2. MEMORY CHECK
-# [INFO] Required free memory: 2GB minimum
-# [INFO] Available memory: 16GB
-# [✓ PREFLIGHT] Memory: 16GB (OK)
-#
-# 3. NETWORK CONNECTIVITY CHECK
-# [INFO] Testing connectivity to: postgres.keycloak.svc:5432
-# [✓ PREFLIGHT] Network: postgres.keycloak.svc:5432 (reachable)
-#
-# 4. DATABASE CONNECTIVITY CHECK
-# [INFO] Database: postgresql at postgres.keycloak.svc:5432/keycloak
-# [✓ PREFLIGHT] PostgreSQL: Connected
-#
-# 5. DATABASE VERSION CHECK
-# [INFO] PostgreSQL Version: PostgreSQL 15.4
-# [✓ PREFLIGHT] Database version: OK
-#
-# 6. DATABASE SIZE CHECK
-# [INFO] Database size: 12.50GB
-# [✓ PREFLIGHT] Database size check: OK
-#
-# 7. DATABASE REPLICATION CHECK
-# [✓ PREFLIGHT] Database is PRIMARY instance: OK
-#
-# ... (15 checks total)
-#
-# PREFLIGHT SUMMARY
-# Total checks: 15
-# Passed: 15
-# Failed: 0
-# Warnings: 0
-#
-# [✓ PREFLIGHT] PREFLIGHT PASSED — All checks successful
-```
-
-**Blocking Failures:**
-
-If critical checks fail, migration is **blocked**:
-
-```bash
-# Example: Insufficient disk space
-[✗ PREFLIGHT ERROR] Insufficient disk space: 5GB < 10GB
-[✗ PREFLIGHT ERROR] Free up space or specify different backup location
-
-PREFLIGHT SUMMARY
-Passed: 12
-Failed: 3
-Warnings: 0
-
-[✗ PREFLIGHT ERROR] PREFLIGHT FAILED — Cannot proceed with migration
-[✗ PREFLIGHT ERROR] Failure reasons:
-  - Disk space
-  - Database connectivity
-  - Missing dependencies
-
-# Migration does NOT proceed until issues are fixed
-```
-
-#### Rate Limiting & Database Protection
-
-**Prevents production database overload** during migration with intelligent throttling:
-
-**Features:**
-- ✅ **Fixed Rate:** Simple N ops/sec throttling
-- ✅ **Token Bucket:** Burst handling with smoothing
-- ✅ **Adaptive:** Monitors database load, adjusts rate dynamically
-- ✅ **Circuit Breaker:** Stops on consecutive failures (5 threshold)
-- ✅ **Exponential Backoff:** Retry logic with increasing delays
-- ✅ **Connection Pool Monitoring:** Warns when usage > 80%
-- ✅ **Leak Detection:** Finds idle-in-transaction connections
-
-**Automatic Rate Limiting:**
-
-All database operations are rate-limited automatically:
-
-```bash
-# Example output during migration:
-[RATE LIMITER] Processing backup operations with adaptive strategy
-[RATE LIMITER] DB load: 45%, rate adjusted: 10 → 7 ops/sec
-[CONNECTION POOL] Active: 45 / 100 (45%)
-[RATE LIMITER] Progress: 1250/5000 (25%)
-
-# If database is overloaded (>80% connections):
-[RATE LIMITER] DB load: 85%, rate adjusted: 10 → 2 ops/sec
-[CONNECTION POOL WARNING] Usage above 80% — reducing rate
-
-# Circuit breaker protection:
-[CIRCUIT BREAKER] Failure count: 3/5
-[CIRCUIT BREAKER] State: OPEN (too many failures: 5)
-[RATE LIMITER ERROR] Circuit breaker OPEN, blocking operations for 30s
-```
-
-**Configuration:**
+**(B) Rate Limiting и защита БД:** стратегии `fixed` / `token_bucket` / `adaptive`, circuit breaker
+(порог 5 сбоев), экспоненциальный backoff, мониторинг пула соединений (предупреждение при >80%),
+детекция утечек.
 
 ```yaml
-# In profile YAML (optional):
 migration:
   rate_limiting:
     enabled: true
-    strategy: adaptive  # fixed | token_bucket | adaptive
-    ops_per_second: 10  # Base rate (adaptive adjusts this)
+    strategy: adaptive        # fixed | token_bucket | adaptive
+    ops_per_second: 10
     circuit_breaker:
-      threshold: 5      # Failures before circuit opens
-      timeout: 30       # Seconds before retry
+      threshold: 5
+      timeout: 30
 ```
 
-#### Backup Rotation Policies
-
-**Automatic cleanup** of old backups with multiple strategies:
-
-**Policies:**
-1. **Keep Last N:** Retain only the N most recent backups
-2. **Time-Based:** Delete backups older than X days
-3. **Size-Based:** Delete oldest when total size exceeds limit
-4. **GFS (Grandfather-Father-Son):** Daily/Weekly/Monthly retention
-5. **Combined:** Mix of all policies
-
-**Usage:**
-
-Backup rotation runs **automatically** after successful migration:
-
-```bash
-# Output:
-═══════════════════════════════════════════════════════════════
-  BACKUP ROTATION (PRODUCTION SAFETY v3.5)
-═══════════════════════════════════════════════════════════════
-
-[ROTATION INFO] Policy: Keep last 5 backups
-[ROTATION INFO] Directory: /opt/migration_workspace/backups
-[ROTATION INFO] Pattern: *.dump
-[ROTATION INFO] Found 8 backup(s)
-[ROTATION INFO] Deleting old backup: backup_20260110_120000.dump
-[ROTATION INFO] Deleting old backup: backup_20260111_120000.dump
-[ROTATION INFO] Deleting old backup: backup_20260112_120000.dump
-[✓ ROTATION] Deleted 3 backup(s), freed 45120MB
-
-Backup Statistics for: /opt/migration_workspace/backups
-[ROTATION INFO] Total backups: 5
-[ROTATION INFO] Total size: 75.50GB
-[ROTATION INFO] Oldest backup: backup_20260120_120000.dump (10 days old)
-[ROTATION INFO] Newest backup: backup_20260130_120000.dump (1 hours ago)
-[ROTATION INFO] Average backup size: 15100MB
-[ROTATION INFO] Available disk space: 175GB
-[✓ ROTATION] Disk space: OK (175GB available)
-```
-
-**Configuration:**
+**(C) Ротация бэкапов:** политики `keep_last_n`, по времени, по размеру, GFS
+(Grandfather-Father-Son), комбинированная.
 
 ```yaml
-# In profile YAML:
 backup:
   rotation:
-    policy: keep_last_n  # keep_last_n | time_based | size_based | gfs | combined
-    keep_count: 5        # For keep_last_n
-    max_age_days: 30     # For time_based
-    max_size_gb: 100     # For size_based
-
-    # For GFS (Grandfather-Father-Son):
-    # policy: gfs
-    # daily_keep: 7      # 7 daily backups
-    # weekly_keep: 4     # 4 weekly backups (Sundays)
-    # monthly_keep: 12   # 12 monthly backups (1st of month)
+    policy: keep_last_n       # keep_last_n | time_based | size_based | gfs | combined
+    keep_count: 5
+    max_age_days: 30
+    max_size_gb: 100
+    # для GFS: daily_keep: 7 / weekly_keep: 4 / monthly_keep: 12
 ```
 
-**Manual Rotation:**
+Ручной запуск (`source scripts/lib/backup_rotation.sh`): `rotate_keep_last_n`, `rotate_by_age`,
+`rotate_by_size`, `rotate_gfs`, `get_backup_statistics`.
 
-```bash
-# Run rotation manually
-cd /opt/kk_migration
-source scripts/lib/backup_rotation.sh
-
-# Keep last 5 backups
-rotate_keep_last_n /opt/backups 5
-
-# Delete backups older than 30 days
-rotate_by_age /opt/backups 30
-
-# Keep total size under 100GB
-rotate_by_size /opt/backups 100
-
-# GFS policy (7 daily, 4 weekly, 12 monthly)
-rotate_gfs /opt/backups 7 4 12
-
-# Get statistics
-get_backup_statistics /opt/backups
-```
-
-**Benefits:**
-- 💾 **Automatic cleanup** — No manual backup management
-- 📊 **Multiple policies** — Choose strategy that fits your needs
-- 🔒 **Configurable retention** — Keep what you need, delete the rest
-- 📈 **Disk space monitoring** — Warns when space is low
-- 🎯 **GFS support** — Industry-standard enterprise retention
-
----
-
-### Monitoring Integration (v3.1)
-
-Enable real-time monitoring during migration:
+### Интеграция мониторинга (v3.1)
 
 ```bash
 ./scripts/migrate_keycloak_v3.sh migrate --profile=prod.yaml --enable-monitoring
+# Поднять стек:
+cd examples/monitoring && docker-compose up -d
 ```
 
-**Start monitoring stack:**
+Доступ: **Grafana** `http://localhost:3000` (7 панелей, авто-refresh 5 c), **Prometheus**
+`http://localhost:9091`, **Alertmanager** `http://localhost:9093` (11 правил алертов).
 
-```bash
-cd examples/monitoring
-docker-compose up -d
-```
-
-**Access dashboards:**
-- **Grafana:** http://localhost:3000 (7 panels, auto-refresh 5s)
-- **Prometheus:** http://localhost:9091 (metrics endpoint)
-- **Alertmanager:** http://localhost:9093 (11 alert rules)
-
-**Metrics exported:**
-- `keycloak_migration_progress` — Progress percentage (0.0 to 1.0)
-- `keycloak_migration_checkpoint_status` — Checkpoint states
-- `keycloak_migration_duration_seconds` — Total migration time
-- `keycloak_migration_errors_total` — Error counter
-- `keycloak_migration_database_size_bytes` — DB size before/after
-- `keycloak_migration_java_heap_bytes` — Java memory usage
-- `keycloak_migration_last_success_timestamp` — Last successful migration
-
-**Multi-instance labels:**
-- `tenant="enterprise-corp"` — Per-tenant metrics
-- `node="kc-node-3"` — Per-node metrics
+Экспортируемые метрики: `keycloak_migration_progress`, `_checkpoint_status`, `_duration_seconds`,
+`_errors_total`, `_database_size_bytes`, `_java_heap_bytes`, `_last_success_timestamp`.
+Метки для мультиинстанса: `tenant="…"`, `node="…"`.
 
 ---
 
-## 🏗️ Architecture
+## 🏗️ Архитектура
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
-│                    KEYCLOAK MIGRATION v3.0                      │
+│                  KEYCLOAK MIGRATION v3.9.7                      │
 ├─────────────────────────────────────────────────────────────────┤
 │                                                                 │
 │  ┌──────────────┐      ┌──────────────┐      ┌──────────────┐  │
@@ -938,156 +571,114 @@ docker-compose up -d
 └─────────────────────────────────────────────────────────────────┘
 ```
 
-### Adapters
+**Database Adapter** (`scripts/lib/database_adapter.sh`): `db_validate_type`, `db_detect_type`,
+`db_build_jdbc_url`, `db_backup` / `db_restore`.
+**Deployment Adapter** (`scripts/lib/deployment_adapter.sh`): `deploy_validate_mode`,
+`deploy_detect_mode`, `kc_start` / `kc_stop`, `kc_health_check`.
+**Distribution Handler** (`scripts/lib/distribution_handler.sh`): `dist_download`,
+`dist_validate_airgap`, `dist_check_network`.
 
-**Database Adapter** (`scripts/lib/database_adapter.sh`)
-- `db_validate_type()` — Validate database type
-- `db_detect_type()` — Auto-detect from JDBC URL
-- `db_build_jdbc_url()` — Generate JDBC connection string
-- `db_backup()` / `db_restore()` — Database operations
-
-**Deployment Adapter** (`scripts/lib/deployment_adapter.sh`)
-- `deploy_validate_mode()` — Validate deployment mode
-- `deploy_detect_mode()` — Auto-detect (systemd/docker/k8s)
-- `kc_start()` / `kc_stop()` — Lifecycle management
-- `kc_health_check()` — Health verification
-
-**Distribution Handler** (`scripts/lib/distribution_handler.sh`)
-- `dist_download()` — Fetch Keycloak distribution
-- `dist_validate_airgap()` — Validate offline artifacts
-- `dist_check_network()` — Network reachability
+Решения зафиксированы в `ARCHITECTURE.md` (ADR-001 … ADR-013).
 
 ---
 
-## 📋 Usage Examples
+## 📋 Типовые потоки
 
-### Standalone → Kubernetes Migration
+### Standalone → Kubernetes
 ```bash
-# 1. Create profile
 ./scripts/config_wizard.sh
-
-# 2. Plan (dry-run)
-./scripts/migrate_keycloak_v3.sh plan --profile standalone-postgresql
-
-# 3. Migrate
-./scripts/migrate_keycloak_v3.sh migrate --profile standalone-postgresql
-
-# 4. Rollback (if needed)
-./scripts/migrate_keycloak_v3.sh rollback
+./scripts/migrate_keycloak_v3.sh plan     --profile standalone-postgresql   # dry-run
+./scripts/migrate_keycloak_v3.sh migrate  --profile standalone-postgresql
+./scripts/migrate_keycloak_v3.sh rollback                                    # при необходимости
 ```
 
 ### Kubernetes Rolling Update
 ```yaml
 # profiles/k8s-production.yaml
-profile:
-  name: k8s-production
-
-database:
-  type: postgresql
-  location: external
-  host: postgres.prod.svc.cluster.local
-  port: 5432
-  name: keycloak
-  user: keycloak
-
 keycloak:
   deployment_mode: kubernetes
   cluster_mode: infinispan
   current_version: 16.1.1
-  target_version: 26.0.7
-
+  target_version: 26.6.3
   kubernetes:
     namespace: keycloak
     deployment: keycloak
     replicas: 3
 
 migration:
-  strategy: rolling_update  # Zero-downtime
+  strategy: rolling_update   # zero-downtime
   run_smoke_tests: true
   backup_before_step: true
 ```
 
+### Air-gap миграция
 ```bash
-./scripts/migrate_keycloak_v3.sh migrate --profile k8s-production
+# 1. На СВЯЗАННОМ хосте: собрать бандл суверенных образов
+scripts/build_matrix.sh --build           # -> dist/kc-<os>-<ver>.tar (+ .sha256)
+#    (или взять готовый комбинированный бандл dist/kc-<os>-bundle.tar.xz)
+# 2. Перенести dist/*.tar(.xz) + .sha256 на изолированный контур и проверить контрольную сумму
+sha256sum -c kc-astra-bundle.tar.xz.sha256
+# 3. В AIR-GAP: миграция из офлайн-бандла (образы грузятся из tar; хостовый psql не требуется — v3.9.7)
+scripts/migrate_oneshot.sh --target 26 --os astra --source bundle \
+  --bundle dist/kc-astra-bundle.tar.xz \
+  --db-host <db-host> --db-port 5432 --db-name keycloak --db-user keycloak --go
+#    (или --source preloaded, если образы уже загружены в рантайм)
 ```
-
-### Airgap Migration
-```bash
-# 1. Pre-download all artifacts
-./scripts/migrate_keycloak_v3.sh download --profile airgap-migration
-
-# 2. Transfer to airgap environment
-scp -r ./dist/ airgap-server:/opt/keycloak-migration/
-
-# 3. Run migration in airgap mode
-./scripts/migrate_keycloak_v3.sh migrate --profile airgap-migration --airgap
-```
+> Полный runbook офлайн-поставки: [docs/AIRGAP.md](docs/AIRGAP.md).
 
 ---
 
-## 🧪 Testing
+## 🧪 Тестирование
 
 ```bash
-# Run all tests
+# Все тесты
 ./tests/run_all_tests.sh
 
-# Run specific suite
+# Отдельные наборы
 ./tests/test_database_adapter.sh
 ./tests/test_deployment_adapter.sh
 ./tests/test_profile_manager.sh
 ./tests/test_migration_logic.sh
+./tests/test_pg_client.sh          # автономность pg-client (v3.9.7)
 ```
 
-**Test Results:**
-```
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-  SUITES: 4 | PASSED: 4 | FAILED: 0
-  TOTAL:  137 tests
-  PASSED: 137
-  FAILED: 0
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-```
+Актуальный авторитетный результат: **`run_all_tests.sh` — 31/31**.
 
 ---
 
-## 📁 Project Structure
+## 📁 Структура проекта
 
 ```
 kk_migration/
 ├── scripts/
-│   ├── migrate_keycloak_v3.sh      # Main migration script
-│   ├── config_wizard.sh            # Interactive configuration
-│   ├── kc_discovery.sh             # Auto-discovery
+│   ├── migrate_keycloak_v3.sh      # основной скрипт миграции
+│   ├── migrate_oneshot.sh          # container-hop «в одну команду»
+│   ├── config_wizard.sh            # интерактивная настройка
+│   ├── kc_discovery.sh             # авто-обнаружение
+│   ├── build_matrix.sh             # сборка матрицы суверенных образов
 │   └── lib/
-│       ├── database_adapter.sh     # DB abstraction (5 databases)
-│       ├── deployment_adapter.sh   # Deployment abstraction (5 modes)
-│       ├── profile_manager.sh      # YAML profile handling
-│       ├── distribution_handler.sh # Artifact management
-│       ├── keycloak_discovery.sh   # Environment scanning
-│       └── audit_logger.sh         # JSON audit logging
+│       ├── database_adapter.sh     # абстракция БД (6 движков)
+│       ├── deployment_adapter.sh   # абстракция развёртывания (5 режимов)
+│       ├── container_runtime.sh    # движок контейнеров + pg_client (v3.9.7)
+│       ├── db_lock.sh              # advisory-lock по БД (ADR-011)
+│       ├── migration_verify.sh     # verify: L2+L3+readiness+Admin API (ADR-010)
+│       ├── data_integrity.sh       # Layer-3 gate целостности (ADR-010)
+│       ├── profile_manager.sh      # работа с YAML-профилями
+│       ├── distribution_handler.sh # управление артефактами
+│       ├── keycloak_discovery.sh   # сканирование окружения
+│       └── audit_logger.sh         # JSON-аудит-логирование
 │
-├── profiles/                       # YAML configuration profiles
-│   ├── standalone-postgresql.yaml
-│   ├── standalone-mysql.yaml
-│   ├── docker-compose-dev.yaml
-│   └── kubernetes-cluster-production.yaml
-│
-├── tests/                          # Unit tests (137 tests, 100% pass)
-│   ├── test_framework.sh
-│   ├── test_database_adapter.sh
-│   ├── test_deployment_adapter.sh
-│   ├── test_profile_manager.sh
-│   ├── test_migration_logic.sh
-│   └── run_all_tests.sh
-│
+├── profiles/                       # YAML-профили (multi-tenant, clustered, blue-green, canary, …)
+├── tests/                          # наборы тестов (run_all_tests.sh — 31/31)
+├── docs/                           # MIGRATION_GUIDE.md, AIRGAP.md
 └── README.md
 ```
 
 ---
 
-## 🔧 Configuration
+## 🔧 Конфигурация
 
-### YAML Profile Example
+### Пример YAML-профиля
 ```yaml
 profile:
   name: standalone-postgresql
@@ -1104,11 +695,10 @@ database:
 
 keycloak:
   deployment_mode: standalone
-  distribution_mode: download
+  distribution_mode: container
   cluster_mode: standalone
-
   current_version: 16.1.1
-  target_version: 26.0.7
+  target_version: 26.6.3
 
 migration:
   strategy: inplace
@@ -1118,17 +708,23 @@ migration:
   backup_before_step: true
 ```
 
-### Environment Variables
+### Переменные окружения
 ```bash
-# Database credentials
+# Учётные данные БД
 export KC_DB_PASSWORD="secret"
+export PROFILE_DB_PASSWORD="secret"       # для боевого container-hop
 
-# Non-interactive mode
+# Неинтерактивный режим
 export NON_INTERACTIVE=true
 export PROFILE_DB_TYPE=postgresql
 export PROFILE_KC_DEPLOYMENT_MODE=kubernetes
 
-# Migration options
+# Container-hop / автономность pg-client (v3.9.7)
+export CONTAINER_RUNTIME=docker
+export PROFILE_PG_CLIENT_IMAGE=postgres:16   # мажор ≥ мажора сервера БД
+# PG_CLIENT_MOUNT — путь bind-монтирования файлов бэкапа в pg-client-контейнер
+
+# Опции миграции
 export AIRGAP_MODE=true
 export AUTO_ROLLBACK=true
 export SKIP_PREFLIGHT=false
@@ -1136,230 +732,208 @@ export SKIP_PREFLIGHT=false
 
 ---
 
-## 🚀 Advanced Features
+## 🚀 Продвинутые возможности
 
-### Atomic Checkpoints
-Resume migration from any step:
+### Атомарные checkpoint'ы
+Возобновление миграции с любого шага:
 ```
 backup_done → stopped → downloaded → built →
 started → migrated → health_ok → tests_ok
 ```
+При падении на `health_ok` — исправьте причину и запустите снова, инструмент продолжит с последнего
+checkpoint'а. **Важно:** не переиспользуйте один и тот же `--work-dir` между разными прогонами (иначе
+устаревшие checkpoint'ы могут исказить реконсиляцию состояния).
 
-If migration fails at `health_ok`, fix the issue and resume:
-```bash
-./scripts/migrate_keycloak_v3.sh migrate --profile my-profile
-# Automatically resumes from last checkpoint
-```
+### verify и gate целостности данных (ADR-010)
+Подкоманда `verify` выполняет приёмку после миграции: продвижение Layer-2 (`MIGRATION_MODEL`),
+Layer-3 (счётчики realm / user / client / role), readiness и вызовы Admin API. Layer-3 gate
+целостности отрабатывает на **каждом** hop'е.
 
-### Auto-Rollback
+### Advisory-lock по БД (ADR-011)
+Одновременно на одной базе выполняется **только одна** миграция — межхостово. В v3.9.7 блокировка
+удерживается через pg-client-контейнер, если `psql` на хосте отсутствует (см. раздел «Автономность
+pg-client»).
+
+### Авто-откат (уточнение по ADR-009)
+Gate миграции — **продвижение Layer-2** (`MIGRATION_MODEL`), а health check теперь **диагностический**
+(ADR-009), а не решающий. Авто-откат срабатывает при **сбое миграции**, а не «при неуспешном health
+check»:
 ```bash
-# Enable auto-rollback on health check failure
 ./scripts/migrate_keycloak_v3.sh migrate --profile my-profile --auto-rollback
 ```
 
-### Audit Logging
-All operations logged to `migration_audit.jsonl`:
+### `--apply-indexes` (v3.9.4/3.9.6)
+Создаёт индексы, которые Keycloak пропустил (порог), через `CREATE INDEX CONCURRENTLY IF NOT EXISTS`.
+Флаг имеет приоритет над значением из профиля (env-wins).
+
+### Аудит-логирование
+Все операции пишутся в `migration_audit.jsonl`:
 ```json
-{"ts":"2026-01-29T21:15:00Z","level":"INFO","event":"migration_start","msg":"Migration started","host":"kali","user":"admin","profile":"k8s-prod","from_version":"16.1.1","to_version":"26.0.7"}
-{"ts":"2026-01-29T21:16:32Z","level":"INFO","event":"backup_created","msg":"Backup for 17.0.1","version":"17.0.1","backup_path":"/opt/backup_17.0.1.dump","size_bytes":"458123456"}
-{"ts":"2026-01-29T21:18:45Z","level":"INFO","event":"migration_step","msg":"Step migrated: 17.0.1","version":"17.0.1","status":"migrated","duration_s":"133"}
-{"ts":"2026-01-29T21:35:12Z","level":"INFO","event":"migration_end","msg":"Migration success","profile":"k8s-prod","status":"success","total_duration_s":"1212"}
+{"ts":"2026-07-22T21:15:00Z","level":"INFO","event":"migration_start","profile":"k8s-prod","from_version":"16.1.1","to_version":"26.6.3"}
+{"ts":"2026-07-22T21:16:32Z","level":"INFO","event":"backup_created","version":"24.0.5","backup_path":"/opt/backup_24.0.5.dump","size_bytes":"458123456"}
+{"ts":"2026-07-22T21:18:45Z","level":"INFO","event":"migration_step","version":"24.0.5","status":"migrated","duration_s":"133"}
+{"ts":"2026-07-22T21:35:12Z","level":"INFO","event":"migration_end","profile":"k8s-prod","status":"success","total_duration_s":"1212"}
 ```
 
 ---
 
-## 🛠️ CLI Reference
+## 🛠️ CLI-справочник
 
 ```bash
-# Migration commands
-./scripts/migrate_keycloak_v3.sh migrate --profile <name>
-./scripts/migrate_keycloak_v3.sh plan --profile <name>
+# Подкоманды
+./scripts/migrate_keycloak_v3.sh migrate  --profile <name>
+./scripts/migrate_keycloak_v3.sh plan     --profile <name>
+./scripts/migrate_keycloak_v3.sh verify   --profile <name>    # приёмка после миграции (ADR-010)
 ./scripts/migrate_keycloak_v3.sh rollback [--force]
+#   Офлайн-получение образов (air-gap) — НЕ подкоманда migrate_keycloak_v3.sh;
+#   см. `migrate_oneshot.sh --source bundle|preloaded` ниже и docs/AIRGAP.md.
 
-# Flags
---airgap              # Offline mode (validate artifacts first)
---auto-rollback       # Auto-rollback on failure
---skip-preflight      # Skip pre-flight checks (not recommended)
---dry-run             # Show plan without executing
+# Флаги
+--airgap                 # офлайн-режим (сначала валидировать артефакты)
+--auto-rollback          # авто-откат при сбое миграции
+--skip-preflight         # пропустить preflight-проверки (не рекомендуется)
+--dry-run                # показать план без выполнения
+--apply-indexes          # создать пропущенные индексы через CONCURRENTLY (v3.9.4/3.9.6)
+--no-resume              # игнорировать существующие checkpoint'ы, начать заново
+--force-unlock           # снять «застрявший» advisory-lock (ADR-011)
+--security-scan          # запустить security-сканирование (ShellCheck / gitleaks)
 
-# Profile management
+# One-shot container-hop (migrate_oneshot.sh — свои флаги, НЕ migrate_keycloak_v3.sh)
+scripts/migrate_oneshot.sh --target <25|26> --os <astra|redos> --db-host <host> \
+  --source <pull|bundle|preloaded> [--bundle <file>] [--dry-run | --go]
+#   --env-file <path>        # загрузить переменные окружения из файла
+#   --wizard                 # запустить интерактивный мастер
+#   --image-ref-template <t> # шаблон ссылки на образы для container-hop
+
+# Управление профилями
 ./scripts/migrate_keycloak_v3.sh profile list
 ./scripts/migrate_keycloak_v3.sh profile validate <name>
 
-# Auto-discovery
+# Авто-обнаружение
 ./scripts/kc_discovery.sh [--output <profile-name>]
 ```
 
 ---
 
-## 📊 System Requirements
+## 📊 Системные требования
 
-- **OS:** Linux (tested on Debian, Ubuntu, RHEL, Kali)
-- **Bash:** 5.0+
-- **Disk Space:** 15GB free (for backups + distributions)
-- **Memory:** 4GB+ recommended
-- **Java:** 11, 17, 21 (auto-validated per version)
+- **ОС:** Linux (проверено на Debian, Ubuntu, RHEL, Kali; суверенные — Astra Linux SE, RED OS);
+- **Bash:** 5.0+;
+- **Диск:** место под бэкап проверяется **измеримо** (реальный размер БД × запас) с нижним порогом
+  512 МБ — жёсткого требования «15 ГБ» больше нет (см. CHANGELOG [3.9.1]/[3.9.2]);
+- **Память:** 4 ГБ+ рекомендуется;
+- **Java:** 11 / 17 / 21 (авто-валидация под каждое звено).
 
-### Optional Tools
-- `kubectl` — for Kubernetes deployments
-- `docker` / `docker-compose` — for Docker deployments
-- `helm` — for Helm-based deployments
-- `gitleaks` / `trufflehog` — for secrets scanning
-- `jq` — for JSON parsing (audit logs)
+### Опциональные инструменты
+`kubectl` (Kubernetes), `docker` / `docker-compose` (контейнеры и автономность pg-client), `helm`,
+`gitleaks` / `trufflehog` (секреты), `jq` (JSON-аудит).
 
 ---
 
-## 🐛 Troubleshooting
+## 🐛 Устранение неполадок
 
-### Common Issues
-
-**Issue:** `Java version insufficient`
+**Проблема:** `Java version insufficient`
 ```bash
-# Solution: Set JAVA_HOME for specific version
 export JAVA_HOME=/usr/lib/jvm/java-17-openjdk-amd64
 ./scripts/migrate_keycloak_v3.sh migrate --profile my-profile
 ```
 
-**Issue:** Migration fails at checkpoint
+**Проблема:** миграция упала на checkpoint'е
 ```bash
-# Solution: Resume from last checkpoint
+# Возобновление с последнего checkpoint'а (тот же профиль, тот же --work-dir):
 ./scripts/migrate_keycloak_v3.sh migrate --profile my-profile
-# Automatically continues from where it stopped
 ```
 
-**Issue:** Health check fails
+**Проблема:** health check не проходит
 ```bash
-# Solution: Check logs and rollback
+# Health диагностический (ADR-009). Откат вручную:
 ./scripts/migrate_keycloak_v3.sh rollback
-
-# Or enable auto-rollback
+# Либо включить авто-откат при сбое миграции:
 ./scripts/migrate_keycloak_v3.sh migrate --profile my-profile --auto-rollback
 ```
 
-**Issue:** Airgap validation fails
+**Проблема:** advisory-lock «застрял» после аварийного прогона
 ```bash
-# Solution: Pre-download all artifacts
-./scripts/migrate_keycloak_v3.sh download --profile my-profile
-# Then run migration in airgap mode
+./scripts/migrate_keycloak_v3.sh migrate --profile my-profile --force-unlock
+```
+
+**Проблема:** валидация air-gap не проходит
+```bash
+# Проверьте контрольную сумму бандла и пересоберите его при необходимости:
+sha256sum -c kc-astra-bundle.tar.xz.sha256
+scripts/build_matrix.sh --build
+# Затем прогон из бандла (см. «Air-gap миграция» выше и docs/AIRGAP.md):
+scripts/migrate_oneshot.sh --target 26 --os astra --source bundle --bundle dist/kc-astra-bundle.tar.xz --db-host <db-host> --go
 ```
 
 ---
 
-## 🔧 Advanced Usage Options
+## 🔧 Способы запуска инструмента (интеграции)
 
-For specific infrastructure setups, the migration tool supports integration with automation platforms. **Note:** These are ways to RUN the migration tool, not deploy Keycloak itself.
+> **Примечание:** это способы **запускать сам инструмент миграции**, а не разворачивать Keycloak.
+> Интеграции Docker/Helm/Ansible/Terraform и облачные примеры сейчас числятся в CHANGELOG как
+> **[Unreleased] Planned** — задокументированы, но ещё не поставлены.
 
-### Docker (CI/CD & Isolation)
-
-**When to use:** GitLab CI, GitHub Actions, or when you need isolated dependencies.
-
+### Docker (CI/CD и изоляция)
 ```bash
 docker run --rm \
   -v $(pwd)/profiles:/data \
   -v ~/.kube:/root/.kube \
-  alexgromer/keycloak-migration:3.0.0 \
+  ghcr.io/<owner>/keycloak-migration:redos-26.6.3 \
   --profile=/data/production.yaml
 ```
 
-**Use case:** Clean environment with pre-installed Java/kubectl/helm.
-
-See: [Dockerfile](Dockerfile)
-
----
-
-### Helm (Kubernetes-Native)
-
-**When to use:** Keycloak deployed in Kubernetes, need integration with K8s Secrets/ConfigMaps.
-
+### Helm (K8s-native Job с RBAC)
 ```bash
 helm install my-migration ./examples/helm/keycloak-migration \
   --set database.host=keycloak-db \
-  --set migration.targetVersion=26.0.7
+  --set migration.targetVersion=26.6.3
 ```
 
-**Use case:** Migration as Kubernetes Job with RBAC, automatic retry, kubectl logs.
-
-See: [examples/helm/README.md](examples/helm/README.md)
-
----
-
-### Ansible (Multi-Server Orchestration)
-
-**When to use:** Multiple servers (>3) need migration, centralized configuration management.
-
+### Ansible (оркестрация >3 серверов)
 ```bash
 ansible-playbook -i inventory examples/ansible/keycloak-migration.yml \
   --limit production-servers
 ```
 
-**Use case:** Migrate 10+ Keycloak instances with one command.
-
-See: [examples/ansible/README.md](examples/ansible/README.md)
-
----
-
-### Terraform (IaC Integration)
-
-**When to use:** Migration as part of infrastructure code, idempotent deployment.
-
+### Terraform (IaC)
 ```hcl
 module "keycloak_migration" {
-  source = "./examples/terraform/modules/keycloak-migration"
-
+  source        = "./examples/terraform/modules/keycloak-migration"
   database_host = aws_db_instance.keycloak.endpoint
-  target_version = "26.0.7"
+  target_version = "26.6.3"
 }
 ```
 
-**Use case:** Create infrastructure + migrate in one `terraform apply`.
-
-See: [examples/terraform/README.md](examples/terraform/README.md)
-
----
-
-### Cloud-Specific Examples
-
-Pre-configured examples for major cloud providers:
-
-- **AWS:** EKS + RDS ([examples/cloud/aws/](examples/cloud/))
-- **GCP:** GKE + Cloud SQL ([examples/cloud/gcp/](examples/cloud/))
-- **Azure:** AKS + Azure Database ([examples/cloud/azure/](examples/cloud/))
+### Облачные примеры
+AWS (EKS + RDS), GCP (GKE + Cloud SQL), Azure (AKS + Azure Database) — `examples/cloud/`.
 
 ---
 
-## 📜 License
+## 📜 Лицензия
 
-MIT License
+MIT License.
 
----
+## 🤝 Вклад
 
-## 🤝 Contributing
+1. Форкните репозиторий;
+2. Создайте feature-ветку;
+3. Добавьте тесты;
+4. Убедитесь, что все тесты проходят: `./tests/run_all_tests.sh`;
+5. Откройте pull request.
 
-Contributions welcome! Please:
-1. Fork the repository
-2. Create a feature branch
-3. Add tests for new functionality
-4. Ensure all tests pass: `./tests/run_all_tests.sh`
-5. Submit a pull request
+## 📚 Документация
 
----
+- **[QUICKSTART.md](QUICKSTART.md)** — начните отсюда: каждый параметр, источники образов, что
+  происходит на каждом шаге и что делать при сбое;
+- [docs/MIGRATION_GUIDE.md](docs/MIGRATION_GUIDE.md) — полный runbook;
+- [docs/AIRGAP.md](docs/AIRGAP.md) — офлайн / суверенная поставка;
+- [ARCHITECTURE.md](ARCHITECTURE.md) — принятые решения (ADR-001 … ADR-013);
+- [CHANGELOG.md](CHANGELOG.md) — что менялось и что ломалось до исправления.
 
-## 📚 Documentation
+## 🏆 Авторы
 
-- **[QUICKSTART.md](QUICKSTART.md)** — start here. Every parameter, every image source, what happens
-  at each step, and what to do when it goes wrong.
-- [docs/MIGRATION_GUIDE.md](docs/MIGRATION_GUIDE.md) — the full runbook
-- [docs/AIRGAP.md](docs/AIRGAP.md) — offline / sovereign delivery
-- [ARCHITECTURE.md](ARCHITECTURE.md) — the decisions and why (ADR-001 … ADR-010)
-- [CHANGELOG.md](CHANGELOG.md) — what changed, and what it broke before it was fixed
-
----
-
-## 🏆 Credits
-
-Built with ❤️ by [AlexGromer](https://github.com/AlexGromer)
-
-Co-Authored-By: Claude Opus 4.5 <noreply@anthropic.com>
+Разработано [AlexGromer](https://github.com/AlexGromer) при поддержке Claude Code.
 
 ---
 
