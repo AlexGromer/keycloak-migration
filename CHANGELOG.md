@@ -23,6 +23,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   host `psql` inherits it, so every query the tool runs (preflight, lock, verify, integrity) resolves
   in the right schema with no per-query change; the migration container gets `KC_DB_SCHEMA`.
   (`--db-port` was already supported.)
+- **Rootless container-engine mode** (ADR-015, `docs/ROOTLESS.md`). The tool auto-detects a rootless
+  Docker or Podman (`cr_is_rootless`) and adapts: rootless Podman + a bind mount gets
+  `--userns=keep-id` (a non-root container writes **caller-owned** dumps); a rootless-Docker +
+  loopback DB host is rewritten to `host.docker.internal` via `--add-host=…:host-gateway` (a rootless
+  dockerd's `--network=host` is its own namespace, not the machine's). The rootful path is unchanged.
+  Live-validated on rootless Podman (dump/restore round-trip, non-root, caller-owned);
+  rootless-Docker covered by hermetic tests in `test_container_runtime`.
 
 ### Changed — air-gap delivery (ADR-014)
 

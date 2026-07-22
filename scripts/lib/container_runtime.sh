@@ -167,6 +167,25 @@ _pg_client_rootful() {
     _PG_CLIENT_ROOTFUL=no; return 1
 }
 
+# cr_is_rootless — 0 only when the engine is POSITIVELY rootless (docker SecurityOptions carries
+# name=rootless; podman Host.Security.Rootless==true). Anything undetectable is treated as NOT
+# rootless (fail-safe: keeps the rootful/host-network path byte-identical). Cached after first probe.
+_KC_ROOTLESS=""
+cr_is_rootless() {
+    case "$_KC_ROOTLESS" in yes) return 0 ;; no) return 1 ;; esac
+    local rl=no
+    case "${CONTAINER_RUNTIME:-}" in
+        docker) cr info -f '{{.SecurityOptions}}' 2>/dev/null | grep -q 'name=rootless' && rl=yes ;;
+        podman) [[ "$(cr info -f '{{.Host.Security.Rootless}}' 2>/dev/null)" == "true" ]] && rl=yes ;;
+    esac
+    _KC_ROOTLESS="$rl"
+    [[ "$rl" == yes ]]
+}
+
+# _cr_is_loopback — 0 if the host is a loopback name/address (the case that needs a rootless-docker
+# rewrite, because a rootless dockerd's --network=host loopback is NOT the machine's loopback).
+_cr_is_loopback() { case "${1:-}" in localhost|127.*|::1) return 0 ;; *) return 1 ;; esac; }
+
 pg_client() {
     local tool="${1:?pg_client: a tool name (psql|pg_dump|pg_restore) is required}"
     shift
@@ -185,17 +204,44 @@ pg_client() {
     # One host directory, quoted so paths with spaces are safe. The :z suffix relabels for SELinux
     # hosts (RHEL / RED OS) and is ignored where SELinux is absent.
     [[ -n "${PG_CLIENT_MOUNT:-}" ]] && mounts=(-v "$PG_CLIENT_MOUNT:$PG_CLIENT_MOUNT:z")
-    # Map --user only on a positively rootful engine, so written dump files stay caller-owned.
-    _pg_client_rootful && userns=(--user "$(id -u):$(id -g)")
+    # Bind-mount output ownership, per engine:
+    #  - rootful docker/podman: --user <caller> maps the container write back to the caller (owned+RW).
+    #  - rootless PODMAN + a mount: --userns=keep-id maps the image's uid 1000 to the CALLER's uid, so
+    #    a non-root container can write the dump to the caller's dir (owned+RW), staying non-root inside.
+    #    (Without it the uid maps to an unwritable subuid — pg_dump fails to open its -f file.)
+    #  - rootless docker maps container-root, not uid 1000, to the caller; a mount owned by the caller
+    #    is then not writable by the image's uid 1000 — documented in docs/ROOTLESS.md (prefer podman
+    #    for a fully rootless dump/restore, or make the work-dir group-writable for the mapped subuid).
+    if _pg_client_rootful; then
+        userns=(--user "$(id -u):$(id -g)")
+    elif [[ -n "${PG_CLIENT_MOUNT:-}" && "${CONTAINER_RUNTIME:-}" == "podman" ]] && cr_is_rootless; then
+        userns=(--userns=keep-id)
+    fi
     # Forward PGOPTIONS so a non-public schema (search_path, set once by the entrypoint) reaches the
     # containerised psql exactly as it reaches a host psql via the environment.
     [[ -n "${PGOPTIONS:-}" ]] && pgopts=(-e PGOPTIONS="$PGOPTIONS")
-    cr run --rm -i --network="${PROFILE_PG_CLIENT_NETWORK:-host}" \
+    # Network. Default host networking so the container reaches a host-local DB. Under ROOTLESS DOCKER
+    # only, --network=host is the rootless daemon's own namespace (NOT the machine's), so a loopback
+    # DB is unreachable — rewrite a loopback `-h` to host.docker.internal on the default bridge, via
+    # host-gateway. Rootless PODMAN --network=host DOES share the host netns (works as-is), and rootful
+    # anything is unaffected — so only the narrow rootless-docker + loopback case is ever touched.
+    local -a netargs=(--network="${PROFILE_PG_CLIENT_NETWORK:-host}") args=("$@")
+    if [[ "${PROFILE_PG_CLIENT_NETWORK:-host}" == "host" && "${CONTAINER_RUNTIME:-}" == "docker" ]] && cr_is_rootless; then
+        local _i
+        for ((_i = 0; _i < ${#args[@]}; _i++)); do
+            if [[ "${args[_i]}" == "-h" ]] && _cr_is_loopback "${args[_i+1]:-}"; then
+                args[_i+1]="host.docker.internal"
+                netargs=(--network=bridge --add-host "host.docker.internal:host-gateway")
+                log_info "rootless docker: DB loopback rewritten to host.docker.internal (host-gateway)"
+            fi
+        done
+    fi
+    cr run --rm -i "${netargs[@]}" \
         "${userns[@]}" -e HOME=/tmp \
         -e PGPASSWORD="${PGPASSWORD:-${PROFILE_DB_PASSWORD:-}}" \
         "${pgopts[@]}" \
         "${mounts[@]}" \
-        "${PROFILE_PG_CLIENT_IMAGE:-postgres:16}" "$tool" "$@"
+        "${PROFILE_PG_CLIENT_IMAGE:-postgres:16}" "$tool" "${args[@]}"
 }
 
 pg_client_available() {
@@ -217,4 +263,6 @@ if [[ "${BASH_SOURCE[0]}" != "${0}" ]]; then
     export -f pg_client
     export -f pg_client_available
     export -f _pg_client_rootful
+    export -f cr_is_rootless
+    export -f _cr_is_loopback
 fi

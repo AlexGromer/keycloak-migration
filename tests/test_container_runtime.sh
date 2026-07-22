@@ -45,4 +45,40 @@ else
 fi
 
 # ============================================================================
+describe "rootless detection + rootless-docker loopback rewrite (hermetic)"
+# ============================================================================
+if [[ -f "$LIB" ]]; then
+    # shellcheck source=/dev/null
+    source "$LIB"
+
+    assert_true  "_cr_is_loopback 127.0.0.1"      "127.0.0.1 is loopback"
+    assert_true  "_cr_is_loopback localhost"      "localhost is loopback"
+    assert_false "_cr_is_loopback db.corp.local"  "a real host is not loopback"
+
+    # cr_is_rootless reads the engine's own report (mock cr info).
+    cr() { case "$1" in info) echo 'name=seccomp name=rootless' ;; *) echo "$@" ;; esac; }
+    export CONTAINER_RUNTIME=docker; _KC_ROOTLESS=""
+    assert_true  "cr_is_rootless" "docker SecurityOptions name=rootless -> rootless"
+    cr() { case "$1" in info) echo 'name=seccomp' ;; *) echo "$@" ;; esac; }
+    _KC_ROOTLESS=""
+    assert_false "cr_is_rootless" "docker without name=rootless -> not rootless"
+
+    # pg_client under rootless docker rewrites a loopback -h; a real host is untouched.
+    cr() { case "$1" in info) echo 'name=rootless' ;; run) printf 'RUN %s\n' "$*" ;; *) echo "$@" ;; esac; }
+    _KC_ROOTLESS=""; _PG_CLIENT_ROOTFUL=""
+    rw="$(pg_client __no_such_pg_tool__ -h 127.0.0.1 -U u -d db 2>&1)"
+    assert_contains "$rw" "host.docker.internal" "rootless docker: loopback -h -> host.docker.internal"
+    # needles starting with '--' must use grep -q -- (assert_contains would feed them to grep as options)
+    assert_true "printf '%s' \"\$rw\" | grep -q -- '--add-host host.docker.internal:host-gateway'" "and --add-host host-gateway is added"
+    assert_true "! printf '%s' \"\$rw\" | grep -q -- '--network=host'" "and --network=host is dropped"
+
+    _KC_ROOTLESS=""; _PG_CLIENT_ROOTFUL=""
+    rm2="$(pg_client __no_such_pg_tool__ -h db.corp -U u -d db 2>&1)"
+    assert_true "printf '%s' \"\$rm2\" | grep -q -- '--network=host'" "a non-loopback host keeps --network=host"
+    assert_true "! printf '%s' \"\$rm2\" | grep -q host.docker.internal" "and is not rewritten"
+else
+    skip_test "container_runtime.sh not present"
+fi
+
+# ============================================================================
 test_report
