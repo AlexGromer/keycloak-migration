@@ -171,6 +171,19 @@ check_network_connectivity() {
         return 0
     fi
 
+    # AUTONOMOUS path: with no host psql, the migration reaches the database through the pg-client
+    # CONTAINER, which may sit on a container network the host cannot TCP-probe (e.g. a DB addressed by
+    # container name on a rootless-docker bridge). A host-level probe failure is then NOT authoritative
+    # — the real gate is the pg_client-based database-connectivity check that runs next. So warn and
+    # defer instead of failing. (When host psql IS present the DB is reached from the host, and this
+    # stays a hard failure.)
+    if ! command -v psql >/dev/null 2>&1 \
+       && declare -F pg_client_available >/dev/null 2>&1 && pg_client_available psql; then
+        preflight_log_warn "Network: host cannot TCP-probe $host:$port, but a container pg-client is present"
+        preflight_log_warn "  deferring reachability to the database connectivity check (autonomous path)"
+        return 0
+    fi
+
     preflight_log_error "Network: $host:$port (UNREACHABLE)"
     preflight_log_error "Check firewall, network configuration, or hostname resolution"
     return $EXIT_NETWORK
