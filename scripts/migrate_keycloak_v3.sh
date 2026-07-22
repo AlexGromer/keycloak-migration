@@ -17,7 +17,7 @@ set -euo pipefail
 # The single source of truth for the tool's version. The release workflow refuses to publish a tag
 # that disagrees with this line — the versions in this repo had drifted to four different answers
 # (code 3.0.0, README 3.8, Dockerfile 3.0.0, CHANGELOG 3.9.1) with no 3.9 tag existing at all.
-VERSION="3.9.6"
+VERSION="3.9.7"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 LIB_DIR="$SCRIPT_DIR/lib"
 # shellcheck disable=SC2034  # PROJECT_ROOT kept for external/sourced use
@@ -344,8 +344,8 @@ kc_detect_version() {
     if [[ -z "$version" && -n "${PROFILE_DB_TYPE:-}" ]]; then
         case "${PROFILE_DB_TYPE}" in
             postgresql|cockroachdb)
-                if command -v psql &>/dev/null; then
-                    version=$(PGPASSWORD="${PROFILE_DB_PASSWORD}" psql \
+                if pg_client_available psql; then
+                    version=$(PGPASSWORD="${PROFILE_DB_PASSWORD}" pg_client psql \
                         -h "${PROFILE_DB_HOST}" -p "${PROFILE_DB_PORT}" \
                         -U "${PROFILE_DB_USER}" -d "${PROFILE_DB_NAME}" \
                         -tAc "SELECT id FROM DATABASECHANGELOG ORDER BY DATEEXECUTED DESC LIMIT 1;" 2>/dev/null | \
@@ -696,9 +696,9 @@ check_db_version_for_target() {
     local target_major="$1"
     [[ "$target_major" != "26" ]] && return 0
     case "${PROFILE_DB_TYPE:-}" in postgresql|postgres|cockroachdb) ;; *) return 0 ;; esac
-    command -v psql &>/dev/null || { log_warn "psql not found; cannot verify PG >= $MIN_PG_FOR_26 for target 26.x"; return 0; }
+    pg_client_available psql || { log_warn "psql not found; cannot verify PG >= $MIN_PG_FOR_26 for target 26.x"; return 0; }
     local pgver
-    pgver=$(PGPASSWORD="${PROFILE_DB_PASSWORD:-}" psql -h "${PROFILE_DB_HOST}" -p "${PROFILE_DB_PORT}" \
+    pgver=$(PGPASSWORD="${PROFILE_DB_PASSWORD:-}" pg_client psql -h "${PROFILE_DB_HOST}" -p "${PROFILE_DB_PORT}" \
         -U "${PROFILE_DB_USER}" -d "${PROFILE_DB_NAME}" -tAc "SHOW server_version_num;" 2>/dev/null | tr -d ' ')
     if [[ -z "$pgver" || ! "$pgver" =~ ^[0-9]+$ ]]; then
         log_warn "Could not determine PostgreSQL version; ensure PG >= $MIN_PG_FOR_26 before target 26.x"
@@ -954,7 +954,18 @@ run_preflight_checks() {
     local required_tools=("curl" "tar")
     # Add DB-specific tools
     case "${PROFILE_DB_TYPE:-}" in
-        postgresql) required_tools+=("psql" "pg_dump") ;;
+        postgresql)
+            # psql/pg_dump: a host binary OR the pg-client container image satisfies each.
+            local _pgtool
+            for _pgtool in psql pg_dump; do
+                if declare -F pg_client_available >/dev/null 2>&1 && pg_client_available "$_pgtool"; then
+                    log_success "Tool available: $_pgtool (host or ${PROFILE_PG_CLIENT_IMAGE:-postgres:16} image)"
+                else
+                    log_error "Tool missing: $_pgtool (no host binary and no ${PROFILE_PG_CLIENT_IMAGE:-postgres:16} image)"
+                    errors=$((errors + 1))
+                fi
+            done
+            ;;
         mysql|mariadb) required_tools+=("mysql" "mysqldump") ;;
     esac
     # Add deployment-specific tools

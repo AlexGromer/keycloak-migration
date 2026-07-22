@@ -4,6 +4,15 @@
 
 # Claude Code local settings (CRITICAL - NEVER commit)
 .claude/
+.claude-ver
+.claude-init-attempted
+
+# Generated one-shot profiles (migrate_oneshot writes these into profiles/ per run)
+/profiles/oneshot-*
+
+# Operator handover doc — lives beside the tool but must NEVER be committed or released
+# (release.yml copies root files by explicit name only, so it also never ships; this is belt+braces)
+/HANDOVER.md
 
 # Environment variables & secrets
 .env
@@ -125,3 +134,6 @@ venv/
 !profiles/*.yaml
 !tests/*.sh
 !scripts/**/*.sh
+
+# DOCX-документы поставки (на ревью, не коммитим)
+handover_docx/

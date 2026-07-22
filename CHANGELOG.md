@@ -18,6 +18,50 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [3.9.7] - 2026-07-22
+
+### Added
+
+- **pg-client autonomy — the migration no longer requires host `psql`/`pg_dump`/`pg_restore`.**
+  Every client call routes through a new `pg_client` helper (`scripts/lib/container_runtime.sh`): if
+  the tool is on the host it runs there (byte-identical fast path, keeping `-Fd`/`-j` parallelism);
+  otherwise it runs inside `$PROFILE_PG_CLIENT_IMAGE` (default `postgres:16`) over `--network=host`,
+  with `PGPASSWORD` forwarded and host files bind-mounted (`PG_CLIENT_MOUNT`, same path, `:z` SELinux
+  relabel) so `-Fd`/`-j` still work; `--user` is added only on a positively-rootful engine. Dependency
+  gates use `pg_client_available` (host binary OR `cr image inspect`). New `tests/test_pg_client.sh`.
+  (ADR-012)
+- **Full-parity database advisory lock without host `psql`.** When host `psql` is absent, the ADR-011
+  session advisory lock is held by a persistent psql running inside the pg-client container (coproc
+  over `docker`/`podman run --rm -i`), released by force-removing the container. No more silent
+  degradation to the per-workspace file lock — cross-host / cross-work-dir protection is preserved on
+  autonomous nodes. Crash-release (SIGKILL → stdin-EOF → container exits → lock freed) and normal-exit
+  release were live-validated on docker.
+- **Sovereign pg-client image (decision, ADR-013).** `PROFILE_PG_CLIENT_IMAGE` is overridable; the
+  default is intended to become a per-OS image built FROM the ALSE / RED OS base + `postgresql-client`
+  of the server major (build tracked separately). The client major must be `>=` the DB server major.
+
+### Fixed
+
+- Preflight DB connectivity probe wrapped `pg_client` (a shell function) in the external `timeout`,
+  which cannot exec a function — every PostgreSQL/CockroachDB migration aborted at preflight. Now
+  invoked via `timeout bash -c '... pg_client ...'`; `PROFILE_PG_CLIENT_IMAGE` is exported so the
+  child shell inherits it (else the container path built `cr run ... "" psql` with an empty image).
+
+### Known limitations
+
+- Containerized advisory lock: a 2nd CONCURRENT acquire against the same database can stall, then
+  fail CLOSED (it still refuses), because `docker run -i` does not reliably return psql's answer
+  through the coproc pipe under concurrent attach. Fail-safe; single-run lock is unaffected;
+  re-validate on podman/conmon.
+
+### Validation
+
+- Live matrix on a real stand (docker, seeded KC16): full 16→24→26 (target 26) and 16→25.0.6
+  (target 25), each on the host path AND fully autonomous (host `psql`/`pg_dump`/`pg_restore` hidden);
+  backup via containerized `pg_dump`, restore-into-scratch and `CREATE INDEX CONCURRENTLY` via the
+  container path; advisory-lock acquire / hold / crash-release / normal-release. Two adversarial
+  verification passes closed 1 critical + 3 high; `run_all_tests.sh` 31/31.
+
 ## [3.9.6] - 2026-07-21
 
 ### Fixed

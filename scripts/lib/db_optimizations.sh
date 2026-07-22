@@ -4,6 +4,12 @@
 
 set -euo pipefail
 
+# pg_client / pg_client_available live in container_runtime.sh (include-guarded; safe to re-source).
+if ! declare -F pg_client >/dev/null 2>&1; then
+    # shellcheck source=/dev/null
+    source "$(dirname "${BASH_SOURCE[0]}")/container_runtime.sh" 2>/dev/null || true
+fi
+
 # ============================================================================
 # PostgreSQL Optimizations
 # ============================================================================
@@ -65,7 +71,7 @@ pg_get_database_size_gb() {
     local pass="${PROFILE_DB_PASSWORD:-}"
 
     local size_bytes
-    size_bytes=$(PGPASSWORD="$pass" psql -h "$host" -p "$port" -U "$user" -d "$db_name" -tAc \
+    size_bytes=$(PGPASSWORD="$pass" pg_client psql -h "$host" -p "$port" -U "$user" -d "$db_name" -tAc \
         "SELECT pg_database_size('$db_name');" 2>/dev/null || echo "0")
 
     # Convert bytes to GB
@@ -94,7 +100,7 @@ pg_vacuum_analyze() {
     local start_time=$(date +%s)
 
     # Run VACUUM ANALYZE (may take time on large databases)
-    PGPASSWORD="$pass" psql -h "$host" -p "$port" -U "$user" -d "$db_name" -c \
+    PGPASSWORD="$pass" pg_client psql -h "$host" -p "$port" -U "$user" -d "$db_name" -c \
         "VACUUM ANALYZE;" 2>&1 | tee -a "$LOG_FILE" || {
         log_warn "VACUUM ANALYZE failed (non-critical, continuing)"
         return 0
@@ -202,13 +208,13 @@ pg_verify_backup() {
     log_info "Verifying backup integrity: $backup_file"
 
     # Check if file is a valid pg_dump custom format
-    if ! pg_restore --list "$backup_file" &>/dev/null; then
+    if ! PG_CLIENT_MOUNT="$(dirname "$backup_file")" pg_client pg_restore --list "$backup_file" &>/dev/null; then
         log_error "Backup file is corrupted or invalid format"
         return 1
     fi
 
     local table_count
-    table_count=$(pg_restore --list "$backup_file" 2>/dev/null | grep -c "TABLE DATA" || echo "0")
+    table_count=$(PG_CLIENT_MOUNT="$(dirname "$backup_file")" pg_client pg_restore --list "$backup_file" 2>/dev/null | grep -c "TABLE DATA" || echo "0")
 
     if [[ $table_count -eq 0 ]]; then
         log_warn "Backup contains no tables (empty or corrupted)"

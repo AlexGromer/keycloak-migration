@@ -4,6 +4,12 @@
 
 set -euo pipefail
 
+# pg_client / pg_client_available live in container_runtime.sh (include-guarded; safe to re-source).
+if ! declare -F pg_client >/dev/null 2>&1; then
+    # shellcheck source=/dev/null
+    source "$(dirname "${BASH_SOURCE[0]}")/container_runtime.sh" 2>/dev/null || true
+fi
+
 # ============================================================================
 # RATE LIMITING STRATEGIES
 # ============================================================================
@@ -133,8 +139,8 @@ get_database_load() {
             # Get active connections / max connections
             local active
             local max
-            active=$(PGPASSWORD="$pass" psql -h "$host" -p "$port" -U "$user" -d "$db_name" -t -c "SELECT count(*) FROM pg_stat_activity WHERE state = 'active';" 2>/dev/null | tr -d ' ')
-            max=$(PGPASSWORD="$pass" psql -h "$host" -p "$port" -U "$user" -d "$db_name" -t -c "SHOW max_connections;" 2>/dev/null | tr -d ' ')
+            active=$(PGPASSWORD="$pass" pg_client psql -h "$host" -p "$port" -U "$user" -d "$db_name" -t -c "SELECT count(*) FROM pg_stat_activity WHERE state = 'active';" 2>/dev/null | tr -d ' ')
+            max=$(PGPASSWORD="$pass" pg_client psql -h "$host" -p "$port" -U "$user" -d "$db_name" -t -c "SHOW max_connections;" 2>/dev/null | tr -d ' ')
 
             if [[ -n "$active" && -n "$max" && "$max" -gt 0 ]]; then
                 load_percentage=$(echo "scale=0; ($active * 100) / $max" | bc -l 2>/dev/null || echo "0")
@@ -154,7 +160,7 @@ get_database_load() {
         cockroachdb)
             # Get active SQL connections
             local active
-            active=$(PGPASSWORD="$pass" psql -h "$host" -p "$port" -U "$user" -d "$db_name" -t -c "SELECT count(*) FROM crdb_internal.node_sessions WHERE status = 'active';" 2>/dev/null | tr -d ' ')
+            active=$(PGPASSWORD="$pass" pg_client psql -h "$host" -p "$port" -U "$user" -d "$db_name" -t -c "SELECT count(*) FROM crdb_internal.node_sessions WHERE status = 'active';" 2>/dev/null | tr -d ' ')
 
             # Estimate load (no max_connections in CockroachDB)
             if [[ -n "$active" ]]; then
@@ -429,8 +435,8 @@ monitor_connection_pool() {
 
     case "$db_type" in
         postgresql)
-            active_connections=$(PGPASSWORD="$pass" psql -h "$host" -p "$port" -U "$user" -d "$db_name" -t -c "SELECT count(*) FROM pg_stat_activity;" 2>/dev/null | tr -d ' ')
-            max_connections=$(PGPASSWORD="$pass" psql -h "$host" -p "$port" -U "$user" -d "$db_name" -t -c "SHOW max_connections;" 2>/dev/null | tr -d ' ')
+            active_connections=$(PGPASSWORD="$pass" pg_client psql -h "$host" -p "$port" -U "$user" -d "$db_name" -t -c "SELECT count(*) FROM pg_stat_activity;" 2>/dev/null | tr -d ' ')
+            max_connections=$(PGPASSWORD="$pass" pg_client psql -h "$host" -p "$port" -U "$user" -d "$db_name" -t -c "SHOW max_connections;" 2>/dev/null | tr -d ' ')
             ;;
         mysql|mariadb)
             active_connections=$(mysql -h "$host" -P "$port" -u "$user" -p"$pass" -e "SHOW STATUS LIKE 'Threads_connected';" -s -N 2>/dev/null | awk '{print $2}')
@@ -469,7 +475,7 @@ detect_connection_leak() {
         postgresql)
             # Find connections idle in transaction for > threshold
             local idle_conns
-            idle_conns=$(PGPASSWORD="$pass" psql -h "$host" -p "$port" -U "$user" -d "$db_name" -t -c "
+            idle_conns=$(PGPASSWORD="$pass" pg_client psql -h "$host" -p "$port" -U "$user" -d "$db_name" -t -c "
                 SELECT pid, usename, state, EXTRACT(EPOCH FROM (now() - state_change)) as idle_seconds
                 FROM pg_stat_activity
                 WHERE state = 'idle in transaction'

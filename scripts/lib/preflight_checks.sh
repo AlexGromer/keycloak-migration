@@ -4,6 +4,12 @@
 
 set -euo pipefail
 
+# pg_client / pg_client_available live in container_runtime.sh (include-guarded; safe to re-source).
+if ! declare -F pg_client >/dev/null 2>&1; then
+    # shellcheck source=/dev/null
+    source "$(dirname "${BASH_SOURCE[0]}")/container_runtime.sh" 2>/dev/null || true
+fi
+
 # ============================================================================
 # PREFLIGHT CHECK CATEGORIES
 # ============================================================================
@@ -189,7 +195,8 @@ check_database_connectivity() {
 
     case "$db_type" in
         postgresql)
-            if PGPASSWORD="$pass" timeout "$DB_HEALTH_TIMEOUT" psql -h "$host" -p "$port" -U "$user" -d "$db_name" -c "SELECT 1;" >/dev/null 2>&1; then
+            # shellcheck disable=SC2016  # $1-$4 are the inner bash -c positional args (timeout cannot exec a bash function, so pg_client is invoked from a child bash)
+            if PGPASSWORD="$pass" timeout "$DB_HEALTH_TIMEOUT" bash -c 'pg_client psql -h "$1" -p "$2" -U "$3" -d "$4" -c "SELECT 1;"' _ "$host" "$port" "$user" "$db_name" >/dev/null 2>&1; then
                 preflight_log_success "PostgreSQL: Connected"
                 return 0
             else
@@ -207,7 +214,8 @@ check_database_connectivity() {
             fi
             ;;
         cockroachdb)
-            if PGPASSWORD="$pass" timeout "$DB_HEALTH_TIMEOUT" psql -h "$host" -p "$port" -U "$user" -d "$db_name" -c "SELECT 1;" >/dev/null 2>&1; then
+            # shellcheck disable=SC2016  # $1-$4 are the inner bash -c positional args (timeout cannot exec a bash function, so pg_client is invoked from a child bash)
+            if PGPASSWORD="$pass" timeout "$DB_HEALTH_TIMEOUT" bash -c 'pg_client psql -h "$1" -p "$2" -U "$3" -d "$4" -c "SELECT 1;"' _ "$host" "$port" "$user" "$db_name" >/dev/null 2>&1; then
                 preflight_log_success "CockroachDB: Connected"
                 return 0
             else
@@ -236,7 +244,7 @@ check_database_version() {
 
     case "$db_type" in
         postgresql)
-            version=$(PGPASSWORD="$pass" psql -h "$host" -p "$port" -U "$user" -d "$db_name" -t -c "SELECT version();" 2>/dev/null | head -1)
+            version=$(PGPASSWORD="$pass" pg_client psql -h "$host" -p "$port" -U "$user" -d "$db_name" -t -c "SELECT version();" 2>/dev/null | head -1)
             preflight_log_info "PostgreSQL Version: $version"
             ;;
         mysql|mariadb)
@@ -244,7 +252,7 @@ check_database_version() {
             preflight_log_info "MySQL/MariaDB Version: $version"
             ;;
         cockroachdb)
-            version=$(PGPASSWORD="$pass" psql -h "$host" -p "$port" -U "$user" -d "$db_name" -t -c "SELECT version();" 2>/dev/null | head -1)
+            version=$(PGPASSWORD="$pass" pg_client psql -h "$host" -p "$port" -U "$user" -d "$db_name" -t -c "SELECT version();" 2>/dev/null | head -1)
             preflight_log_info "CockroachDB Version: $version"
             ;;
         *)
@@ -277,13 +285,13 @@ check_database_size() {
 
     case "$db_type" in
         postgresql)
-            size_bytes=$(PGPASSWORD="$pass" psql -h "$host" -p "$port" -U "$user" -d "$db_name" -t -c "SELECT pg_database_size('$db_name');" 2>/dev/null | tr -d ' ')
+            size_bytes=$(PGPASSWORD="$pass" pg_client psql -h "$host" -p "$port" -U "$user" -d "$db_name" -t -c "SELECT pg_database_size('$db_name');" 2>/dev/null | tr -d ' ')
             ;;
         mysql|mariadb)
             size_bytes=$(mysql -h "$host" -P "$port" -u "$user" -p"$pass" "$db_name" -e "SELECT SUM(data_length + index_length) FROM information_schema.TABLES WHERE table_schema = '$db_name';" -s -N 2>/dev/null)
             ;;
         cockroachdb)
-            size_bytes=$(PGPASSWORD="$pass" psql -h "$host" -p "$port" -U "$user" -d "$db_name" -t -c "SELECT pg_database_size('$db_name');" 2>/dev/null | tr -d ' ')
+            size_bytes=$(PGPASSWORD="$pass" pg_client psql -h "$host" -p "$port" -U "$user" -d "$db_name" -t -c "SELECT pg_database_size('$db_name');" 2>/dev/null | tr -d ' ')
             ;;
         *)
             preflight_log_warn "Database type '$db_type' not supported for size check"
@@ -311,7 +319,7 @@ check_database_size() {
     export PREFLIGHT_DUMP_HEAP_MB=""
     if [[ "$db_type" == "postgresql" || "$db_type" == "cockroachdb" ]]; then
         local heap_bytes
-        heap_bytes=$(PGPASSWORD="$pass" psql -h "$host" -p "$port" -U "$user" -d "$db_name" -tAc "
+        heap_bytes=$(PGPASSWORD="$pass" pg_client psql -h "$host" -p "$port" -U "$user" -d "$db_name" -tAc "
             SELECT COALESCE(sum(pg_relation_size(c.oid)), 0)
             FROM pg_class c
             JOIN pg_namespace n ON n.oid = c.relnamespace
@@ -346,7 +354,7 @@ check_large_tables() {
     local threshold="${KC_INDEX_SKIP_ROW_THRESHOLD:-300000}"
 
     local rows
-    rows=$(PGPASSWORD="$pass" psql -h "$host" -p "$port" -U "$user" -d "$db_name" -tAc "
+    rows=$(PGPASSWORD="$pass" pg_client psql -h "$host" -p "$port" -U "$user" -d "$db_name" -tAc "
         SELECT c.relname || ' (' || c.reltuples::bigint || ' rows)'
         FROM pg_class c
         JOIN pg_namespace n ON n.oid = c.relnamespace
@@ -392,14 +400,14 @@ check_database_replication() {
     case "$db_type" in
         postgresql)
             # Check if this is a replica
-            is_replica=$(PGPASSWORD="$pass" psql -h "$host" -p "$port" -U "$user" -d "$db_name" -t -c "SELECT pg_is_in_recovery();" 2>/dev/null | tr -d ' ')
+            is_replica=$(PGPASSWORD="$pass" pg_client psql -h "$host" -p "$port" -U "$user" -d "$db_name" -t -c "SELECT pg_is_in_recovery();" 2>/dev/null | tr -d ' ')
 
             if [[ "$is_replica" == "t" ]]; then
                 preflight_log_warn "Database is a READ REPLICA"
                 preflight_log_warn "Migration should be performed on PRIMARY instance"
 
                 # Check replication lag
-                replication_lag=$(PGPASSWORD="$pass" psql -h "$host" -p "$port" -U "$user" -d "$db_name" -t -c "SELECT EXTRACT(EPOCH FROM (now() - pg_last_xact_replay_timestamp()));" 2>/dev/null | tr -d ' ')
+                replication_lag=$(PGPASSWORD="$pass" pg_client psql -h "$host" -p "$port" -U "$user" -d "$db_name" -t -c "SELECT EXTRACT(EPOCH FROM (now() - pg_last_xact_replay_timestamp()));" 2>/dev/null | tr -d ' ')
 
                 if [[ -n "$replication_lag" ]]; then
                     preflight_log_info "Replication lag: ${replication_lag}s"
@@ -600,7 +608,16 @@ check_dependencies() {
     local db_type="${1:-}"
     case "$db_type" in
         postgresql)
-            required_tools+=("psql" "pg_dump" "pg_restore")
+            # psql/pg_dump/pg_restore: a host binary OR the pg-client container image satisfies each.
+            local _pgtool
+            for _pgtool in psql pg_dump pg_restore; do
+                if pg_client_available "$_pgtool"; then
+                    preflight_log_success "Dependency: $_pgtool (host or ${PROFILE_PG_CLIENT_IMAGE:-postgres:16} image)"
+                else
+                    preflight_log_error "Dependency: $_pgtool (MISSING: no host binary and no ${PROFILE_PG_CLIENT_IMAGE:-postgres:16} image)"
+                    missing_deps+=("$_pgtool")
+                fi
+            done
             ;;
         mysql)
             required_tools+=("mysql" "mysqldump")
@@ -609,7 +626,13 @@ check_dependencies() {
             required_tools+=("mysql" "mysqldump" "mariabackup")
             ;;
         cockroachdb)
-            required_tools+=("cockroach" "psql")
+            required_tools+=("cockroach")
+            if pg_client_available psql; then
+                preflight_log_success "Dependency: psql (host or ${PROFILE_PG_CLIENT_IMAGE:-postgres:16} image)"
+            else
+                preflight_log_error "Dependency: psql (MISSING: no host binary and no ${PROFILE_PG_CLIENT_IMAGE:-postgres:16} image)"
+                missing_deps+=("psql")
+            fi
             ;;
     esac
 
