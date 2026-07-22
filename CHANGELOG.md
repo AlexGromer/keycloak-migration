@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added — non-root pg-client, DB connection string, non-public schema
+
+- **The sovereign pg-client image runs non-root** (`USER 1000`, `Containerfile.pgclient`) — the KC hop
+  images already did; now `psql`/`pg_dump`/`pg_restore` run as uid 1000 inside too, on both the
+  Astra and RED OS builds. On rootful docker the tool still passes `--user <caller>` (dumps stay
+  caller-owned); on rootless the image UID maps into the caller's user namespace. `astra-pgclient-17`
+  / `redos-pgclient-17` rebuilt + re-pushed.
+- **`--db-url` connection string** (`migrate_oneshot.sh`): `postgres://[user[:pass]@]host[:port]/db[?currentSchema=S]`
+  parsed into the `PROFILE_DB_*` fields. Discrete `--db-host/--db-port/--db-name/--db-user/--db-schema`
+  **override** the URL regardless of order (pre-scan). A password in the URL is accepted but warns
+  (`PROFILE_DB_PASSWORD` / `--env-file` preferred — a URL password leaks via `ps` and shell history).
+- **`--db-schema` (default `public`)** for Keycloak tables in a non-public PostgreSQL schema. Exports
+  `PGOPTIONS="-c search_path=<schema>,public"` once — `pg_client` forwards it into the container and a
+  host `psql` inherits it, so every query the tool runs (preflight, lock, verify, integrity) resolves
+  in the right schema with no per-query change; the migration container gets `KC_DB_SCHEMA`.
+  (`--db-port` was already supported.)
+
 ### Changed — air-gap delivery (ADR-014)
 
 - Air-gap bundle now carries the **sovereign pg-client** image (`kc-<os>-pgclient-<major>.tar`):

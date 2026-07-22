@@ -627,13 +627,14 @@ kc_run_migrating_container() {
         -e KC_DB_URL="$jdbc_url"
         -e KC_DB_USERNAME="$db_user"
         -e KC_DB_PASSWORD="$db_pass"
+        -e KC_DB_SCHEMA="${PROFILE_DB_SCHEMA:-public}"
         -e KC_HOSTNAME_STRICT="$hostname_strict"
         -e KC_HTTP_ENABLED="$http_enabled"
     )
     [[ -n "${PROFILE_KC_RUN_HOSTNAME:-}" ]] && run_env+=(-e KC_HOSTNAME="${PROFILE_KC_RUN_HOSTNAME}")
 
     if [[ "${DRY_RUN:-false}" == "true" || "${KC_VERBOSE:-false}" == "true" ]]; then
-        echo "DRY-RUN: cr run -d --name $container_name $network_opt -e KC_DB=postgres -e KC_DB_URL=$jdbc_url -e KC_DB_USERNAME=$db_user -e KC_DB_PASSWORD=*** -e KC_HOSTNAME_STRICT=$hostname_strict -e KC_HTTP_ENABLED=$http_enabled $image_ref start --optimized" >&2
+        echo "DRY-RUN: cr run -d --name $container_name $network_opt -e KC_DB=postgres -e KC_DB_URL=$jdbc_url -e KC_DB_USERNAME=$db_user -e KC_DB_PASSWORD=*** -e KC_DB_SCHEMA=${PROFILE_DB_SCHEMA:-public} -e KC_HOSTNAME_STRICT=$hostname_strict -e KC_HTTP_ENABLED=$http_enabled $image_ref start --optimized" >&2
         [[ "${DRY_RUN:-false}" == "true" ]] && return 0
     fi
 
@@ -716,13 +717,14 @@ kc_run_verify_container() {
         -e KC_DB_URL="$jdbc_url"
         -e KC_DB_USERNAME="$db_user"
         -e KC_DB_PASSWORD="$db_pass"
+        -e KC_DB_SCHEMA="${PROFILE_DB_SCHEMA:-public}"
         -e KC_HOSTNAME_STRICT="${PROFILE_KC_RUN_HOSTNAME_STRICT:-false}"
         -e KC_HTTP_ENABLED="${PROFILE_KC_RUN_HTTP_ENABLED:-true}"
     )
     [[ -n "${PROFILE_KC_RUN_HOSTNAME:-}" ]] && run_env+=(-e KC_HOSTNAME="${PROFILE_KC_RUN_HOSTNAME}")
 
     if [[ "${DRY_RUN:-false}" == "true" ]]; then
-        echo "DRY-RUN: cr run -d --name $container_name --network=$network -e KC_DB=postgres -e KC_DB_URL=$jdbc_url -e KC_DB_PASSWORD=*** $image_ref start --optimized" >&2
+        echo "DRY-RUN: cr run -d --name $container_name --network=$network -e KC_DB=postgres -e KC_DB_URL=$jdbc_url -e KC_DB_PASSWORD=*** -e KC_DB_SCHEMA=${PROFILE_DB_SCHEMA:-public} $image_ref start --optimized" >&2
         return 0
     fi
 

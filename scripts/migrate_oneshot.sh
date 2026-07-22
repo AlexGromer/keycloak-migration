@@ -25,7 +25,8 @@
 #
 # Usage:
 #   migrate_oneshot.sh [--target 25|26] [--os astra|redos] [--go]
-#                      [--db-host H] [--db-port P] [--db-name N] [--db-user U]
+#                      [--db-host H] [--db-port P] [--db-name N] [--db-user U] [--db-schema S]
+#                      [--db-url postgres://[user[:pass]@]host[:port]/db[?currentSchema=S]]
 #                      [--source pull|bundle|preloaded] [--image-ns REF]
 #                      [--image-ref-template 'registry/img:{version}']
 #                      [--bundle FILE] [--network NET] [--current VER]
@@ -156,6 +157,7 @@ DB_HOST="${KC_DB_HOST:-localhost}"
 DB_PORT="${KC_DB_PORT:-5432}"
 DB_NAME="${KC_DB_NAME:-keycloak}"
 DB_USER="${KC_DB_USER:-keycloak}"
+DB_SCHEMA="${KC_DB_SCHEMA:-public}"   # PG schema holding the Keycloak tables (KC_DB_SCHEMA)
 PROFILE_NAME_OPT="${KC_PROFILE_NAME:-}"
 USE_PROFILE=""                     # --profile NAME: reuse an existing profile, generate nothing
 RUN_WIZARD="false"                 # --wizard: ask, write a profile, then migrate with it
@@ -167,7 +169,7 @@ FORCE_UNLOCK_PASS="false"          # --force-unlock   -> passed through to migra
 KILL_STALE_PASS="false"            # --kill-stale     -> passed through to migrate
 APPLY_INDEXES_PASS="false"         # --apply-indexes  -> passed through to migrate
 
-oneshot_usage() { sed -n '2,38p' "${BASH_SOURCE[0]}" | sed 's/^#\{0,1\} \{0,1\}//'; }
+oneshot_usage() { sed -n '2,39p' "${BASH_SOURCE[0]}" | sed 's/^#\{0,1\} \{0,1\}//'; }
 
 # Dry/live execution chokepoint (secrets must be pre-masked by the caller).
 _os_run() {
@@ -180,6 +182,45 @@ _os_run() {
     log_info "RUN: $emit"
     "$@"
 }
+
+# --db-url (DSN) pre-scan — parse it into the DB_* fields BEFORE the main loop, so an explicit
+# --db-host/--db-port/--db-name/--db-user/--db-schema (processed below) OVERRIDES the URL, whatever
+# their order. postgres://[user[:pass]@]host[:port]/dbname[?currentSchema=...]
+_parse_db_url() {
+    local url="$1" rest query dbpath cred hostport u p h pt kv k v
+    rest="${url#*://}"
+    case "$rest" in *\?*) query="${rest#*\?}"; rest="${rest%%\?*}" ;; *) query="" ;; esac
+    case "$rest" in */*) dbpath="${rest#*/}"; rest="${rest%%/*}" ;; *) dbpath="" ;; esac
+    case "$rest" in *@*) cred="${rest%@*}"; hostport="${rest##*@}" ;; *) cred=""; hostport="$rest" ;; esac
+    if [[ -n "$cred" ]]; then u="${cred%%:*}"; { [[ "$cred" == *:* ]] && p="${cred#*:}"; } || p=""; else u=""; p=""; fi
+    case "$hostport" in *:*) h="${hostport%%:*}"; pt="${hostport##*:}" ;; *) h="$hostport"; pt="" ;; esac
+    [[ "$url" == *%* ]] && log_warn "--db-url contains '%' — percent-encoding is NOT decoded; pass raw values or discrete --db-* flags"
+    [[ -n "$h" ]]      && DB_HOST="$h"
+    [[ -n "$pt" ]]     && DB_PORT="$pt"
+    [[ -n "$dbpath" ]] && DB_NAME="$dbpath"
+    [[ -n "$u" ]]      && DB_USER="$u"
+    if [[ -n "$p" ]]; then
+        if [[ -n "${PROFILE_DB_PASSWORD:-}" ]]; then
+            log_warn "--db-url carries a password but PROFILE_DB_PASSWORD is already set — keeping the environment one (URL password ignored)"
+        else
+            export PROFILE_DB_PASSWORD="$p"
+            log_warn "password taken from --db-url — prefer PROFILE_DB_PASSWORD / --env-file (a URL password leaks via ps and shell history)"
+        fi
+    fi
+    local -a _qparts=(); IFS='&' read -r -a _qparts <<< "$query"
+    for kv in "${_qparts[@]}"; do
+        k="${kv%%=*}"; v="${kv#*=}"
+        case "$k" in currentSchema|schema|search_path) [[ -n "$v" ]] && DB_SCHEMA="$v" ;; esac
+    done
+}
+for ((_i = 0; _i < ${#_os_args[@]}; _i++)); do
+    if [[ "${_os_args[_i]}" == "--db-url" ]]; then
+        _os_dburl="${_os_args[_i+1]:-}"
+        [[ -n "$_os_dburl" ]] || { log_error "--db-url requires a value"; exit 2; }
+        case "$_os_dburl" in postgres://*|postgresql://*) ;; *) log_error "--db-url must start with postgres:// or postgresql://"; exit 2 ;; esac
+        _parse_db_url "$_os_dburl"
+    fi
+done
 
 # ----------------------------------------------------------------------------
 # Parse arguments
@@ -198,6 +239,8 @@ while [[ $# -gt 0 ]]; do
         --db-port)          DB_PORT="${2:-}"; shift 2 ;;
         --db-name)          DB_NAME="${2:-}"; shift 2 ;;
         --db-user)          DB_USER="${2:-}"; shift 2 ;;
+        --db-url)           shift 2 ;;   # already parsed by the pre-scan above
+        --db-schema)        DB_SCHEMA="${2:-}"; shift 2 ;;
         --profile-name)     PROFILE_NAME_OPT="${2:-}"; shift 2 ;;
         --profile)          USE_PROFILE="${2:-}"; shift 2 ;;
         --wizard)           RUN_WIZARD="true"; shift ;;
@@ -216,6 +259,15 @@ while [[ $# -gt 0 ]]; do
         *) log_error "unknown argument: $1"; oneshot_usage; exit 2 ;;
     esac
 done
+
+# Non-public schema: make EVERY psql the tool runs (host psql, or via pg_client's container) resolve
+# unqualified Keycloak table names in the right schema — in ONE place. pg_client forwards PGOPTIONS
+# into the container; a host psql inherits it from the environment. The KC migration container reads
+# PROFILE_DB_SCHEMA (deployment_adapter sets KC_DB_SCHEMA + ?currentSchema=).
+export PROFILE_DB_SCHEMA="$DB_SCHEMA"
+if [[ -n "$DB_SCHEMA" && "$DB_SCHEMA" != "public" ]]; then
+    export PGOPTIONS="${PGOPTIONS:+$PGOPTIONS }-c search_path=${DB_SCHEMA},public"
+fi
 
 # ----------------------------------------------------------------------------
 # --wizard: ask the questions instead of taking flags, then migrate with the answers.
@@ -342,7 +394,7 @@ echo "   os / target : ${OS} / ${TARGET} (full ${TARGET_FULL})"
 echo "   chain       : ${CURRENT} -> ${HOPS// / -> }"
 echo "   image ref   : ${PROFILE_CONTAINER_IMAGE_REF}"
 echo "   acquisition : ${SRC}"
-echo "   database    : ${DB_USER}@${DB_HOST}:${DB_PORT}/${DB_NAME}"
+echo "   database    : ${DB_USER}@${DB_HOST}:${DB_PORT}/${DB_NAME}$([[ "$DB_SCHEMA" != "public" ]] && echo " (schema: ${DB_SCHEMA})")"
 echo "   work dir    : ${ONESHOT_WORK_DIR} $([[ "$ONESHOT_WORK_DIR_OWNED" == "true" ]] && echo '(temp, auto-removed)' || echo '(yours — never deleted)')"
 echo "   free space  : $(df -BG "$ONESHOT_WORK_DIR" 2>/dev/null | tail -1 | awk '{print $4}') (preflight MEASURES what the backups need)"
 echo "   profile     : ${PROFILE_NAME} (in ${PROFILE_DIR})"
@@ -431,6 +483,7 @@ generate_profile() {
     export PROFILE_DB_PORT="$DB_PORT"
     export PROFILE_DB_NAME="$DB_NAME"
     export PROFILE_DB_USER="$DB_USER"
+    export PROFILE_DB_SCHEMA="$DB_SCHEMA"
     export PROFILE_DB_CREDENTIALS_SOURCE="env"
     export PROFILE_KC_DEPLOYMENT_MODE="run"
     export PROFILE_KC_DISTRIBUTION_MODE="container"

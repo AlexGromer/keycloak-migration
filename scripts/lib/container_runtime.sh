@@ -181,15 +181,19 @@ pg_client() {
         log_error "  Install postgresql-client, or provide a container engine plus the '$PROFILE_PG_CLIENT_IMAGE' image."
         return 127
     fi
-    local -a mounts=() userns=()
+    local -a mounts=() userns=() pgopts=()
     # One host directory, quoted so paths with spaces are safe. The :z suffix relabels for SELinux
     # hosts (RHEL / RED OS) and is ignored where SELinux is absent.
     [[ -n "${PG_CLIENT_MOUNT:-}" ]] && mounts=(-v "$PG_CLIENT_MOUNT:$PG_CLIENT_MOUNT:z")
     # Map --user only on a positively rootful engine, so written dump files stay caller-owned.
     _pg_client_rootful && userns=(--user "$(id -u):$(id -g)")
+    # Forward PGOPTIONS so a non-public schema (search_path, set once by the entrypoint) reaches the
+    # containerised psql exactly as it reaches a host psql via the environment.
+    [[ -n "${PGOPTIONS:-}" ]] && pgopts=(-e PGOPTIONS="$PGOPTIONS")
     cr run --rm -i --network="${PROFILE_PG_CLIENT_NETWORK:-host}" \
         "${userns[@]}" -e HOME=/tmp \
         -e PGPASSWORD="${PGPASSWORD:-${PROFILE_DB_PASSWORD:-}}" \
+        "${pgopts[@]}" \
         "${mounts[@]}" \
         "${PROFILE_PG_CLIENT_IMAGE:-postgres:16}" "$tool" "$@"
 }
