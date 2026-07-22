@@ -67,4 +67,24 @@ bout="$(PROFILE_DIR="$TMPD" timeout 60 bash "$ONESHOT" --target 26 --os astra --
 assert_contains "$bout" "cr load -i"            "the bundle plan loads images"
 assert_contains "$bout" "kc-astra-pgclient-"    "and it loads the sovereign pg-client image (discovered by glob)"
 
+describe "F2: --db-url (DSN) parses into DB_* fields; discrete flags override"
+dsn_out="$(PROFILE_DIR="$TMPD" timeout 60 bash "$ONESHOT" --target 26 --os astra \
+    --db-url 'postgres://alice:secret@dbhost:6543/kkdb?currentSchema=kc' --dry-run </dev/null 2>&1 || true)"
+assert_contains "$dsn_out" "alice@dbhost:6543/kkdb"      "DSN sets user/host/port/name"
+assert_contains "$dsn_out" "(schema: kc)"               "DSN currentSchema sets the schema"
+assert_contains "$dsn_out" "password taken from --db-url" "a password in the URL warns (ps/history leak)"
+# discrete flags win over the DSN regardless of order
+ovr_out="$(PROFILE_DIR="$TMPD" timeout 60 bash "$ONESHOT" --target 26 --os astra \
+    --db-url 'postgres://alice@dbhost:6543/kkdb' --db-host OVERRIDE.example --db-port 5999 --dry-run </dev/null 2>&1 || true)"
+assert_contains "$ovr_out" "alice@OVERRIDE.example:5999/kkdb" "discrete --db-host/--db-port override the DSN"
+assert_exit_code 2 "bash '$ONESHOT' --db-url notaurl </dev/null" "a non-postgres:// --db-url is rejected"
+
+describe "F2: --db-schema — non-public reaches the plan, public stays the clean default"
+sch_out="$(PROFILE_DIR="$TMPD" timeout 60 bash "$ONESHOT" --target 26 --os astra --db-host db \
+    --db-schema kc --dry-run </dev/null 2>&1 || true)"
+assert_contains "$sch_out" "(schema: kc)" "--db-schema is shown in the banner"
+pub_out="$(PROFILE_DIR="$TMPD" timeout 60 bash "$ONESHOT" --target 26 --os astra --db-host db \
+    --dry-run </dev/null 2>&1 || true)"
+assert_true "! printf '%s' \"\$pub_out\" | grep -q 'schema:'" "public schema keeps the banner clean (no annotation)"
+
 test_report

@@ -46,6 +46,18 @@ RUN set -eux; \
     fi; \
     psql --version && pg_dump --version && pg_restore --version
 
+# Non-root by default (the client tools need no privileges) — mirrors the KC images (uid 1000).
+# shadow-utils (groupadd/useradd) is present on both the Debian/Astra and the RHEL/RED OS base;
+# `|| true` keeps it idempotent if the id already exists. On ROOTFUL docker the tool passes
+# `--user <caller>:<caller>` which OVERRIDES this (so dumps stay caller-owned); on ROOTLESS the
+# image UID 1000 maps into the caller's user namespace — either way nothing runs as container-root.
+RUN set -eux; \
+    (groupadd -r -g 1000 pgclient 2>/dev/null || true); \
+    (useradd -u 1000 -r -g 1000 -d /home/pgclient -m -s /sbin/nologin pgclient 2>/dev/null || true); \
+    install -d -o 1000 -g 1000 -m 0755 /home/pgclient
+USER 1000
+ENV HOME=/home/pgclient
+
 # No server entrypoint — the tool supplies the client command (psql/pg_dump/pg_restore) itself.
 ENTRYPOINT []
 CMD ["psql", "--version"]
