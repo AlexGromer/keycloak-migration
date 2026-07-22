@@ -40,8 +40,9 @@ branded image), saves to a tar, and writes a `.sha256`.
 
 ## 3. Transfer
 
-Copy `dist/*.tar` + `dist/*.tar.sha256` (or the `*.tar.xz*` from the CI workflow) onto
-offline media. **Verify on the air-gapped side before loading:**
+Copy `dist/*.tar` + `dist/*.tar.sha256` (individual images), or the per-OS
+`dist/kc-<os>-bundle.tar.xz` bundle produced by the CI workflow (§5), onto offline media.
+**Verify on the air-gapped side before loading:**
 ```bash
 sha256sum -c kc-astra-26.6.3.tar.sha256
 ```
@@ -77,9 +78,25 @@ export PROFILE_CONTAINER_ACQUISITION=preloaded
 > as `PROFILE_CONTAINER_IMAGE_REF="<GHCR_IMAGE>:<os>-{version}"` so build, publish and
 > runtime read one source of truth.
 
-## 5. CI alternative (operator infra)
+## 5. CI alternative (operator infra) — per-OS air-gap bundles
 
 `/.github/workflows/build-images.yml` (`workflow_dispatch`, `runs-on: [self-hosted, sovereign]`)
-runs steps 2–3 + publishes to **private** GHCR and attaches `*.tar.xz` + `.sha256` to a
-**private** Release. Register a self-hosted runner labelled `sovereign` in your contour;
-set GHCR package visibility to private in org settings.
+runs steps 2–3, then packs a **per-OS air-gap bundle** and (with `publish`) attaches it to a
+**private, per-OS prerelease**:
+
+- **`build_matrix.sh --build --pgclient`** — the KC hop images **and** the sovereign pg-client
+  image (`<os>-pgclient-<major>`, v3.9.7 autonomy, ADR-013).
+- **`build_bundle.sh --os <os> --go`** — packs `dist/kc-<os>-bundle.tar.xz`, carrying the four hop
+  tarballs **plus** `kc-<os>-pgclient-<major>.tar`. `migrate_oneshot.sh --source bundle` loads them
+  all, so an air-gapped node with **no host psql** still runs pg_dump/pg_restore/psql from the
+  bundled client (`PROFILE_PG_CLIENT_IMAGE`). A bundle without pg-client stays valid — the node
+  falls back to host psql.
+- **Per-OS prereleases:** `astra → alsebased-images-<run_id>`, `redos → redosbased-images-<run_id>`,
+  each carrying only its own bundle + `.sha256`.
+- **Size guard:** a bundle over GitHub's **2 GiB** asset cap is still built and uploaded as a CI
+  artifact but is **not** attached to a prerelease — deliver it **out-of-band** from the runner's
+  `dist/`. (The RED OS bundle with pg-client can exceed 2 GiB.)
+
+Register a self-hosted runner labelled `sovereign` in your contour; set GHCR package visibility to
+private in org settings. Inputs: `oses`, `versions`, `pg_client_major` (default `17`, must be ≥ DB
+server major), `build_pgclient` (default `true`), `publish` (default `false`).

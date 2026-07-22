@@ -313,6 +313,10 @@ fi
 # with no host psql uses the shipped ALSE/RED OS client (astra-pgclient-<major> / redos-pgclient-<major>).
 # An explicit PROFILE_PG_CLIENT_IMAGE env wins (e.g. upstream postgres:16). The client major
 # (KC_PG_CLIENT_MAJOR, default 17) MUST be >= the DB server major — pg_dump refuses a newer server.
+# Remember whether the caller PINNED an image: a --source bundle load discovers the shipped major
+# from the bundle and (only if unpinned) repoints PROFILE_PG_CLIENT_IMAGE at exactly what it loaded,
+# so a bundle built with a non-default pg_client_major still works without setting KC_PG_CLIENT_MAJOR.
+_PG_CLIENT_IMAGE_EXPLICIT="${PROFILE_PG_CLIENT_IMAGE:+set}"
 : "${PROFILE_PG_CLIENT_IMAGE:=${IMAGE_NS}:${OS}-pgclient-${KC_PG_CLIENT_MAJOR:-17}}"
 export PROFILE_PG_CLIENT_IMAGE
 
@@ -367,6 +371,37 @@ acquire_images() {
                 local tar="${xdir}/kc-${OS}-${v}.tar"
                 _os_run "cr load -i ${tar}" -- cr load -i "$tar"
             done
+            # pg-client autonomy (v3.9.7, ADR-013/014): the bundle MAY carry the sovereign client
+            # image (kc-<os>-pgclient-<major>.tar). The BUNDLE is the source of truth for which major
+            # shipped, so DISCOVER it by glob rather than assume one — then point PROFILE_PG_CLIENT_IMAGE
+            # at exactly the image we loaded (unless the caller pinned one). Best-effort: no client tar
+            # (older bundle, or the node has host psql) is fine, and a present-but-unloadable tar
+            # degrades to the host-psql fallback rather than aborting a migration whose hops loaded.
+            if [[ "$ONESHOT_DRY" == "true" ]]; then
+                printf 'DRY-RUN: %s\n' "cr load -i ${xdir}/kc-${OS}-pgclient-*.tar  (if the bundle carries it)"
+            else
+                shopt -s nullglob
+                local pgtars=("${xdir}"/kc-"${OS}"-pgclient-*.tar)
+                shopt -u nullglob
+                if (( ${#pgtars[@]} > 0 )); then
+                    local pgtar="${pgtars[0]}"
+                    if _os_run "cr load -i ${pgtar}" -- cr load -i "$pgtar"; then
+                        if [[ -z "$_PG_CLIENT_IMAGE_EXPLICIT" ]]; then
+                            # Derive <major> from kc-<os>-pgclient-<major>.tar and reference exactly it
+                            # (build tag == ${IMAGE_NS}:<os>-pgclient-<major>).
+                            local _prefix="kc-${OS}-pgclient-" _bn _major
+                            _bn="${pgtar##*/}"; _major="${_bn#"$_prefix"}"; _major="${_major%.tar}"
+                            PROFILE_PG_CLIENT_IMAGE="${IMAGE_NS}:${OS}-pgclient-${_major}"
+                            export PROFILE_PG_CLIENT_IMAGE
+                            log_info "pg-client from bundle -> PROFILE_PG_CLIENT_IMAGE=${PROFILE_PG_CLIENT_IMAGE}"
+                        fi
+                    else
+                        log_info "pg-client tar present but failed to load — autonomy falls back to host psql / an explicit PROFILE_PG_CLIENT_IMAGE"
+                    fi
+                else
+                    log_info "bundle carries no kc-${OS}-pgclient-*.tar — pg-client autonomy will use host psql or an explicit PROFILE_PG_CLIENT_IMAGE"
+                fi
+            fi
             # Clean the extracted tars (keep only loaded images).
             [[ "$ONESHOT_DRY" == "true" ]] || rm -rf "$xdir"
             ;;

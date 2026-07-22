@@ -114,6 +114,25 @@ prop_rc=0
 assert_equals "1" "$prop_rc" "EXECUTE build with a failing engine returns non-zero (no silent success)"
 
 # ============================================================================
+describe "--pgclient builds the sovereign per-OS client image (name + tag contract)"
+# ============================================================================
+# Pins the BUILD half of the air-gap pg-client contract (ADR-013/014): build_bundle.sh globs
+# kc-<os>-pgclient-*.tar and migrate_oneshot loads it, deriving the image tag from the name. A
+# rename/typo in _bm_pgclient would silently ship a bundle without the client — so assert it here.
+PGC="$( (build_matrix_main --pgclient --os astra --versions 26.6.3) 2>&1 )"
+assert_contains "$PGC" "PGCLIENT astra"           "a pgclient cell is planned for astra"
+assert_contains "$PGC" "kc-astra-pgclient-17.tar" "saves kc-<os>-pgclient-<major>.tar (default major 17)"
+assert_contains "$PGC" ":astra-pgclient-17"       "tags <ghcr>:<os>-pgclient-<major>"
+assert_contains "$PGC" "Containerfile.pgclient"   "builds FROM the pgclient Containerfile"
+assert_contains "$PGC" "sha256sum dist/kc-astra-pgclient-17.tar" "checksums the pgclient tar"
+
+# The major is a knob (must be >= DB server major): a non-default major flows into BOTH name and tag,
+# so the consume side (which discovers it by glob) still matches. Subshelled so it can't leak globals.
+PGC16="$( (PG_CLIENT_MAJOR=16 build_matrix_main --pgclient --os astra --versions 26.6.3) 2>&1 )"
+assert_contains "$PGC16" "kc-astra-pgclient-16.tar" "custom PG_CLIENT_MAJOR flows into the tar name"
+assert_contains "$PGC16" ":astra-pgclient-16"       "custom PG_CLIENT_MAJOR flows into the tag"
+
+# ============================================================================
 describe "non-mutation guarantee"
 # ============================================================================
 assert_true "[[ ! -s '$CALL_LOG' ]]" "dry-run invoked ZERO real cr/sha256sum calls"

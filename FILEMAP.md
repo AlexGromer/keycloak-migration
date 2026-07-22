@@ -75,7 +75,7 @@
 | scripts/build_matrix.sh | Build/save/sha256/GHCR-publish the 4×2 KC×sovereign-OS matrix; default dry-run; reads config/images.conf | build_matrix_main() |
 | tests/test_build_matrix.sh | Tests: build_matrix dry-run plan + config/USE override + non-mutation | — |
 | containerfiles/Containerfile.kc16 | Multistage non-root (uid 1000) WildFly KC16 image; reuses official keycloak-containers 16.1.1 tooling (build-keycloak.sh installs postgres JDBC module; official change-database entrypoint wires datasource at boot) | — |
-| .github/workflows/build-images.yml | workflow_dispatch self-hosted build+publish (private GHCR + Release tar.xz) | — |
+| .github/workflows/build-images.yml | workflow_dispatch self-hosted: build matrix + sovereign pg-client, pack per-OS air-gap bundles, publish two private per-OS prereleases (alsebased/redosbased) + 2GiB size-guard (out-of-band over cap) | ADR-014 |
 | docs/AIRGAP.md | Air-gap runbook: configure → plan → build/export → transfer → consume (load/pull/preloaded) | — |
 | docs/AIRGAP.md | Documentation | — |
 | docs/MIGRATION_GUIDE.md | Documentation | — |
@@ -97,6 +97,7 @@
 | scripts/lib/db_lock.sh | Shell script | — |
 | tests/test_db_lock.sh | Tests | — |
 | tests/test_pg_client.sh | Tests | — |
+| SESSION_HANDOFF.md | Documentation | — |
 ## Directory Structure
 
 ```

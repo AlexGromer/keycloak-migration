@@ -102,4 +102,38 @@ assert_true "[[ -f '$TMP/dist/kc-redos-bundle.tar.xz' ]]" "a redos bundle builds
 out="$(bash "$BUILD" --os windows --dist-dir "$TMP/dist" 2>&1 || true)"
 assert_contains "$out" "must be astra|redos" "an unknown OS is rejected"
 
+# ---------------------------------------------------------------------------
+describe "the sovereign pg-client image rides INSIDE the bundle (v3.9.7 autonomy)"
+# An air-gapped node with no host psql runs pg_dump/pg_restore/psql from this image — it must travel
+# in the bundle or the offline node has no way to get it. migrate_oneshot loads it by this exact name.
+PGC="$TMP/pgc"
+mkdir -p "$PGC"
+for v in "${VERSIONS[@]}"; do
+    printf 'fake-image-layer-%s' "$v" > "$PGC/kc-astra-${v}.tar"
+done
+printf 'fake-pgclient-image' > "$PGC/kc-astra-pgclient-17.tar"
+
+out="$(bash "$BUILD" --os astra --dist-dir "$PGC" --go 2>&1)"
+assert_contains "$out" "pg-client : kc-astra-pgclient-17.tar" "the banner reports the bundled pg-client"
+assert_contains "$out" "members   : 4/4" "the hop count still reads 4/4 (pg-client is counted apart)"
+
+pgc_bundle="$PGC/kc-astra-bundle.tar.xz"
+listed="$(tar -tJf "$pgc_bundle" | sed '/^$/d' | sort | tr '\n' ' ')"
+assert_equals "kc-astra-16.1.1.tar kc-astra-24.0.5.tar kc-astra-25.0.6.tar kc-astra-26.6.3.tar kc-astra-pgclient-17.tar " \
+    "$listed" \
+    "the bundle carries the four hops AND the pg-client image, flat at the archive root"
+
+# ---------------------------------------------------------------------------
+describe "a bundle without pg-client still builds, and says so (host-psql node / older delivery)"
+# Its absence is a warning, not a stop: a node that already has host psql is valid.
+NOPGC="$TMP/nopgc"
+mkdir -p "$NOPGC"
+for v in "${VERSIONS[@]}"; do
+    printf 'fake-image-layer-%s' "$v" > "$NOPGC/kc-astra-${v}.tar"
+done
+out="$(bash "$BUILD" --os astra --dist-dir "$NOPGC" --go 2>&1)"
+assert_contains "$out" "pg-client : none" "no pg-client tar -> the banner says none"
+assert_contains "$out" "the bundle will NOT carry the sovereign" "and it warns the air-gap node may lack a client"
+assert_true "[[ -f '$NOPGC/kc-astra-bundle.tar.xz' ]]" "but the bundle is still produced"
+
 test_report
