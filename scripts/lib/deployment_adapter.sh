@@ -605,6 +605,16 @@ kc_run_migrating_container() {
     local db_name="${PROFILE_DB_NAME:-keycloak}"
     local db_user="${PROFILE_DB_USER:-keycloak}"
     local db_pass="${PROFILE_DB_PASSWORD:-${KC_DB_PASSWORD:-}}"
+    # Rootless-docker loopback rewrite (see pg_client): a rootless dockerd's --network=host loopback
+    # is not the machine's, so reach a host-local DB via host.docker.internal on the bridge. Narrow:
+    # rootless docker + loopback only; rootless podman host-net and rootful are untouched.
+    local -a addhost=()
+    if [[ "${PROFILE_KC_RUN_NETWORK:-host}" == "host" && "${CONTAINER_RUNTIME:-}" == "docker" ]] \
+       && cr_is_rootless && _cr_is_loopback "$db_host"; then
+        db_host="host.docker.internal"; network_opt="--network=bridge"
+        addhost=(--add-host "host.docker.internal:host-gateway")
+        log_info "rootless docker: KC DB loopback rewritten to host.docker.internal (host-gateway)"
+    fi
     local jdbc_url="jdbc:postgresql://${db_host}:${db_port}/${db_name}"
 
     local image_ref
@@ -639,7 +649,7 @@ kc_run_migrating_container() {
     fi
 
     cr run -d --name "$container_name" \
-        "$network_opt" \
+        "$network_opt" "${addhost[@]}" \
         "${run_env[@]}" \
         "$image_ref" \
         start --optimized || {
@@ -700,6 +710,14 @@ kc_run_verify_container() {
     local db_name="${PROFILE_DB_NAME:-keycloak}"
     local db_user="${PROFILE_DB_USER:-keycloak}"
     local db_pass="${PROFILE_DB_PASSWORD:-${KC_DB_PASSWORD:-}}"
+    # Rootless-docker loopback rewrite (see pg_client / the migrating boot).
+    local -a addhost=()
+    if [[ "$network" == "host" && "${CONTAINER_RUNTIME:-}" == "docker" ]] \
+       && cr_is_rootless && _cr_is_loopback "$db_host"; then
+        db_host="host.docker.internal"; network="bridge"
+        addhost=(--add-host "host.docker.internal:host-gateway")
+        log_info "rootless docker: KC DB loopback rewritten to host.docker.internal (host-gateway)"
+    fi
     local jdbc_url="jdbc:postgresql://${db_host}:${db_port}/${db_name}"
 
     local image_ref
@@ -710,6 +728,7 @@ kc_run_verify_container() {
     if [[ "$network" != "host" ]]; then
         run_args+=(-p "${VERIFY_HTTP_PORT:-8080}:8080" -p "${VERIFY_MGMT_PORT:-9000}:9000")
     fi
+    run_args+=("${addhost[@]}")
 
     # Same env as the migrating boot — NO KC_HEALTH_ENABLED (build-time; fatal on an optimized image).
     local -a run_env=(

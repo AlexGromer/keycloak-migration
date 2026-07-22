@@ -167,6 +167,40 @@ _pg_client_rootful() {
     _PG_CLIENT_ROOTFUL=no; return 1
 }
 
+# cr_is_rootless — 0 only when the engine is POSITIVELY rootless (docker SecurityOptions carries
+# name=rootless; podman Host.Security.Rootless==true). Anything undetectable is treated as NOT
+# rootless (fail-safe: keeps the rootful/host-network path byte-identical). Cached after first probe.
+_KC_ROOTLESS=""
+cr_is_rootless() {
+    case "$_KC_ROOTLESS" in yes) return 0 ;; no) return 1 ;; esac
+    local rl=no
+    case "${CONTAINER_RUNTIME:-}" in
+        docker) cr info -f '{{.SecurityOptions}}' 2>/dev/null | grep -q 'name=rootless' && rl=yes ;;
+        podman) [[ "$(cr info -f '{{.Host.Security.Rootless}}' 2>/dev/null)" == "true" ]] && rl=yes ;;
+    esac
+    _KC_ROOTLESS="$rl"
+    [[ "$rl" == yes ]]
+}
+
+# _cr_is_loopback — 0 if the host is a loopback name/address (the case that needs a rootless-docker
+# rewrite, because a rootless dockerd's --network=host loopback is NOT the machine's loopback).
+_cr_is_loopback() { case "${1:-}" in localhost|127.*|::1) return 0 ;; *) return 1 ;; esac; }
+
+# Is a pg_dump using the DIRECTORY format (-Fd / --format=directory / -F d)? Directory dumps write
+# many files and cannot be streamed — they keep the bind-mount path.
+_pg_dump_is_dir() {
+    local a prev=""
+    for a in "$@"; do
+        case "$a" in
+            -Fd|-Fdirectory|--format=d|--format=directory) return 0 ;;
+            -F) prev="-F"; continue ;;
+            d|directory) [[ "$prev" == "-F" ]] && return 0 ;;
+        esac
+        prev=""
+    done
+    return 1
+}
+
 pg_client() {
     local tool="${1:?pg_client: a tool name (psql|pg_dump|pg_restore) is required}"
     shift
@@ -181,21 +215,90 @@ pg_client() {
         log_error "  Install postgresql-client, or provide a container engine plus the '$PROFILE_PG_CLIENT_IMAGE' image."
         return 127
     fi
-    local -a mounts=() userns=() pgopts=()
-    # One host directory, quoted so paths with spaces are safe. The :z suffix relabels for SELinux
-    # hosts (RHEL / RED OS) and is ignored where SELinux is absent.
-    [[ -n "${PG_CLIENT_MOUNT:-}" ]] && mounts=(-v "$PG_CLIENT_MOUNT:$PG_CLIENT_MOUNT:z")
-    # Map --user only on a positively rootful engine, so written dump files stay caller-owned.
-    _pg_client_rootful && userns=(--user "$(id -u):$(id -g)")
-    # Forward PGOPTIONS so a non-public schema (search_path, set once by the entrypoint) reaches the
-    # containerised psql exactly as it reaches a host psql via the environment.
+
+    local -a args=("$@") pgopts=()
+    local pgpass="${PGPASSWORD:-${PROFILE_DB_PASSWORD:-}}"
+    local image="${PROFILE_PG_CLIENT_IMAGE:-postgres:16}"
+    # Forward PGOPTIONS so a non-public schema (search_path) reaches the container psql as it does a host one.
     [[ -n "${PGOPTIONS:-}" ]] && pgopts=(-e PGOPTIONS="$PGOPTIONS")
-    cr run --rm -i --network="${PROFILE_PG_CLIENT_NETWORK:-host}" \
+
+    # Network. Default host networking so the container reaches a host-local DB. Under ROOTLESS DOCKER
+    # --network=host is the rootless daemon's own namespace (NOT the machine's), so rewrite a loopback
+    # `-h` to host.docker.internal on the bridge. Rootless podman / rootful are untouched.
+    local -a netargs=(--network="${PROFILE_PG_CLIENT_NETWORK:-host}")
+    if [[ "${PROFILE_PG_CLIENT_NETWORK:-host}" == "host" && "${CONTAINER_RUNTIME:-}" == "docker" ]] && cr_is_rootless; then
+        local _i
+        for ((_i = 0; _i < ${#args[@]}; _i++)); do
+            if [[ "${args[_i]}" == "-h" ]] && _cr_is_loopback "${args[_i+1]:-}"; then
+                args[_i+1]="host.docker.internal"
+                netargs=(--network=bridge --add-host "host.docker.internal:host-gateway")
+                log_info "rootless docker: DB loopback rewritten to host.docker.internal (host-gateway)"
+            fi
+        done
+    fi
+
+    # STREAM instead of bind-mounting for single-file archives. The container touches only its std
+    # streams; the FILE is opened by THIS shell (the caller), so it is caller-owned and needs no
+    # --user / --userns tricks. This is what lets a non-root (uid 1000) container do dumps/restores
+    # under ROOTLESS DOCKER, where a bind-mounted write would land as an unwritable subuid. Directory
+    # dumps (-Fd) and directory restores fall through to the mount path below.
+    if [[ "$tool" == "pg_dump" ]] && ! _pg_dump_is_dir "${args[@]}"; then
+        local of="" _i; local -a a2=()
+        for ((_i = 0; _i < ${#args[@]}; _i++)); do
+            case "${args[_i]}" in
+                -f|--file) of="${args[_i+1]:-}"; _i=$((_i + 1)) ;;
+                --file=*)  of="${args[_i]#--file=}" ;;
+                *)         a2+=("${args[_i]}") ;;
+            esac
+        done
+        if [[ -n "$of" ]]; then
+            cr run --rm "${netargs[@]}" -e HOME=/tmp -e PGPASSWORD="$pgpass" "${pgopts[@]}" \
+                "$image" pg_dump "${a2[@]}" > "$of"
+            return $?
+        fi
+    fi
+    if [[ "$tool" == "pg_restore" ]]; then
+        local last="${args[$((${#args[@]} - 1))]:-}"
+        if [[ -n "$last" && "$last" != -* && -f "$last" ]]; then   # a single-file archive, not a dir
+            cr run --rm -i "${netargs[@]}" -e HOME=/tmp -e PGPASSWORD="$pgpass" "${pgopts[@]}" \
+                "$image" pg_restore "${args[@]:0:$((${#args[@]} - 1))}" < "$last"
+            return $?
+        fi
+    fi
+    if [[ "$tool" == "psql" ]]; then   # psql -f SCRIPT: read the input file via stdin, no mount
+        local sf="" _i; local -a a2=()
+        for ((_i = 0; _i < ${#args[@]}; _i++)); do
+            case "${args[_i]}" in
+                -f|--file) sf="${args[_i+1]:-}"; _i=$((_i + 1)) ;;
+                --file=*)  sf="${args[_i]#--file=}" ;;
+                *)         a2+=("${args[_i]}") ;;
+            esac
+        done
+        if [[ -n "$sf" && -f "$sf" ]]; then
+            cr run --rm -i "${netargs[@]}" -e HOME=/tmp -e PGPASSWORD="$pgpass" "${pgopts[@]}" \
+                "$image" psql "${a2[@]}" < "$sf"
+            return $?
+        fi
+    fi
+
+    # MOUNT path — directory dumps/restores, or anything else that must touch PG_CLIENT_MOUNT files.
+    local -a mounts=() userns=()
+    [[ -n "${PG_CLIENT_MOUNT:-}" ]] && mounts=(-v "$PG_CLIENT_MOUNT:$PG_CLIENT_MOUNT:z")
+    #  - rootful: --user <caller> (files caller-owned).
+    #  - rootless podman + mount: --userns=keep-id (non-root container writes caller-owned).
+    #  - rootless docker + a directory dump: uid 1000 maps to an unwritable subuid — make the work-dir
+    #    writable by that subuid, or use podman (docs/ROOTLESS.md). Single-file ops streamed above.
+    if _pg_client_rootful; then
+        userns=(--user "$(id -u):$(id -g)")
+    elif [[ -n "${PG_CLIENT_MOUNT:-}" && "${CONTAINER_RUNTIME:-}" == "podman" ]] && cr_is_rootless; then
+        userns=(--userns=keep-id)
+    fi
+    cr run --rm -i "${netargs[@]}" \
         "${userns[@]}" -e HOME=/tmp \
-        -e PGPASSWORD="${PGPASSWORD:-${PROFILE_DB_PASSWORD:-}}" \
+        -e PGPASSWORD="$pgpass" \
         "${pgopts[@]}" \
         "${mounts[@]}" \
-        "${PROFILE_PG_CLIENT_IMAGE:-postgres:16}" "$tool" "$@"
+        "$image" "$tool" "${args[@]}"
 }
 
 pg_client_available() {
@@ -217,4 +320,7 @@ if [[ "${BASH_SOURCE[0]}" != "${0}" ]]; then
     export -f pg_client
     export -f pg_client_available
     export -f _pg_client_rootful
+    export -f cr_is_rootless
+    export -f _cr_is_loopback
+    export -f _pg_dump_is_dir
 fi
