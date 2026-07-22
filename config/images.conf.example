@@ -31,6 +31,12 @@ OUT_DIR="dist"
 # RED OS ubi8 has 17 and 21. KC16 (WildFly) always uses JDK 11.
 # ASTRA_JDK="17"
 # REDOS_JDK="21"
+
+# pg-client autonomy image (ADR-013): the postgresql-client major baked into <os>-pgclient-<major>
+# (from PGDG, since the sovereign OS repo caps at client-15). MUST be >= the DB server major —
+# pg_dump refuses a newer server. Built by `build_matrix.sh --pgclient`; migrate_oneshot defaults
+# PROFILE_PG_CLIENT_IMAGE to <image-ns>:<os>-pgclient-<major>.
+# PG_CLIENT_MAJOR="17"
 # JDK_KC16="11"
 
 # Optionally restrict the matrix (defaults shown). Comma-separated.

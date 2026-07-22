@@ -309,6 +309,13 @@ else
     export PROFILE_CONTAINER_IMAGE_REF="${IMAGE_NS}:${OS}-{version}"
 fi
 
+# pg-client image (v3.9.7 autonomy, ADR-013): default to the SOVEREIGN per-OS client image so a node
+# with no host psql uses the shipped ALSE/RED OS client (astra-pgclient-<major> / redos-pgclient-<major>).
+# An explicit PROFILE_PG_CLIENT_IMAGE env wins (e.g. upstream postgres:16). The client major
+# (KC_PG_CLIENT_MAJOR, default 17) MUST be >= the DB server major — pg_dump refuses a newer server.
+: "${PROFILE_PG_CLIENT_IMAGE:=${IMAGE_NS}:${OS}-pgclient-${KC_PG_CLIENT_MAJOR:-17}}"
+export PROFILE_PG_CLIENT_IMAGE
+
 # One place builds a concrete ref for a hop; acquisition and the migration must agree on it.
 _os_image_ref() { printf '%s' "${PROFILE_CONTAINER_IMAGE_REF//\{version\}/$1}"; }
 # Runtime: honor an explicit CONTAINER_RUNTIME; else autodetect (podman->docker).
