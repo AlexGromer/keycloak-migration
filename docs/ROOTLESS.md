@@ -45,7 +45,14 @@ export DOCKER_HOST=unix://$XDG_RUNTIME_DIR/docker.sock   # or: docker context us
 export CONTAINER_RUNTIME=docker
 ```
 
-**Rootless Docker — two limitations to plan around (rootless Podman has neither):**
+**Backups/restores work via STREAMING — no bind mount.** The pg-client streams single-file archives
+through its std streams (`pg_dump` writes to stdout → *the caller's shell* writes the file;
+`pg_restore` and `psql -f` read their input file from stdin). The container touches no host file, so
+nothing depends on uid mapping — a **non-root (uid 1000)** container produces **caller-owned** dumps
+under rootless Docker, rootless Podman, and rootful docker/podman identically. This is the default
+backup format (`-Fc`), so the standard autonomous migration backs up fine under rootless Docker.
+
+**Rootless Docker — two things to plan around (rootless Podman has neither):**
 
 1. **A host-local DB is not reachable.** The rootless daemon runs with `--disable-host-loopback`
    (the default) in its own network namespace, so a database at `127.0.0.1`/`localhost` *on the
@@ -53,14 +60,15 @@ export CONTAINER_RUNTIME=docker
    the rootless network: a **routable address** (a different host), or a **container on the same
    rootless network** (`--db-host <container-name>` with `PROFILE_PG_CLIENT_NETWORK=<that-network>` /
    `PROFILE_KC_RUN_NETWORK=<that-network>`). The tool still rewrites a loopback host to
-   `host.docker.internal` on the bridge — a best-effort that only helps when the daemon was started
+   `host.docker.internal` on the bridge — a best-effort that only helps if the daemon was started
    *with* host-loopback enabled.
 
-2. **Backups/restores (bind-mount writes) fail.** The pg-client runs non-root (uid 1000), which
-   rootless Docker maps to an unwritable subuid, so `pg_dump`/`pg_restore` cannot write the backup
-   into the work-dir (`Permission denied`). Docker has no equivalent of Podman's `--userns=keep-id`
-   (which maps the container uid back to you). Read-only work (`psql` queries) is fine. **For a full
-   rootless migration — which backs up before every hop — use rootless Podman.**
+2. **Parallel directory dumps (`-Fd`, opt-in) can't stream.** With `parallel_jobs > 1` the backup
+   switches to the directory format, which writes many files and needs the bind mount — and a
+   non-root container can't write it under rootless Docker (uid 1000 maps to an unwritable subuid;
+   Docker has no `--userns=keep-id`). The **default single-file backup is unaffected** (it streams).
+   For parallel dumps under rootless Docker, make the work-dir writable by the mapped subuid, or use
+   rootless Podman (which handles `-Fd` via `--userns=keep-id`).
 
 ## Database connection (`--db-url`, `--db-port`, `--db-schema`)
 
@@ -73,13 +81,15 @@ export CONTAINER_RUNTIME=docker
 
 ## Validation status
 
-- **Rootless Podman** — live-validated end to end: non-root pg-client (`id -u`=1000), `psql` +
-  `pg_dump` + `pg_restore` all work, dumps land **caller-owned** via `--userns=keep-id`, full
-  dump→restore round-trip. **This is the supported full-autonomy rootless path** (and Podman is the
-  ALSE / RED OS default).
-- **Rootless Docker** — live-run: detection works (`cr_is_rootless` sees `name=rootless`), the
-  pg-client runs non-root (uid 1000), and `psql` reaches a **containerized** DB by name. Its two
-  limitations above are real (bind-mount writes fail; a host-local DB is unreachable), so rootless
-  Docker fits read-only/verify or a containerized/routable DB with backups delegated to Podman.
-  Detection + the loopback rewrite are also covered by hermetic tests
+- **Rootless Podman** — live-validated end to end: non-root pg-client (`id -u`=1000), streaming
+  `pg_dump` + `pg_restore` round-trip, dumps **caller-owned**; also handles the parallel `-Fd` format
+  via `--userns=keep-id`. Podman is the ALSE / RED OS default.
+- **Rootless Docker** — live-validated: `cr_is_rootless` detection, non-root pg-client (uid 1000), a
+  **containerized DB reached by name**, and **`pg_dump`/`pg_restore` of the default single-file
+  format via streaming** (`rc=0`, dump caller-owned, full restore round-trip). The two caveats above
+  apply (a host-local DB is unreachable; the opt-in parallel `-Fd` format can't stream). Detection,
+  the loopback rewrite, and the stream/mount split are covered by hermetic tests
   (`tests/test_container_runtime.sh`). The image/non-root guarantees are engine-independent.
+
+Net: the **default autonomous migration runs fully rootless on both engines**; only the opt-in
+parallel-dump format is Podman-only under rootless Docker.

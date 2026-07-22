@@ -28,8 +28,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `--userns=keep-id` (a non-root container writes **caller-owned** dumps); a rootless-Docker +
   loopback DB host is rewritten to `host.docker.internal` via `--add-host=…:host-gateway` (a rootless
   dockerd's `--network=host` is its own namespace, not the machine's). The rootful path is unchanged.
-  Live-validated on rootless Podman (dump/restore round-trip, non-root, caller-owned);
-  rootless-Docker covered by hermetic tests in `test_container_runtime`.
+- **Streaming dump/restore** (`pg_client`): single-file archives (`-Fc`, the default) stream through
+  the container's std streams — `pg_dump` → stdout → the caller's shell writes the file; `pg_restore`
+  / `psql -f` read from stdin — so a **non-root** container produces **caller-owned** backups with **no
+  bind mount** on any engine. This is what makes the default autonomous migration back up correctly
+  under **rootless Docker** (where a bind-mount write lands as an unwritable subuid). The opt-in
+  parallel directory format (`-Fd`) still uses the mount (Podman `--userns=keep-id`, or a writable
+  work-dir). Live-validated on rootless **Podman** and rootless **Docker** (dump `rc=0` caller-owned,
+  restore round-trip); detection + the stream/mount split covered by hermetic tests.
 
 ### Changed — air-gap delivery (ADR-014)
 

@@ -76,6 +76,16 @@ if [[ -f "$LIB" ]]; then
     rm2="$(pg_client __no_such_pg_tool__ -h db.corp -U u -d db 2>&1)"
     assert_true "printf '%s' \"\$rm2\" | grep -q -- '--network=host'" "a non-loopback host keeps --network=host"
     assert_true "! printf '%s' \"\$rm2\" | grep -q host.docker.internal" "and is not rewritten"
+
+    # _pg_dump_is_dir decides the streaming vs bind-mount split: single-file formats (-Fc / -Fp / -Ft /
+    # default) stream via stdin/stdout (no mount, no --user — works for a non-root container under
+    # rootless docker); the directory format (-Fd) can't stream and keeps the mount path. The live
+    # dump/restore round-trip is validated on rootless podman AND rootless docker (see docs/ROOTLESS.md).
+    assert_true  "_pg_dump_is_dir -h db -Fd -f /x"          "-Fd is directory format (mount path)"
+    assert_true  "_pg_dump_is_dir --format=directory -f /x" "--format=directory is directory"
+    assert_true  "_pg_dump_is_dir -F d -f /x"               "-F d is directory"
+    assert_false "_pg_dump_is_dir -h db -Fc -f /x"          "-Fc is single-file (streams)"
+    assert_false "_pg_dump_is_dir -h db -f /x"              "default format is single-file (streams)"
 else
     skip_test "container_runtime.sh not present"
 fi
