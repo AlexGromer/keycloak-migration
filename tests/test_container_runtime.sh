@@ -1,4 +1,7 @@
 #!/usr/bin/env bash
+# shellcheck disable=SC2329,SC2034
+# (SC2329: cr()/stub functions are invoked indirectly by the code under test.
+#  SC2034: captured outputs like rm2 are used inside assert_true "... \$var ..." eval strings.)
 # Tests: Container Runtime abstraction (cr / cr_detect / cr_available)
 # Written against the frozen contract; gracefully skips until
 # scripts/lib/container_runtime.sh lands (owned by another teammate).
