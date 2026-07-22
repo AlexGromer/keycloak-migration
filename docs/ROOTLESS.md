@@ -45,12 +45,22 @@ export DOCKER_HOST=unix://$XDG_RUNTIME_DIR/docker.sock   # or: docker context us
 export CONTAINER_RUNTIME=docker
 ```
 
-**Host-loopback caveat (rootless Docker only).** A rootless dockerd's `--network=host` is the
-daemon's *own* network namespace, **not** the machine's — so a database at `127.0.0.1`/`localhost`
-is NOT reachable through it. The tool detects this exact case (rootless + docker + a loopback DB
-host) and automatically rewrites the connection to `host.docker.internal` on the default bridge via
-`--add-host=host.docker.internal:host-gateway`. A database on a routable address (a different host)
-is unaffected. Rootless Podman does not need this.
+**Rootless Docker — two limitations to plan around (rootless Podman has neither):**
+
+1. **A host-local DB is not reachable.** The rootless daemon runs with `--disable-host-loopback`
+   (the default) in its own network namespace, so a database at `127.0.0.1`/`localhost` *on the
+   machine* is unreachable — even via `host.docker.internal`. Give the tool a DB it can reach from
+   the rootless network: a **routable address** (a different host), or a **container on the same
+   rootless network** (`--db-host <container-name>` with `PROFILE_PG_CLIENT_NETWORK=<that-network>` /
+   `PROFILE_KC_RUN_NETWORK=<that-network>`). The tool still rewrites a loopback host to
+   `host.docker.internal` on the bridge — a best-effort that only helps when the daemon was started
+   *with* host-loopback enabled.
+
+2. **Backups/restores (bind-mount writes) fail.** The pg-client runs non-root (uid 1000), which
+   rootless Docker maps to an unwritable subuid, so `pg_dump`/`pg_restore` cannot write the backup
+   into the work-dir (`Permission denied`). Docker has no equivalent of Podman's `--userns=keep-id`
+   (which maps the container uid back to you). Read-only work (`psql` queries) is fine. **For a full
+   rootless migration — which backs up before every hop — use rootless Podman.**
 
 ## Database connection (`--db-url`, `--db-port`, `--db-schema`)
 
@@ -63,8 +73,13 @@ is unaffected. Rootless Podman does not need this.
 
 ## Validation status
 
-- **Rootless Podman:** live-validated — non-root pg-client (`id -u`=1000), `psql`/`pg_dump`/
-  `pg_restore` work, dumps land caller-owned via `--userns=keep-id`, full dump→restore round-trip.
-- **Rootless Docker:** the detection + host-loopback rewrite are covered by hermetic tests
-  (`tests/test_container_runtime.sh`); a live run needs the rootless daemon set up as above (it
-  requires the one-time root prerequisites). The image/non-root guarantees are engine-independent.
+- **Rootless Podman** — live-validated end to end: non-root pg-client (`id -u`=1000), `psql` +
+  `pg_dump` + `pg_restore` all work, dumps land **caller-owned** via `--userns=keep-id`, full
+  dump→restore round-trip. **This is the supported full-autonomy rootless path** (and Podman is the
+  ALSE / RED OS default).
+- **Rootless Docker** — live-run: detection works (`cr_is_rootless` sees `name=rootless`), the
+  pg-client runs non-root (uid 1000), and `psql` reaches a **containerized** DB by name. Its two
+  limitations above are real (bind-mount writes fail; a host-local DB is unreachable), so rootless
+  Docker fits read-only/verify or a containerized/routable DB with backups delegated to Podman.
+  Detection + the loopback rewrite are also covered by hermetic tests
+  (`tests/test_container_runtime.sh`). The image/non-root guarantees are engine-independent.
