@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# shellcheck disable=SC2329
+# (the pg_client_available stub is invoked indirectly by check_network_connectivity)
 # Unit Tests — Preflight Checks (v3.5)
 
 set -euo pipefail

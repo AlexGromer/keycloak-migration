@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# shellcheck disable=SC2034
+# (captured outputs like pub_out are used inside assert_true "... \$var ..." eval strings)
 # Tests: F2 — migrate_oneshot.sh arg-parsing, hop chain, dry-run plan, gen-profile-only.
 set -euo pipefail
 
