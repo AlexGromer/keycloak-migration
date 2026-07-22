@@ -1,6 +1,6 @@
 > ЯЗЫК: 🇷🇺 Русский | [🇬🇧 English](README.en.md)
 
-# Keycloak Migration Tool v3.9.7
+# Keycloak Migration Tool v3.10.0
 
 **Утилита миграции Keycloak «в одну команду»** с авто-детектированием окружения, поддержкой мультитенантных и кластерных развёртываний, мониторингом в реальном времени, производственной закалкой (production hardening), **security-закалкой** (SAST, сканирование секретов, валидация ввода, аудит-логирование), **контейнерной поэтапной миграцией** (container-hop — на каждом шаге поднимается настоящий контейнер Keycloak и проверяется продвижение уровня MIGRATION_MODEL, Layer-2), **суверенными образами ОС** (Astra Linux SE / RED OS) с **air-gap** офлайн-дистрибуцией и поддержкой всех БД, официально поддерживаемых Keycloak.
 
@@ -8,7 +8,7 @@
 [![Tests](https://img.shields.io/badge/tests-31%20suites-success)](tests/)
 [![Bash](https://img.shields.io/badge/bash-5.0%2B-green.svg)](scripts/)
 [![Databases](https://img.shields.io/badge/databases-6-blue.svg)](scripts/lib/database_adapter.sh)
-[![Version](https://img.shields.io/badge/version-v3.9.7-blue.svg)](CHANGELOG.md)
+[![Version](https://img.shields.io/badge/version-v3.10.0-blue.svg)](CHANGELOG.md)
 [![Images](https://img.shields.io/badge/sovereign%20images-Astra%20SE%20%7C%20RED%20OS-blue.svg)](docs/AIRGAP.md)
 
 ---

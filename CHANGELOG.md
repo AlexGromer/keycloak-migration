@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [3.10.0] - 2026-07-22
+
 ### Added — non-root pg-client, DB connection string, non-public schema
 
 - **The sovereign pg-client image runs non-root** (`USER 1000`, `Containerfile.pgclient`) — the KC hop
