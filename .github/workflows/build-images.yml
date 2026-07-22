@@ -4,6 +4,13 @@ name: Build Images (Sovereign, Air-gapped)
 # runner (operator infra) — GitHub-hosted runners cannot reach Astra SE / RED OS
 # registries and the licence forbids building sovereign images on shared cloud.
 # Never runs on push/PR, so ci.yml stays the sole PR gate.
+#
+# Delivery is per-OS air-gap BUNDLES (dist/kc-<os>-bundle.tar.xz), each carrying the KC hop images
+# PLUS the sovereign pg-client image (v3.9.7 autonomy, ADR-013/014), attached to a SEPARATE private
+# prerelease per OS (astra -> alsebased, redos -> redosbased). A bundle over GitHub's 2 GiB asset cap
+# is still built and uploaded as a CI artifact, but NOT attached — deliver it out-of-band from the
+# runner's dist/. The per-hop images are NOT published to a public Release (licensed Astra/RED OS
+# bases, ADR-006); release.yml ships only the tool, never the images.
 on:
   workflow_dispatch:
     inputs:
@@ -11,7 +18,7 @@ on:
         description: "Comma-separated OS list"
         default: "astra,redos"
       versions:
-        description: "Comma-separated KC versions"
+        description: "Comma-separated KC versions (the SAME set feeds the matrix AND the bundle)"
         default: "16.1.1,24.0.5,25.0.6,26.6.3"
       astra_base:
         description: "Astra SE base (Quarkus 24/25/26)"
@@ -22,11 +29,18 @@ on:
       redos_base:
         description: "RED OS base"
         required: false
+      pg_client_major:
+        description: "postgresql-client major baked into <os>-pgclient-<major> (must be >= DB server major)"
+        default: "17"
+      build_pgclient:
+        description: "Build the sovereign pg-client image and put it in each bundle"
+        type: boolean
+        default: true
       ghcr_image:
         description: "GHCR namespace (private; blank = ghcr.io/<owner>/<repo>)"
         required: false
       publish:
-        description: "Push to GHCR + attach Release tarballs"
+        description: "Push to GHCR + attach bundles to per-OS private prereleases"
         type: boolean
         default: false
 
@@ -41,46 +55,112 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      # Normalize the comma lists ONCE (strip all whitespace) so "astra, redos" and the matrix/bundle
+      # steps agree — build_matrix.sh and build_bundle.sh split on comma only and do not trim. Shared
+      # with later steps via $GITHUB_ENV, so there is a single source of truth for OSES/VERSIONS.
+      - name: Normalize inputs
+        run: |
+          set -euo pipefail
+          {
+            echo "NORM_OSES=$(echo "${{ inputs.oses }}" | tr -d '[:space:]')"
+            echo "NORM_VERSIONS=$(echo "${{ inputs.versions }}" | tr -d '[:space:]')"
+          } >> "$GITHUB_ENV"
+
       - name: GHCR login (publish only)
         if: ${{ inputs.publish }}
         run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
 
-      - name: Build (+publish) matrix
+      - name: Build (+publish) matrix + sovereign pg-client
         env:
           ASTRA_BASE: ${{ inputs.astra_base }}
           ASTRA_BASE_KC16: ${{ inputs.astra_base_kc16 }}
           REDOS_BASE: ${{ inputs.redos_base }}
           REDOS_BASE_KC16: ${{ inputs.redos_base }}
           GHCR_IMAGE: ${{ inputs.ghcr_image || format('ghcr.io/{0}', github.repository) }}
+          PG_CLIENT_MAJOR: ${{ inputs.pg_client_major }}
         run: |
           set -euo pipefail
-          chmod +x scripts/build_matrix.sh scripts/build_kc_image.sh
-          args=(--build --os "${{ inputs.oses }}" --versions "${{ inputs.versions }}" --out-dir dist)
+          chmod +x scripts/build_matrix.sh scripts/build_kc_image.sh scripts/build_bundle.sh
+          args=(--build --os "$NORM_OSES" --versions "$NORM_VERSIONS" --out-dir dist)
+          if [ "${{ inputs.build_pgclient }}" = "true" ]; then args+=(--pgclient); fi
           if [ "${{ inputs.publish }}" = "true" ]; then args+=(--publish); fi
           scripts/build_matrix.sh "${args[@]}"
 
-      - name: Compress + checksum tars
+      # Pack each OS's per-hop tarballs (the SAME --versions the matrix built) + the sovereign
+      # pg-client tar (if built) into ONE air-gap bundle the offline node consumes with
+      # `migrate_oneshot.sh --source bundle`. build_bundle.sh xz-compresses the bundle itself, so
+      # there is deliberately NO separate "compress the .tar files" step — that would delete the
+      # .tar inputs this step needs.
+      - name: Build per-OS air-gap bundles
         run: |
           set -euo pipefail
-          shopt -s nullglob
-          for t in dist/*.tar; do
-            xz -T0 -f "$t"
-            sha256sum "${t}.xz" > "${t}.xz.sha256"
+          IFS=',' read -r -a OS_ARR <<< "$NORM_OSES"
+          for os in "${OS_ARR[@]}"; do
+            [ -n "$os" ] || continue
+            echo "== bundling ${os} =="
+            scripts/build_bundle.sh --os "$os" --versions "$NORM_VERSIONS" --dist-dir dist --go
+          done
+
+      # A GitHub Release asset is hard-capped at 2 GiB. A bundle over that cannot be attached, so
+      # surface it loudly here (even on non-publish runs) rather than fail an upload later. Over-cap
+      # bundles are delivered out-of-band from the runner's dist/ — we do NOT split or fail.
+      - name: Size guard (GitHub asset cap is 2 GiB)
+        run: |
+          set -euo pipefail
+          LIMIT=2147483648   # 2 GiB
+          IFS=',' read -r -a OS_ARR <<< "$NORM_OSES"
+          for os in "${OS_ARR[@]}"; do
+            [ -n "$os" ] || continue
+            b="dist/kc-${os}-bundle.tar.xz"
+            [ -f "$b" ] || { echo "::warning::${b} not found — skipped"; continue; }
+            sz="$(stat -c '%s' "$b")"
+            mib=$(( sz / 1048576 ))
+            if [ "$sz" -gt "$LIMIT" ]; then
+              echo "::warning::${b} is ${mib}MiB (> 2 GiB) — will NOT be attached to a prerelease. Deliver it out-of-band from the runner's dist/."
+            else
+              echo "OK: ${b} is ${mib}MiB (under the 2 GiB asset cap)"
+            fi
           done
 
       - name: Upload build artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: kc-sovereign-images
-          path: dist/*.tar.xz*
+          name: kc-sovereign-bundles
+          path: dist/kc-*-bundle.tar.xz*
           if-no-files-found: error
 
-      - name: Attach to PRIVATE Release (publish only)
+      # ONE private prerelease PER OS (alsebased / redosbased), each carrying only its own bundle +
+      # checksum. Tags include run_id AND run_attempt, so a GitHub "Re-run jobs" (which reuses
+      # run_id) does not collide with the release the first attempt already created. A bundle over
+      # the 2 GiB cap is skipped here (out-of-band) — the size-guard step already warned.
+      - name: Attach bundles to per-OS PRIVATE prereleases (publish only)
         if: ${{ inputs.publish }}
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
-          gh release create "images-${{ github.run_id }}" dist/*.tar.xz dist/*.tar.xz.sha256 \
-            --prerelease --title "Sovereign image bundle (run ${{ github.run_id }})" \
-            --notes "Air-gapped Keycloak × Astra SE / RED OS image bundle. Private repo -> private assets."
+          LIMIT=2147483648   # 2 GiB
+          RUNTAG="${{ github.run_id }}-${{ github.run_attempt }}"
+          IFS=',' read -r -a OS_ARR <<< "$NORM_OSES"
+          for os in "${OS_ARR[@]}"; do
+            [ -n "$os" ] || continue
+            case "$os" in
+              astra) rel="alsebased" ;;
+              redos) rel="redosbased" ;;
+              *)     rel="${os}based" ;;
+            esac
+            b="dist/kc-${os}-bundle.tar.xz"
+            if [ ! -f "$b" ]; then
+              echo "::warning::${b} not found — no prerelease for ${os}"
+              continue
+            fi
+            sz="$(stat -c '%s' "$b")"
+            if [ "$sz" -gt "$LIMIT" ]; then
+              echo "::warning::${b} exceeds the 2 GiB asset cap — NOT attaching. Deliver out-of-band from the runner's dist/."
+              continue
+            fi
+            gh release create "${rel}-images-${RUNTAG}" "$b" "${b}.sha256" \
+              --prerelease \
+              --title "Sovereign ${os} air-gap bundle (run ${RUNTAG})" \
+              --notes "Air-gapped Keycloak x ${os} bundle: KC hop images + sovereign pg-client. Private repo -> private assets. Consume: scripts/migrate_oneshot.sh --os ${os} --source bundle --bundle $(basename "$b") --go"
+          done

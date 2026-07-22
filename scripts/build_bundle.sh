@@ -20,6 +20,11 @@
 #   scripts/build_bundle.sh --os astra                       # dry-run: says what it would pack
 #   scripts/build_bundle.sh --os astra --go                  # pack dist/kc-astra-bundle.tar.xz
 #   scripts/build_bundle.sh --os redos --dist-dir /mnt/out --go
+#   scripts/build_bundle.sh --os astra --versions 24.0.5,25.0.6,26.6.3 --go  # subset of hops
+#
+#   --versions CSV overrides the default hop set (16.1.1,24.0.5,25.0.6,26.6.3). Pass the SAME set
+#   build_matrix built, or the "missing member" check refuses the bundle. The sovereign pg-client
+#   tar (kc-<os>-pgclient-*.tar) is auto-included whenever present, independent of --versions.
 #
 # Produce the input tarballs first:
 #   scripts/build_matrix.sh --build            # writes dist/kc-<os>-<version>.tar
@@ -45,12 +50,13 @@ GO="false"
 # that dies halfway.
 VERSIONS=(16.1.1 24.0.5 25.0.6 26.6.3)
 
-usage() { sed -n '2,26p' "${BASH_SOURCE[0]}" | sed 's/^#\{0,1\} \{0,1\}//'; }
+usage() { sed -n '2,30p' "${BASH_SOURCE[0]}" | sed 's/^#\{0,1\} \{0,1\}//'; }
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --os)        OS="${2:-}"; shift 2 ;;
         --dist-dir)  DIST_DIR="${2:-}"; shift 2 ;;
+        --versions)  IFS=',' read -r -a VERSIONS <<< "${2:-}"; shift 2 ;;
         --go)        GO="true"; shift ;;
         --dry-run)   GO="false"; shift ;;
         -h|--help)   usage; exit 0 ;;
@@ -77,14 +83,42 @@ for v in "${VERSIONS[@]}"; do
         missing+=("$tar_name")
     fi
 done
+kc_count=${#members[@]}   # the REQUIRED hop members; pg-client below is counted separately
+
+# pg-client autonomy (v3.9.7, ADR-013): the sovereign PostgreSQL-client image travels INSIDE the
+# bundle so an air-gapped node with no host psql can still run pg_dump/pg_restore/psql — from the
+# container. Produced by `build_matrix.sh --pgclient` as kc-<os>-pgclient-<major>.tar (one per OS).
+# OPTIONAL, unlike the hops: a node that has host psql, or an older bundle, is still valid — so a
+# missing pg-client is a warning, not a failure. migrate_oneshot.sh --source bundle loads it if
+# present (matching PROFILE_PG_CLIENT_IMAGE), else falls back to host psql.
+shopt -s nullglob
+pgclient_paths=("${DIST_DIR}"/kc-"${OS}"-pgclient-*.tar)
+shopt -u nullglob
+pgclient_members=()
+for pt in "${pgclient_paths[@]}"; do
+    bn="$(basename "$pt")"
+    pgclient_members+=("$bn")
+    members+=("$bn")
+done
 
 echo "=============================================================="
 echo " Air-gap bundle: ${OS}"
 echo "   mode      : $([[ "$GO" == "true" ]] && echo PACK || echo DRY-RUN)"
 echo "   dist dir  : ${DIST_DIR}"
 echo "   bundle    : ${BUNDLE}"
-echo "   members   : ${#members[@]}/${#VERSIONS[@]}"
+echo "   members   : ${kc_count}/${#VERSIONS[@]}"
+if (( ${#pgclient_members[@]} > 0 )); then
+    echo "   pg-client : ${pgclient_members[*]}"
+else
+    echo "   pg-client : none (autonomy relies on host psql on the target node)"
+fi
 echo "=============================================================="
+
+if (( ${#pgclient_members[@]} == 0 )); then
+    log_warn "No kc-${OS}-pgclient-*.tar in ${DIST_DIR} — the bundle will NOT carry the sovereign"
+    log_warn "pg-client. A fully air-gapped node WITHOUT host psql then can't dump/restore."
+    log_warn "Build it first:  scripts/build_matrix.sh --pgclient --os ${OS}"
+fi
 
 if [[ ${#missing[@]} -gt 0 ]]; then
     log_error "Missing image tarball(s) in ${DIST_DIR}:"

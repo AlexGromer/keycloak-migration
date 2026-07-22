@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed — air-gap delivery (ADR-014)
+
+- Air-gap bundle now carries the **sovereign pg-client** image (`kc-<os>-pgclient-<major>.tar`):
+  `build_bundle.sh` auto-includes it (optional — a missing one warns, does not fail) and
+  `migrate_oneshot.sh --source bundle` loads it, so a fully air-gapped node with no host `psql`
+  gets the client from the bundle itself (v3.9.7 autonomy default now reaches truly isolated nodes).
+- `.github/workflows/build-images.yml`: builds `--pgclient`, packs one bundle per OS, and publishes
+  **two private per-OS prereleases** (`alsebased`/`redosbased`) instead of one combined Release; a
+  **2 GiB size-guard** delivers an over-cap bundle out-of-band from the runner's `dist/` (never
+  split, never failed). New inputs `pg_client_major` (default `17`), `build_pgclient` (default
+  `true`). Tool `VERSION` unchanged (CI/delivery only, no migration-logic change).
+
 ### Planned
 - AWS RDS / GCP Cloud SQL / Azure Database migration examples
 - Ansible playbook wrapper

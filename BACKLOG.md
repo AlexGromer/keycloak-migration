@@ -7,6 +7,7 @@
 - [ ] [2] [W2] Поток A: 4 docx поставки (перегенерация HANDOVER с A2 + 3 дока из QUICKSTART/MIGRATION_GUIDE/AIRGAP) + QA-гейт ×4 (P2) @tech-writer — 2026-07-21
 - [ ] [3] [W3] Поток C: air-gap релиз — расширить build-images.yml под 2 приватных per-OS prerelease (alsebased/redosbased) + гард размера (P2) @ci-cd-engineer — 2026-07-21
 - [ ] [1] [W1.5] Суверенный pg-client образ (ALSE+RED OS база + postgresql-client мажора сервера): containerfiles, per-OS дефолт PROFILE_PG_CLIENT_IMAGE, интеграция в build-images.yml + air-gap бандл, ADR. Собирается на sovereign-раннере (P1) @ci-cd-engineer — 2026-07-21
+- [ ] [1] ПУНКТ 3 (Поток C): air-gap per-OS prerelease + суверенный pg-client в бандле (build-images.yml + build_bundle.sh + migrate_oneshot.sh + tests + AIRGAP/ADR-014) (P1) @ci-cd-engineer — 2026-07-22
 
 ## Completed Archive
 

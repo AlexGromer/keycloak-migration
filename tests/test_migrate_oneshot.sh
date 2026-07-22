@@ -57,4 +57,14 @@ assert_contains "$content" "deployment_mode: run"   "generated profile is run mo
 assert_contains "$content" "target_version: 26.6.3" "generated profile target 26.6.3"
 assert_contains "$gen"     "Profile generated"      "gen-profile-only prints next steps"
 
+describe "F2: --source bundle loads the sovereign pg-client image too (v3.9.7 autonomy)"
+# The bundle carries kc-<os>-pgclient-<major>.tar; the acquire step must `cr load` it so a node with
+# no host psql has exactly the image PROFILE_PG_CLIENT_IMAGE resolves to. Prove the dry-run plan says so.
+FAKE_BUNDLE="$TMPD/kc-astra-bundle.tar.xz"
+: > "$FAKE_BUNDLE"   # existence is all the dry-run plan needs — it does not extract in dry-run
+bout="$(PROFILE_DIR="$TMPD" timeout 60 bash "$ONESHOT" --target 26 --os astra --db-host db \
+    --source bundle --bundle "$FAKE_BUNDLE" --dry-run </dev/null 2>&1 || true)"
+assert_contains "$bout" "cr load -i"            "the bundle plan loads images"
+assert_contains "$bout" "kc-astra-pgclient-"    "and it loads the sovereign pg-client image (discovered by glob)"
+
 test_report

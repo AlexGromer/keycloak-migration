@@ -14,6 +14,9 @@
 # (release.yml copies root files by explicit name only, so it also never ships; this is belt+braces)
 /HANDOVER.md
 
+# Session handoff note — local working doc, never committed
+/SESSION_HANDOFF.md
+
 # Environment variables & secrets
 .env
 .env.*
