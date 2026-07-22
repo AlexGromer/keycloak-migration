@@ -187,6 +187,23 @@ else
 fi
 
 # ============================================================================
+describe "AUTONOMOUS: an unreachable host-probe DEFERS to the DB check (no false network failure)"
+# ============================================================================
+# When there is no host psql, the migration reaches the DB through the pg-client CONTAINER, which may
+# sit on a container network the host cannot TCP-probe (a rootless-docker DB by name). The host-level
+# probe is then not authoritative — warn and defer; the pg_client-based DB check is the real gate.
+_pf_tb="$(mktemp -d)"
+for _t in bash timeout nc sleep; do _p="$(command -v "$_t" 2>/dev/null)"; [[ -n "$_p" ]] && ln -sf "$_p" "$_pf_tb/$_t"; done
+pg_client_available() { return 0; }   # stub: a container pg-client IS available
+# host psql hidden (not in $_pf_tb) + a closed port -> the fix must WARN and defer (return 0)
+assert_true "PATH='$_pf_tb' check_network_connectivity 127.0.0.1 1 >/dev/null 2>&1" \
+    "no host psql + a container pg-client: an unreachable probe defers (returns 0)"
+unset -f pg_client_available
+# and with host psql present (normal PATH), the same closed port still FAILS — unchanged
+assert_false "check_network_connectivity 127.0.0.1 1 >/dev/null 2>&1" \
+    "host psql present: an unreachable probe still fails (rootful path unchanged)"
+
+# ============================================================================
 describe "REGRESSION: backup space must handle a fractional DB size"
 # ============================================================================
 # A small DB reports e.g. ".01" GB; ".01" * 3 = ".03" and bash arithmetic is integer-only, so

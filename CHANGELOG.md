@@ -51,6 +51,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Preflight network check failed for a container-network DB on the autonomous path**
+  (`preflight_checks.sh` `check_network_connectivity`). With no host `psql`, the migration reaches the
+  DB through the pg-client **container** — which may sit on a container network the host cannot
+  TCP-probe (a DB addressed by container name on a rootless-docker bridge). The host-level `/dev/tcp` /
+  `nc` probe then reported `UNREACHABLE` and aborted preflight, even though the DB was perfectly
+  reachable the way the migration actually connects. Now, when host psql is absent and a container
+  pg-client is available, an unreachable host-probe **warns and defers** to the authoritative
+  `pg_client`-based database-connectivity check. The rootful path (host psql present) is unchanged —
+  a host-probe failure there is still fatal. This unblocked live rootless-docker / rootless-podman
+  migrations against a containerized DB.
+
 - **Containerized advisory-lock release could hang the whole run** (`scripts/lib/db_lock.sh`,
   `_kc_db_lock_release`). When the lock is held by a `docker run -i … psql` coproc (autonomy path, no
   host psql), `kill "$pid"` does not reliably terminate the `docker run` client, so a `wait "$pid"`
