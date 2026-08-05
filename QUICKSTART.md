@@ -65,7 +65,7 @@ without you saying so.
 |---|---|
 | `bash` 4+ | the tool |
 | `docker` or `podman` | it boots a Keycloak container per hop |
-| `psql`, `pg_dump`, `pg_restore` | backups, and reading the migration state out of the database |
+| `psql`, `pg_dump`, `pg_restore` — **or** the pg-client image | backups, and reading the migration state out of the database. The host binaries are **optional**: without them each call runs inside the sovereign pg-client container, which the air-gap bundle carries. Client major must be ≥ the DB server major. |
 | Network access to the database | from *this host*, not from inside a container |
 | Free disk on the work dir | one backup per hop, and they are all kept |
 
@@ -247,7 +247,11 @@ Nothing is fetched. The tool asserts each image is present and fails loudly if o
 The bundle is a `tar.xz` of one `docker save` tarball per hop. Build one with:
 
 ```bash
-scripts/build_matrix.sh --build          # builds the per-hop images
+# KC_PG_CLIENT_MAJOR selects the client major (17 by default). It must be >= your DB server major:
+# pg_dump refuses a server newer than itself.
+scripts/build_matrix.sh --build --pgclient   # per-hop images AND the sovereign pg-client
+                                             # (without --pgclient an air-gapped node with no host
+                                             #  psql gets no client and cannot back up)
 scripts/build_bundle.sh --os astra --go  # packs them, with a checksum
 ```
 
@@ -379,6 +383,8 @@ backup you have never restored is a hope, not a backup.
 | `DATA INTEGRITY VIOLATED` | The schema migrated; rows that should have survived did not. | **Stop.** Do not continue. Roll back, and report it. |
 | `Insufficient backup space: X < Y` | Measured, not guessed: table data × 1.2 × hops. | `--work-dir` somewhere roomier |
 | `preloaded: image not present locally` | The image is not loaded under the name the tool expects. | `docker images`, then point `--image-ref-template` at the real name |
+| `the bundle loaded, but the image this run would start is absent` | The bundle carries its images under the tags they were BUILT with, and your `--image-ref-template` / `KC_IMAGE_NS` resolves to a different name. | Use the full reference (registry and namespace included), or drop the template to use the built-in convention |
+| `Tool missing: psql (no host binary and no <image> image)` | No host client, and the image the run selected is not on the node. | Check the `pg-client` line in the banner: with a bundle it should be `<ns>:<os>-pgclient-<major>`. Do not pin `PROFILE_PG_CLIENT_IMAGE` unless you mean to |
 | `it holds a database password` | Your `--env-file` is world-readable. | `chmod 600` |
 | Health check says 404 | Nothing is wrong. Keycloak only serves `/health` with `KC_HEALTH_ENABLED=true` (and from KC 25 on port 9000). It is **not** a migration failure and never blocks one. | Use `verify` for a real check |
 

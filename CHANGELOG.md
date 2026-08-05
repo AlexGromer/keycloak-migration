@@ -7,6 +7,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Documentation — corrected against the code the audit examined
+
+- **README (RU + EN)** no longer says the pg-client defaults to `postgres:16`: the default is the
+  sovereign per-OS image (ADR-013/016), `KC_PG_CLIENT_MAJOR` selects the major, and upstream
+  `postgres:<major>` is the override and the fallback. The flagship "fully autonomous run" example no
+  longer pins `PROFILE_PG_CLIENT_IMAGE` — pinning is precisely what switches the sovereign default and
+  the bundle repoint OFF; it is shown separately, as a deliberate override.
+- **QUICKSTART**: host `psql`/`pg_dump`/`pg_restore` are documented as OPTIONAL (they have been since
+  ADR-012); the bundle build shows `--build --pgclient`, without which an air-gapped node gets no
+  client; two new troubleshooting rows (a bundle whose tags do not match the run's image reference, and
+  `Tool missing: psql`); `KC_PG_CLIENT_MAJOR` documented.
+- **docs/AIRGAP.md**: the MANUAL path now builds, transfers and loads the pg-client tar — it previously
+  produced a bundle no isolated node could use without host `psql`; the "a bundle without pg-client
+  stays valid" note says for whom it stays valid.
+- **docs/MIGRATION_GUIDE.md**: the host-check section no longer presents `psql` as a prerequisite.
+- **docs/ROOTLESS.md**: the "no root anywhere" claim is qualified — installing a rootless *Docker*
+  daemon is a one-time root operation (rootless Podman needs none).
+- **ARCHITECTURE.md**: **ADR-016** records that the sovereign-client selection must be decided before
+  the libraries are sourced and persisted next to the profile, and why ADR-013/014 were dead code until
+  now; change-log entry for the audit.
+- The four handover documents state which client the banner reports and that pinning
+  `PROFILE_PG_CLIENT_IMAGE` disables both the sovereign default and the bundle substitution.
+
 ### Fixed — audit minors
 
 - **The containerized advisory lock reached the database its own way.** `db_lock.sh` hand-built a

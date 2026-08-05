@@ -69,11 +69,16 @@ Starting from **v3.9.7** the migration node **no longer needs installed `psql` /
 (`scripts/lib/container_runtime.sh`):
 
 - if the binary is present on the host — it runs on the host (the previous fast path, preserving `-Fd`/`-j`);
-- if the binary is absent — the invocation is executed **inside a container image** (the
-  `PROFILE_PG_CLIENT_IMAGE` variable, `postgres:16` by default) over the host network `--network=host`, with
-  the DB password passed through (`PGPASSWORD`) and backup files bind-mounted at the same path
-  (`PG_CLIENT_MOUNT`, relabel `:z` for SELinux). The `--user` flag is added only on an explicitly
-  rootful engine.
+- if the binary is absent — the invocation is executed **inside a container image**
+  (`PROFILE_PG_CLIENT_IMAGE`) over the host network `--network=host`, with the DB password forwarded
+  by NAME (`-e PGPASSWORD`, so the value never lands in the engine's argv) and backup files
+  bind-mounted at the same path (`PG_CLIENT_MOUNT`, relabel `:z` for SELinux). The `--user` flag is
+  added only on an explicitly rootful engine.
+
+  **The default is the sovereign per-OS image** `<namespace>:<os>-pgclient-<major>` (ADR-013); the
+  major is chosen with `KC_PG_CLIENT_MAJOR` (17 by default). The same image travels inside the
+  air-gap bundle, so an isolated node gets its client from the delivery itself. Upstream
+  `postgres:<major>` remains the override and the fallback when the sovereign image is not on the node.
 
 **The per-DB advisory lock has also become autonomous.** The cross-host "one migration per one
 database" lock (ADR-011) is now held via a container when `psql` is absent on the host — **without
@@ -721,7 +726,9 @@ export PROFILE_KC_DEPLOYMENT_MODE=kubernetes
 
 # Container-hop / pg-client autonomy (v3.9.7)
 export CONTAINER_RUNTIME=docker
-export PROFILE_PG_CLIENT_IMAGE=postgres:16   # major ≥ DB server major
+# PROFILE_PG_CLIENT_IMAGE — OVERRIDE only. Unset, the tool uses the sovereign per-OS client
+# (and the one shipped in the bundle). Setting it switches both of those off.
+# export PROFILE_PG_CLIENT_IMAGE=postgres:17   # major ≥ DB server major
 # PG_CLIENT_MOUNT — bind-mount path for backup files into the pg-client container
 
 # Migration options

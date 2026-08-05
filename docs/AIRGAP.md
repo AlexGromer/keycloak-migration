@@ -32,7 +32,8 @@ scripts/build_matrix.sh --publish       # plan including GHCR push lines
 
 ```bash
 cr login <your-sovereign-registry>      # podman/docker login, out-of-band
-scripts/build_matrix.sh --build         # build all cells -> dist/kc-<os>-<ver>.tar (+ .sha256)
+scripts/build_matrix.sh --build --pgclient   # all cells -> dist/kc-<os>-<ver>.tar (+ .sha256)
+                                             # --pgclient ALSO builds dist/kc-<os>-pgclient-<major>.tar
 # matrix: {16.1.1,24.0.5,25.0.6,26.6.3} × {astra,redos}; KC16=JDK11/WildFly, rest=JDK21/Quarkus
 ```
 Each cell builds FROM the configured base (or, with `USE_IMAGE_*`, pulls + retags a
@@ -40,7 +41,8 @@ branded image), saves to a tar, and writes a `.sha256`.
 
 ## 3. Transfer
 
-Copy `dist/*.tar` + `dist/*.tar.sha256` (individual images), or the per-OS
+Copy `dist/*.tar` + `dist/*.tar.sha256` — **including `kc-<os>-pgclient-<major>.tar`**, without which
+an air-gapped node that has no host `psql` cannot back up, reconcile or verify — or the per-OS
 `dist/kc-<os>-bundle.tar.xz` bundle produced by the CI workflow (§5), onto offline media.
 **Verify on the air-gapped side before loading:**
 ```bash
@@ -89,7 +91,10 @@ runs steps 2–3, then packs a **per-OS air-gap bundle** and (with `publish`) at
 - **`build_bundle.sh --os <os> --go`** — packs `dist/kc-<os>-bundle.tar.xz`, carrying the four hop
   tarballs **plus** `kc-<os>-pgclient-<major>.tar`. `migrate_oneshot.sh --source bundle` loads them
   all, so an air-gapped node with **no host psql** still runs pg_dump/pg_restore/psql from the
-  bundled client (`PROFILE_PG_CLIENT_IMAGE`). A bundle without pg-client stays valid — the node
+  bundled client (`PROFILE_PG_CLIENT_IMAGE`). A bundle without pg-client stays valid ONLY for a node that HAS host `psql`/`pg_dump`/`pg_restore`;
+  on a truly isolated node without them the migration stops at preflight with
+  `Tool missing: psql`. Check the `pg-client` line in the run banner to see which client was selected.
+  The node
   falls back to host psql.
 - **Per-OS prereleases:** `astra → alsebased-images-<run_id>`, `redos → redosbased-images-<run_id>`,
   each carrying only its own bundle + `.sha256`.

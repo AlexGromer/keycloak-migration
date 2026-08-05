@@ -1,6 +1,6 @@
 # Rootless & non-root operation
 
-The tool is designed to run with **no root anywhere**:
+The tool is designed to run with **no root anywhere on the migration path**:
 
 1. **Non-root inside every container.** The Keycloak hop images and the sovereign pg-client image
    both run as **uid 1000** (`USER 1000`) — `psql`/`pg_dump`/`pg_restore` and the migrating Keycloak
@@ -12,6 +12,11 @@ The tool is designed to run with **no root anywhere**:
 
 On the sovereign targets (ALSE / RED OS) **Podman is the default engine and is rootless-native** —
 this is the recommended, zero-setup path.
+
+**Where root is still involved** (once, and outside the migration): installing a rootless Docker
+daemon needs `uidmap`, `slirp4netns`, `fuse-overlayfs`, `rootlesskit` and a subuid/subgid range, all
+of which are root-level package/OS operations — see §Docker below. Rootless Podman needs none of
+that. After the setup, no migration step asks for root on the host or inside a container.
 
 ## Engines
 

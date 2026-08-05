@@ -70,10 +70,15 @@ scripts/migrate_oneshot.sh --target 26 --os astra --db-host <pg-host> --source p
 
 - если бинарник есть на хосте — он запускается на хосте (прежний быстрый путь, сохраняет `-Fd`/`-j`);
 - если бинарника нет — вызов исполняется **внутри контейнерного образа** (переменная
-  `PROFILE_PG_CLIENT_IMAGE`, по умолчанию `postgres:16`) поверх host-сети `--network=host`, с
-  проброшенным паролем БД (`PGPASSWORD`) и bind-монтированием файлов бэкапа тем же путём
-  (`PG_CLIENT_MOUNT`, relabel `:z` для SELinux). Флаг `--user` добавляется только на явно
-  rootful-движке.
+  `PROFILE_PG_CLIENT_IMAGE`) поверх host-сети `--network=host`, с проброшенным паролем БД
+  (`PGPASSWORD` передаётся по имени, значение не попадает в argv движка) и bind-монтированием файлов
+  бэкапа тем же путём (`PG_CLIENT_MOUNT`, relabel `:z` для SELinux). Флаг `--user` добавляется только
+  на явно rootful-движке.
+
+  **По умолчанию это суверенный per-OS образ** `<namespace>:<ос>-pgclient-<мажор>` (ADR-013), мажор
+  задаётся `KC_PG_CLIENT_MAJOR` (по умолчанию 17). Он же едет внутри офлайн-бандла, поэтому
+  изолированный узел получает клиента из самой поставки. Апстримный `postgres:<мажор>` остаётся
+  переопределением и запасным вариантом: он подставляется, если суверенного образа на узле нет.
 
 **Advisory-lock по БД тоже стал автономным.** Межхостовая блокировка «одна миграция на одну
 базу» (ADR-011) теперь удерживается через контейнер, когда `psql` на хосте отсутствует — **без
@@ -91,11 +96,19 @@ FROM базы ALSE / RED OS) — см. `ARCHITECTURE.md`.
 
 ```bash
 export PROFILE_DB_PASSWORD='...'
-export PROFILE_PG_CLIENT_IMAGE=postgres:17   # мажор ≥ мажора сервера БД
-scripts/migrate_oneshot.sh --target 26 --os astra --source preloaded \
-  --image-ns ghcr.io/<you>/keycloak-migration \
+scripts/migrate_oneshot.sh --target 26 --os astra --source bundle \
+  --bundle dist/kc-astra-bundle.tar.xz \
   --db-host <db-host> --db-port 5432 --db-name keycloak --db-user keycloak --go
 ```
+
+Пин `PROFILE_PG_CLIENT_IMAGE` здесь **не нужен и вреден**: он выключает суверенный дефолт и подмену
+образа из бандла. Задавайте его только когда сознательно берёте другой клиент:
+
+```bash
+export PROFILE_PG_CLIENT_IMAGE=postgres:17   # мажор ≥ мажора сервера БД
+```
+
+Какой клиент выбран — видно в баннере запуска (строка `pg-client`).
 
 Бэкап, reconcile-запросы и advisory-lock — всё выполняется внутри pg-client-контейнера автоматически.
 
@@ -721,7 +734,9 @@ export PROFILE_KC_DEPLOYMENT_MODE=kubernetes
 
 # Container-hop / автономность pg-client (v3.9.7)
 export CONTAINER_RUNTIME=docker
-export PROFILE_PG_CLIENT_IMAGE=postgres:16   # мажор ≥ мажора сервера БД
+# PROFILE_PG_CLIENT_IMAGE — ТОЛЬКО переопределение. Без него берётся суверенный per-OS клиент
+# (и тот, что приехал в бандле). Заданное значение выключает и то и другое.
+# export PROFILE_PG_CLIENT_IMAGE=postgres:17   # мажор ≥ мажора сервера БД
 # PG_CLIENT_MOUNT — путь bind-монтирования файлов бэкапа в pg-client-контейнер
 
 # Опции миграции
