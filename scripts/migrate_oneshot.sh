@@ -469,6 +469,22 @@ acquire_images() {
             fi
             # Clean the extracted tars (keep only loaded images).
             [[ "$ONESHOT_DRY" == "true" ]] || rm -rf "$xdir"
+            # A bundle's tars carry the tags they were BUILT with. If this run resolves hop images by
+            # a different name (--image-ref-template, or a custom/empty KC_IMAGE_NS), every load
+            # succeeds and the FIRST HOP then dies on a missing image — after the advisory lock and
+            # the first backup. Assert it here, exactly as --source preloaded already does.
+            if [[ "$ONESHOT_DRY" != "true" ]]; then
+                for v in "${HOP_ARR[@]}"; do
+                    ref="$(_os_image_ref "$v")"
+                    cr image inspect "$ref" >/dev/null 2>&1 && continue
+                    log_error "the bundle loaded, but the image this run would start is absent: $ref"
+                    log_error "  The bundle carries its images under the tags they were built with;"
+                    log_error "  your --image-ref-template / KC_IMAGE_NS resolves to a different name."
+                    log_error "  Images the bundle just loaded:"
+                    cr images --format '{{.Repository}}:{{.Tag}}' 2>/dev/null | grep -- "-${v}\$" | sed 's/^/    /' >&2
+                    exit 1
+                done
+            fi
             ;;
         preloaded)
             for v in "${HOP_ARR[@]}"; do
@@ -553,6 +569,14 @@ if [[ -z "$_PG_CLIENT_IMAGE_EXPLICIT" && "$ONESHOT_DRY" != "true" ]] \
     log_warn "pg-client ${PROFILE_PG_CLIENT_IMAGE} is not on this node — falling back to postgres:16"
     PROFILE_PG_CLIENT_IMAGE="postgres:16"
     export PROFILE_PG_CLIENT_IMAGE
+fi
+
+# The profile is written BEFORE acquisition, so its pg-client sidecar still holds the pre-acquisition
+# default — a bundle carrying a non-default major (kc-<os>-pgclient-19.tar), or the fallback above,
+# would leave `verify --profile` pointing at an image this node never got. Refresh it with what the
+# run actually resolved.
+if [[ "$ONESHOT_DRY" != "true" && -n "${PROFILE_NAME:-}" && -d "${PROFILE_DIR:-}" ]]; then
+    printf '%s\n' "$PROFILE_PG_CLIENT_IMAGE" > "${PROFILE_DIR}/${PROFILE_NAME}.pg-client"
 fi
 
 # Hand off to the migration tool (non-interactive). PROFILE_CONTAINER_IMAGE_REF +

@@ -111,4 +111,22 @@ assert_contains "$pgc_major" "astra-pgclient-18" "KC_PG_CLIENT_MAJOR selects the
 pgc_pin="$(PROFILE_PG_CLIENT_IMAGE=postgres:16 PROFILE_DIR="$TMPD" timeout 60 bash "$ONESHOT" --target 26 --os astra --db-host db --dry-run </dev/null 2>&1 || true)"
 assert_contains "$pgc_pin" "pg-client   : postgres:16 (pinned)" "an explicit pin still wins, and says so"
 
+# The profile (and its pg-client sidecar) is written BEFORE acquisition, so the sidecar must be
+# refreshed AFTER it — otherwise a bundle carrying a non-default major (kc-<os>-pgclient-19.tar), or
+# the postgres:16 fallback, leaves `verify --profile` pointing at an image this node never received.
+acq_line="$(grep -n '^acquire_images$' "$ONESHOT" | tail -1 | cut -d: -f1)"
+sid_line="$(grep -n 'PROFILE_NAME}.pg-client' "$ONESHOT" | tail -1 | cut -d: -f1)"
+assert_true "[ -n '$acq_line' ] && [ -n '$sid_line' ] && [ '$sid_line' -gt '$acq_line' ]" \
+    "the pg-client sidecar is refreshed AFTER acquisition (records what the run actually resolved)"
+
+describe "F2: --source bundle asserts the hop images it loaded are the ones this run will START"
+# A bundle's tars carry the tags they were BUILT with. With a custom --image-ref-template (or an
+# empty KC_IMAGE_NS) every load succeeds and the FIRST HOP then dies on a missing image — after the
+# advisory lock and the first backup. --source preloaded always asserted this; --source bundle did not.
+bundle_branch="$(sed -n '/^        bundle)/,/^        preloaded)/p' "$ONESHOT")"
+assert_true "printf '%s' \"\$bundle_branch\" | grep -q 'cr image inspect'" \
+    "the bundle branch verifies each hop ref resolves locally after loading"
+assert_true "printf '%s' \"\$bundle_branch\" | grep -q 'image-ref-template'" \
+    "and the failure names the setting that caused the mismatch"
+
 test_report
