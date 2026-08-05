@@ -416,7 +416,10 @@ echo "   image ref   : ${PROFILE_CONTAINER_IMAGE_REF}"
 echo "   acquisition : ${SRC}"
 echo "   pg-client   : ${PROFILE_PG_CLIENT_IMAGE}$([[ -n "$_PG_CLIENT_IMAGE_EXPLICIT" ]] && echo ' (pinned)')"
 echo "   database    : ${DB_USER}@${DB_HOST}:${DB_PORT}/${DB_NAME}$([[ "$DB_SCHEMA" != "public" ]] && echo " (schema: ${DB_SCHEMA})")"
-echo "   work dir    : ${ONESHOT_WORK_DIR} $([[ "$ONESHOT_WORK_DIR_OWNED" == "true" ]] && echo '(temp, auto-removed)' || echo '(yours — never deleted)')"
+# A live run ENDS in `exec`, which replaces this process — EXIT traps do not run, so an auto-created
+# work dir is NOT cleaned up, and it holds the backups. Saying "auto-removed" there was a lie in the
+# one case where it matters: the operator needs to know where the backups are.
+echo "   work dir    : ${ONESHOT_WORK_DIR} $(if [[ "$ONESHOT_WORK_DIR_OWNED" != "true" ]]; then echo '(yours — never deleted)'; elif [[ "$ONESHOT_DRY" == "true" ]]; then echo '(temp, auto-removed)'; else echo '(temp, KEPT — it holds your backups; pass --work-dir to choose the location)'; fi)"
 echo "   free space  : $(df -BG "$ONESHOT_WORK_DIR" 2>/dev/null | tail -1 | awk '{print $4}') (preflight MEASURES what the backups need)"
 echo "   profile     : ${PROFILE_NAME} (in ${PROFILE_DIR})"
 echo "=============================================================="

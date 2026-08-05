@@ -115,6 +115,16 @@ profile_load() {
 
     # Container runtime / image acquisition settings (v3.6 — podman/run support)
     export PROFILE_CONTAINER_RUNTIME=$(parse_yaml_value "runtime" "$profile_file")
+    # …and actually USE it. cr_detect resolves the engine at source time and is idempotent, so the
+    # profile's `runtime:` field never took effect: a profile written for podman ran on docker,
+    # which then does not see the images the other engine holds. Only when the caller pinned nothing.
+    if [[ -z "${_KC_RUNTIME_PINNED:-}" && -n "${PROFILE_CONTAINER_RUNTIME:-}" ]]; then
+        export CONTAINER_RUNTIME="$PROFILE_CONTAINER_RUNTIME"
+    fi
+    # The networks the migration used. Without them a later verify/rollback put its containers on the
+    # default network, where a DB addressed by container name (rootless docker) does not resolve.
+    export PROFILE_KC_RUN_NETWORK="${PROFILE_KC_RUN_NETWORK:-$(parse_yaml_value "run_network" "$profile_file")}"
+    export PROFILE_PG_CLIENT_NETWORK="${PROFILE_PG_CLIENT_NETWORK:-$(parse_yaml_value "pg_client_network" "$profile_file")}"
     # v3.9: image_ref / image_tar / base_image carry a ':' (registry refs) or a filesystem
     # path that the flat YAML parser CANNOT represent (parse_yaml_value truncates at the
     # last ':'). So a value pre-set in the ENVIRONMENT WINS over the YAML value — this lets
@@ -247,6 +257,8 @@ EOF
     pull_policy: ${PROFILE_CONTAINER_PULL_POLICY:-IfNotPresent}
     runtime: ${PROFILE_CONTAINER_RUNTIME:-}
     acquisition: ${PROFILE_CONTAINER_ACQUISITION:-pull}
+    run_network: ${PROFILE_KC_RUN_NETWORK:-}
+    pg_client_network: ${PROFILE_PG_CLIENT_NETWORK:-}
 EOF
         # image_ref carries ':' (e.g. ghcr.io/ns/img:astra-{version}) which the flat YAML parser
         # truncates, so it CANNOT live in the profile. Persist it to a sidecar file that

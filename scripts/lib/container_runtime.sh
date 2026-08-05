@@ -22,6 +22,11 @@
 [[ -n "${_CONTAINER_RUNTIME_SH:-}" ]] && return 0
 _CONTAINER_RUNTIME_SH=1
 
+# Did the CALLER pin the engine? cr_detect runs at source time and is idempotent, so by the time a
+# profile is read CONTAINER_RUNTIME is always set and the profile's `runtime:` field could never take
+# effect. Captured here, while the question is still answerable; profile_load consults it.
+export _KC_RUNTIME_PINNED="${CONTAINER_RUNTIME:+set}"
+
 # ----------------------------------------------------------------------------
 # Logging fallbacks — these are normally provided by the orchestrator. Define
 # no-op-ish shims so this lib is independently sourceable and testable.
@@ -220,6 +225,10 @@ pg_client() {
 
     local -a args=("$@") pgopts=()
     local pgpass="${PGPASSWORD:-${PROFILE_DB_PASSWORD:-}}"
+    # Exported so the launches below can pass it by NAME (-e PGPASSWORD). Passing "-e PGPASSWORD=<value>"
+    # puts the cleartext password in the engine client's argv — visible in `ps` and /proc/<pid>/cmdline
+    # to every user on the box. The host fast path never exposed it; the container path did.
+    export PGPASSWORD="$pgpass"
     local image="${PROFILE_PG_CLIENT_IMAGE:-postgres:16}"
     # Forward PGOPTIONS so a non-public schema (search_path) reaches the container psql as it does a host one.
     [[ -n "${PGOPTIONS:-}" ]] && pgopts=(-e PGOPTIONS="$PGOPTIONS")
@@ -227,6 +236,8 @@ pg_client() {
     # Network. Default host networking so the container reaches a host-local DB. Under ROOTLESS DOCKER
     # --network=host is the rootless daemon's own namespace (NOT the machine's), so rewrite a loopback
     # `-h` to host.docker.internal on the bridge. Rootless podman / rootful are untouched.
+    # The DECISION lives in _cr_db_net_rewrite so every container that talks to the database makes it
+    # the same way (db_lock builds its own `cr run` and used to skip this entirely).
     local -a netargs=(--network="${PROFILE_PG_CLIENT_NETWORK:-host}")
     if [[ "${PROFILE_PG_CLIENT_NETWORK:-host}" == "host" && "${CONTAINER_RUNTIME:-}" == "docker" ]] && cr_is_rootless; then
         local _i
@@ -263,7 +274,7 @@ pg_client() {
             esac
         done
         if [[ -n "$of" ]]; then
-            cr run --rm "${netargs[@]}" -e HOME=/tmp -e PGPASSWORD="$pgpass" "${pgopts[@]}" \
+            cr run --rm "${netargs[@]}" -e HOME=/tmp -e PGPASSWORD "${pgopts[@]}" \
                 "$image" pg_dump "${a2[@]}" > "$of"
             return $?
         fi
@@ -271,7 +282,7 @@ pg_client() {
     if [[ "$tool" == "pg_restore" ]]; then
         local last="${args[$((${#args[@]} - 1))]:-}"
         if [[ -n "$last" && "$last" != -* && -f "$last" ]]; then   # a single-file archive, not a dir
-            cr run --rm -i "${netargs[@]}" -e HOME=/tmp -e PGPASSWORD="$pgpass" "${pgopts[@]}" \
+            cr run --rm -i "${netargs[@]}" -e HOME=/tmp -e PGPASSWORD "${pgopts[@]}" \
                 "$image" pg_restore "${args[@]:0:$((${#args[@]} - 1))}" < "$last"
             return $?
         fi
@@ -286,7 +297,7 @@ pg_client() {
             esac
         done
         if [[ -n "$sf" && -f "$sf" ]]; then
-            cr run --rm -i "${netargs[@]}" -e HOME=/tmp -e PGPASSWORD="$pgpass" "${pgopts[@]}" \
+            cr run --rm -i "${netargs[@]}" -e HOME=/tmp -e PGPASSWORD "${pgopts[@]}" \
                 "$image" psql "${a2[@]}" < "$sf"
             return $?
         fi
@@ -306,10 +317,31 @@ pg_client() {
     fi
     cr run --rm -i "${netargs[@]}" \
         "${userns[@]}" -e HOME=/tmp \
-        -e PGPASSWORD="$pgpass" \
+        -e PGPASSWORD \
         "${pgopts[@]}" \
         "${mounts[@]}" \
         "$image" "$tool" "${args[@]}"
+}
+
+# _cr_db_net_rewrite <db-host> — the ONE place that decides how a container reaches the database.
+# Sets _CR_DB_HOST (possibly rewritten) and the _CR_DB_NETARGS array. Under rootless DOCKER with host
+# networking, a loopback host is the rootless daemon's own namespace and not the machine's, so it is
+# rewritten to host.docker.internal on the bridge. pg_client does this inline for its argv; db_lock,
+# which builds its own `cr run`, called nothing at all — so the advisory lock could not reach a DB the
+# rest of the tool reached fine.
+_cr_db_net_rewrite() {
+    local host="${1:-}"
+    _CR_DB_HOST="$host"
+    _CR_DB_NETARGS=(--network="${PROFILE_PG_CLIENT_NETWORK:-host}")
+    if [[ "${PROFILE_PG_CLIENT_NETWORK:-host}" == "host" && "${CONTAINER_RUNTIME:-}" == "docker" ]] \
+       && cr_is_rootless && _cr_is_loopback "$host"; then
+        _CR_DB_HOST="host.docker.internal"
+        _CR_DB_NETARGS=(--network=bridge --add-host "host.docker.internal:host-gateway")
+        if [[ -z "${_KC_LOOPBACK_REWRITE_LOGGED:-}" ]]; then
+            log_info "rootless docker: DB loopback rewritten to host.docker.internal (host-gateway)" >&2
+            _KC_LOOPBACK_REWRITE_LOGGED=1
+        fi
+    fi
 }
 
 pg_client_available() {

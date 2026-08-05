@@ -108,13 +108,24 @@ kc_db_lock_acquire() {
         # run cannot share our PID). If a daemon-orphaned one still held the advisory lock, removing
         # it drops that connection so Postgres releases the lock and this run can proceed.
         cr rm -f "$_KC_DBLOCK_CONTAINER" >/dev/null 2>&1 || true
+        # Reach the database the SAME way every other container does: under rootless docker a loopback
+        # host belongs to the daemon's namespace, not the machine's (see _cr_db_net_rewrite). This
+        # transport used to hardcode --network=host and the raw host, so the lock could not connect to
+        # a database the rest of the tool connected to fine.
+        _cr_db_net_rewrite "${PROFILE_DB_HOST:-localhost}"
+        # Pass the password by NAME (-e PGPASSWORD), not by value: a value here lands in the engine
+        # client's argv, i.e. in `ps` output and /proc/<pid>/cmdline. Forward PGOPTIONS too, so a
+        # non-public schema's search_path reaches the lock connection like every other query.
+        local -a _dblock_env=(-e PGPASSWORD)
+        [[ -n "${PGOPTIONS:-}" ]] && _dblock_env+=(-e PGOPTIONS)
+        export PGPASSWORD="${PROFILE_DB_PASSWORD:-}"
         coproc _KC_DBLOCK_CP { \
             exec "${CONTAINER_RUNTIME:-docker}" run --rm -i \
                 --name "$_KC_DBLOCK_CONTAINER" \
-                --network="${PROFILE_PG_CLIENT_NETWORK:-host}" \
-                -e PGPASSWORD="${PROFILE_DB_PASSWORD:-}" \
+                "${_CR_DB_NETARGS[@]}" \
+                "${_dblock_env[@]}" \
                 "${PROFILE_PG_CLIENT_IMAGE:-postgres:16}" \
-                psql -h "${PROFILE_DB_HOST:-localhost}" \
+                psql -h "$_CR_DB_HOST" \
                     -p "${PROFILE_DB_PORT:-5432}" \
                     -U "${PROFILE_DB_USER:-keycloak}" \
                     -d "${PROFILE_DB_NAME:-keycloak}" \

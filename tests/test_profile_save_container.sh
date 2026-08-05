@@ -118,4 +118,25 @@ profile_load "schematest" >/dev/null 2>&1
 assert_equals "fromenv" "${PROFILE_DB_SCHEMA:-}" "a pre-set env schema still wins"
 unset PROFILE_DB_SCHEMA PGOPTIONS
 
+
+describe "the engine and the networks round-trip through the profile"
+# cr_detect resolves the engine at SOURCE time and is idempotent, so the profile's `runtime:` never
+# took effect: a profile written for podman ran on docker, which cannot see the other engine's images.
+# The networks were not persisted at all, so a later verify/rollback lost a container-name DB topology.
+export PROFILE_KC_RUN_NETWORK="kc-net" PROFILE_PG_CLIENT_NETWORK="kc-net" PROFILE_CONTAINER_RUNTIME="podman"
+profile_save "nettest" >/dev/null
+netyaml="$(<"$PROFILE_DIR/nettest.yaml")"
+assert_contains "$netyaml" "run_network: kc-net"       "the Keycloak network is written"
+assert_contains "$netyaml" "pg_client_network: kc-net" "the pg-client network is written"
+unset PROFILE_KC_RUN_NETWORK PROFILE_PG_CLIENT_NETWORK CONTAINER_RUNTIME
+_KC_RUNTIME_PINNED=""
+profile_load "nettest" >/dev/null 2>&1
+assert_equals "kc-net" "${PROFILE_KC_RUN_NETWORK:-}"    "profile_load restores the Keycloak network"
+assert_equals "kc-net" "${PROFILE_PG_CLIENT_NETWORK:-}" "profile_load restores the pg-client network"
+assert_equals "podman" "${CONTAINER_RUNTIME:-}"         "an unpinned engine follows the profile's runtime"
+export CONTAINER_RUNTIME=docker; _KC_RUNTIME_PINNED="set"
+profile_load "nettest" >/dev/null 2>&1
+assert_equals "docker" "${CONTAINER_RUNTIME:-}"         "a caller-pinned engine still wins"
+unset PROFILE_CONTAINER_RUNTIME _KC_RUNTIME_PINNED
+
 test_report

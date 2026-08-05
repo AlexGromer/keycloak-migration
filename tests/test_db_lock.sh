@@ -147,4 +147,36 @@ else
     skip_test "no reachable PostgreSQL (set KC_TESTDB_* to enable the advisory-lock cases)"
 fi
 
+
+describe "the containerized lock reaches the DB the same way every other container does"
+# db_lock built its own `cr run` with a hardcoded --network=host and the raw host, so under rootless
+# docker (where a loopback host is the daemon's own namespace) the advisory lock could not connect to
+# a database the rest of the tool connected to fine. It also put the password in the engine's argv
+# (visible in `ps`) and dropped PGOPTIONS, so a non-public schema was lost on the lock connection.
+DBLOCK_LIB="$PROJECT_ROOT/scripts/lib/db_lock.sh"
+assert_true "grep -q '_cr_db_net_rewrite' '$DBLOCK_LIB'" \
+    "the lock uses the shared network/loopback decision"
+assert_true "grep -q '_CR_DB_NETARGS' '$DBLOCK_LIB' && grep -q '_CR_DB_HOST' '$DBLOCK_LIB'" \
+    "…and launches with the host and net args it returned"
+assert_true "! grep -qE '\\-e PGPASSWORD=' '$DBLOCK_LIB'" \
+    "the password is no longer passed by VALUE in the engine argv"
+assert_true "grep -q 'PGOPTIONS' '$DBLOCK_LIB'" \
+    "PGOPTIONS (a non-public search_path) reaches the lock connection"
+
+describe "_cr_db_net_rewrite: one decision, shared by every DB container"
+source "$PROJECT_ROOT/scripts/lib/container_runtime.sh" 2>/dev/null || true
+if declare -F _cr_db_net_rewrite >/dev/null 2>&1; then
+    cr() { case "$1" in info) echo 'name=rootless' ;; *) echo "$@" ;; esac; }
+    export CONTAINER_RUNTIME=docker; _KC_ROOTLESS=""; _KC_LOOPBACK_REWRITE_LOGGED=""
+    _cr_db_net_rewrite 127.0.0.1
+    assert_equals "host.docker.internal" "${_CR_DB_HOST:-}" "rootless docker: a loopback DB host is rewritten"
+    assert_contains "${_CR_DB_NETARGS[*]}" "host-gateway" "…onto the bridge with host-gateway"
+    _KC_ROOTLESS=""
+    _cr_db_net_rewrite db.corp.local
+    assert_equals "db.corp.local" "${_CR_DB_HOST:-}" "a routable host is left alone"
+    assert_contains "${_CR_DB_NETARGS[*]}" "network=host" "…and keeps host networking"
+else
+    skip_test "_cr_db_net_rewrite not available"
+fi
+
 test_report
