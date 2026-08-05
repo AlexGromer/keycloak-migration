@@ -194,4 +194,16 @@ assert_equals "0" "$run_leak" \
 assert_contains "$dist_src" "port_args" "published ports are captured"
 assert_contains "$dist_src" "nets"      "networks are captured"
 
+
+describe "rollback loads its PROFILE (recovery must work on an autonomous node)"
+# cmd_rollback used to be dispatched with NO argument and only read the state file, so PROFILE_DB_*
+# and the .image-ref / .pg-client sidecars were never restored: on a node with no host psql the
+# restore looked for postgres:16 instead of the sovereign client the migration had used — the
+# documented recovery path, unusable exactly when it is needed.
+MIGRATE_V3="$PROJECT_ROOT/scripts/migrate_keycloak_v3.sh"
+assert_true "grep -qF 'cmd_rollback \"\$PROFILE_NAME\"' '$MIGRATE_V3'" \
+    "the dispatcher passes the profile name to cmd_rollback"
+assert_true "sed -n '/^cmd_rollback()/,/^}/p' '$MIGRATE_V3' | grep -q 'load_profile_or_discover'" \
+    "cmd_rollback loads the profile before restoring"
+
 test_report
