@@ -101,4 +101,21 @@ MIGRATE_V3="$PROJECT_ROOT/scripts/migrate_keycloak_v3.sh"
 assert_true "grep -A1 'auto_rotate_backups \"\\\$backup_dir\"' '$MIGRATE_V3' | grep -q '||'" \
     "the rotation call is guarded, so an advisory warning cannot set the exit status"
 
+
+describe "the DB schema round-trips through the profile (verify/rollback on a non-public schema)"
+# migrate_oneshot resolved --db-schema into PROFILE_DB_SCHEMA + PGOPTIONS, but nothing carried it into
+# the profile: a later `verify` / `rollback --profile` queried `public` on a database whose Keycloak
+# tables live elsewhere.
+export PROFILE_DB_SCHEMA="qkeycloak"
+profile_save "schematest" >/dev/null
+assert_contains "$(<"$PROFILE_DIR/schematest.yaml")" "schema: qkeycloak" "the schema is written to the profile"
+unset PROFILE_DB_SCHEMA PGOPTIONS
+profile_load "schematest" >/dev/null 2>&1
+assert_equals "qkeycloak" "${PROFILE_DB_SCHEMA:-}" "profile_load restores the schema"
+assert_contains "${PGOPTIONS:-}" "search_path=qkeycloak,public" "and re-establishes the search_path the tool relies on"
+export PROFILE_DB_SCHEMA="fromenv"
+profile_load "schematest" >/dev/null 2>&1
+assert_equals "fromenv" "${PROFILE_DB_SCHEMA:-}" "a pre-set env schema still wins"
+unset PROFILE_DB_SCHEMA PGOPTIONS
+
 test_report

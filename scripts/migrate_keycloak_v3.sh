@@ -2319,7 +2319,7 @@ execute_migration() {
             "$PROFILE_DB_HOST" \
             "$PROFILE_DB_PORT" \
             "$PROFILE_DB_USER" \
-            "$PROFILE_DB_PASSWORD" \
+            "${PROFILE_DB_PASSWORD:-${PGPASSWORD:-${DB_PASSWORD:-}}}" \
             "$PROFILE_DB_NAME" \
             "$backup_dir" \
             "$kc_url" \

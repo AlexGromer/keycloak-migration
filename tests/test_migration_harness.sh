@@ -139,4 +139,15 @@ assert_false "echo \"\$PLAN\" | grep -qE 'KC_DB_PASSWORD=[^*]'" \
 
 # ============================================================================
 rm -rf "$HARNESS_WORK_DIR"
+
+describe "the harness puts the pg-client on the SAME bridge as its throwaway database"
+# The harness DB is reachable only by container name on kc-harness-net (no host port is published).
+# Without PROFILE_PG_CLIENT_NETWORK the client defaulted to --network=host, where that name does not
+# resolve — so the autonomous configuration the harness exists to exercise could not back up or verify.
+HARNESS="$PROJECT_ROOT/scripts/harness/run_migration_harness.sh"
+assert_true "grep -q 'export PROFILE_PG_CLIENT_NETWORK=' '$HARNESS'" \
+    "PROFILE_PG_CLIENT_NETWORK is exported"
+assert_true "grep -qF 'export PROFILE_PG_CLIENT_NETWORK=\"\$HARNESS_NET\"' '$HARNESS'" \
+    "…on the same HARNESS_NET as the Keycloak container"
+
 test_report
