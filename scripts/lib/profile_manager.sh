@@ -119,6 +119,13 @@ profile_load() {
         local _ref_sidecar="${profile_file%.yaml}.image-ref"
         [[ -f "$_ref_sidecar" ]] && export PROFILE_CONTAINER_IMAGE_REF="$(tr -d '[:space:]' < "$_ref_sidecar")"
     fi
+    # The pg-client image the migration resolved (sovereign, per-OS). Restore it unless the CALLER
+    # pinned one — a plain "is it empty?" test cannot be used here, because container_runtime.sh has
+    # already filled it with postgres:16 by the time any profile is loaded.
+    if [[ -z "${_KC_PG_CLIENT_PINNED:-}" ]]; then
+        local _pgc_sidecar="${profile_file%.yaml}.pg-client"
+        [[ -f "$_pgc_sidecar" ]] && export PROFILE_PG_CLIENT_IMAGE="$(tr -d '[:space:]' < "$_pgc_sidecar")"
+    fi
     export PROFILE_CONTAINER_IMAGE_TAR="${PROFILE_CONTAINER_IMAGE_TAR:-$(parse_yaml_value "image_tar" "$profile_file")}"
     export PROFILE_CONTAINER_ACQUISITION=$(parse_yaml_value "acquisition" "$profile_file")
     export PROFILE_CONTAINER_ACQUISITION="${PROFILE_CONTAINER_ACQUISITION:-pull}"
@@ -237,6 +244,13 @@ EOF
         # resolve the sovereign image and fell back to registry/image:version (no os-prefixed tag).
         if [[ -n "${PROFILE_CONTAINER_IMAGE_REF:-}" ]]; then
             printf '%s\n' "${PROFILE_CONTAINER_IMAGE_REF}" > "${profile_file%.yaml}.image-ref"
+        fi
+        # Same colon problem, same sidecar solution — and the same consequence if it is missing:
+        # a later `verify`/`rollback --profile` on a node with no host psql would look for
+        # postgres:16 (container_runtime.sh's fallback) instead of the sovereign client this
+        # migration actually used, and an air-gapped node has no postgres:16.
+        if [[ -n "${PROFILE_PG_CLIENT_IMAGE:-}" ]]; then
+            printf '%s\n' "${PROFILE_PG_CLIENT_IMAGE}" > "${profile_file%.yaml}.pg-client"
         fi
         [[ -n "${PROFILE_CONTAINER_IMAGE_TAR:-}" ]] && \
             printf '    image_tar: %s\n' "${PROFILE_CONTAINER_IMAGE_TAR}" >> "$profile_file"

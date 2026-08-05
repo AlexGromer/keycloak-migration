@@ -68,4 +68,37 @@ profile_load "reftest" >/dev/null 2>&1
 assert_equals 'override/img:{version}' "${PROFILE_CONTAINER_IMAGE_REF:-}" \
     "a pre-set env ref overrides the sidecar"
 
+describe "pg-client image round-trips through a sidecar (verify/rollback on a node with no host psql)"
+# Same ':' problem, and the same real consequence: without persistence a later
+# `verify`/`rollback --profile <name>` looks for postgres:16 — container_runtime.sh's fallback —
+# which an air-gapped node does not have, while the sovereign client it just migrated with sits
+# loaded and unreferenced.
+export PROFILE_PG_CLIENT_IMAGE='ghcr.io/alexgromer/keycloak-migration:astra-pgclient-17'
+profile_save "pgctest" >/dev/null
+assert_file_exists "$PROFILE_DIR/pgctest.pg-client" "pg-client sidecar written next to the profile"
+assert_equals 'ghcr.io/alexgromer/keycloak-migration:astra-pgclient-17' \
+    "$(cat "$PROFILE_DIR/pgctest.pg-client")" "sidecar holds the client image verbatim"
+
+# Reload with the environment in the state a real run is in: container_runtime.sh has already put
+# postgres:16 in the variable, and the caller pinned NOTHING (_KC_PG_CLIENT_PINNED empty).
+export PROFILE_PG_CLIENT_IMAGE='postgres:16'
+_KC_PG_CLIENT_PINNED=""
+profile_load "pgctest" >/dev/null 2>&1
+assert_equals 'ghcr.io/alexgromer/keycloak-migration:astra-pgclient-17' \
+    "${PROFILE_PG_CLIENT_IMAGE:-}" "unpinned: the profile's sovereign client is restored over the postgres:16 fallback"
+
+# A caller who DID pin one keeps it — the pin is captured before container_runtime.sh defaults it.
+export PROFILE_PG_CLIENT_IMAGE='myregistry/pg:17'
+_KC_PG_CLIENT_PINNED="set"
+profile_load "pgctest" >/dev/null 2>&1
+assert_equals 'myregistry/pg:17' "${PROFILE_PG_CLIENT_IMAGE:-}" "a caller's explicit pin overrides the sidecar"
+
+describe "a successful migration is never failed by the ADVISORY backup-rotation check"
+# auto_rotate_backups ends with monitor_backup_disk_space, which returns 1 below its 10GB advisory
+# threshold. Under `set -euo pipefail` a bare call aborted a COMPLETED migration with rc=1 right
+# after "Migration Complete!", skipping the audit record and the RESUME_SAFE cleanup.
+MIGRATE_V3="$PROJECT_ROOT/scripts/migrate_keycloak_v3.sh"
+assert_true "grep -A1 'auto_rotate_backups \"\\\$backup_dir\"' '$MIGRATE_V3' | grep -q '||'" \
+    "the rotation call is guarded, so an advisory warning cannot set the exit status"
+
 test_report

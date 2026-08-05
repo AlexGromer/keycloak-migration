@@ -89,4 +89,26 @@ pub_out="$(PROFILE_DIR="$TMPD" timeout 60 bash "$ONESHOT" --target 26 --os astra
     --dry-run </dev/null 2>&1 || true)"
 assert_true "! printf '%s' \"\$pub_out\" | grep -q 'schema:'" "public schema keeps the banner clean (no annotation)"
 
+describe "F2: pg-client image — the SOVEREIGN per-OS client is the default (air-gap regression)"
+# REGRESSION (found on a customer's air-gapped node): oneshot sources migrate_keycloak_v3.sh, which
+# pulls in container_runtime.sh, which defaults PROFILE_PG_CLIENT_IMAGE to postgres:16. The
+# "did the caller pin one?" probe used to run AFTER that source, so every run looked pinned — the
+# sovereign default never applied and `--source bundle` never repointed at the client it had just
+# loaded. Preflight then failed with "no postgres:16 image" while the sovereign client sat loaded
+# and unused. The pin must therefore be captured BEFORE that source.
+src_line="$(grep -n 'source .*scripts/migrate_keycloak_v3.sh' "$ONESHOT" | head -1 | cut -d: -f1)"
+pin_line="$(grep -n '^_PG_CLIENT_IMAGE_EXPLICIT=' "$ONESHOT" | head -1 | cut -d: -f1)"
+assert_true "[ -n '$pin_line' ] && [ -n '$src_line' ] && [ '$pin_line' -lt '$src_line' ]" \
+    "the pg-client pin is captured BEFORE the source that defaults it to postgres:16"
+
+pgc_out="$(PROFILE_DIR="$TMPD" timeout 60 bash "$ONESHOT" --target 26 --os astra --db-host db --dry-run </dev/null 2>&1 || true)"
+assert_contains "$pgc_out" "pg-client   : ghcr.io/alexgromer/keycloak-migration:astra-pgclient-17" \
+    "unpinned -> the sovereign per-OS client, not postgres:16"
+pgc_redos="$(PROFILE_DIR="$TMPD" timeout 60 bash "$ONESHOT" --target 25 --os redos --db-host db --dry-run </dev/null 2>&1 || true)"
+assert_contains "$pgc_redos" "redos-pgclient-17" "the default follows --os"
+pgc_major="$(KC_PG_CLIENT_MAJOR=18 PROFILE_DIR="$TMPD" timeout 60 bash "$ONESHOT" --target 26 --os astra --db-host db --dry-run </dev/null 2>&1 || true)"
+assert_contains "$pgc_major" "astra-pgclient-18" "KC_PG_CLIENT_MAJOR selects the client major"
+pgc_pin="$(PROFILE_PG_CLIENT_IMAGE=postgres:16 PROFILE_DIR="$TMPD" timeout 60 bash "$ONESHOT" --target 26 --os astra --db-host db --dry-run </dev/null 2>&1 || true)"
+assert_contains "$pgc_pin" "pg-client   : postgres:16 (pinned)" "an explicit pin still wins, and says so"
+
 test_report

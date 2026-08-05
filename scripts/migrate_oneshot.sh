@@ -116,6 +116,14 @@ if [[ -n "$_ONESHOT_ENV_FILE" ]]; then
     echo "[INFO] Loaded environment from $_ONESHOT_ENV_FILE"
 fi
 
+# Did the CALLER pin a pg-client image? This has to be answered HERE, before the source below:
+# sourcing migrate_keycloak_v3.sh pulls in container_runtime.sh, which defaults
+# PROFILE_PG_CLIENT_IMAGE to postgres:16 — after that the question is unanswerable, every run looks
+# "pinned", and BOTH the sovereign per-OS default and the `--source bundle` repoint below stop
+# firing. That is exactly what happened on an air-gapped node: the bundle loaded its sovereign
+# client, nothing pointed at it, and preflight failed with "no postgres:16 image".
+_PG_CLIENT_IMAGE_EXPLICIT="${PROFILE_PG_CLIENT_IMAGE:+set}"
+
 # SAFETY: only a scratch dir THIS SCRIPT creates is ever removed. A caller-supplied work dir
 # (--work-dir or ONESHOT_WORK_DIR) is NEVER deleted — it may hold DB backups from a previous
 # run, or be a real data directory. (Regression guard: an earlier version rm -rf'd it.)
@@ -368,8 +376,12 @@ fi
 # Remember whether the caller PINNED an image: a --source bundle load discovers the shipped major
 # from the bundle and (only if unpinned) repoints PROFILE_PG_CLIENT_IMAGE at exactly what it loaded,
 # so a bundle built with a non-default pg_client_major still works without setting KC_PG_CLIENT_MAJOR.
-_PG_CLIENT_IMAGE_EXPLICIT="${PROFILE_PG_CLIENT_IMAGE:+set}"
-: "${PROFILE_PG_CLIENT_IMAGE:=${IMAGE_NS}:${OS}-pgclient-${KC_PG_CLIENT_MAJOR:-17}}"
+# (_PG_CLIENT_IMAGE_EXPLICIT was captured at the top, before the source that defaults this.)
+if [[ -z "$_PG_CLIENT_IMAGE_EXPLICIT" ]]; then
+    # Assign outright, NOT ':=' — container_runtime.sh (sourced above) already put postgres:16 in
+    # the variable, so a ':=' default is a no-op and the sovereign client is never selected.
+    PROFILE_PG_CLIENT_IMAGE="${IMAGE_NS}:${OS}-pgclient-${KC_PG_CLIENT_MAJOR:-17}"
+fi
 export PROFILE_PG_CLIENT_IMAGE
 
 # One place builds a concrete ref for a hop; acquisition and the migration must agree on it.
@@ -394,6 +406,7 @@ echo "   os / target : ${OS} / ${TARGET} (full ${TARGET_FULL})"
 echo "   chain       : ${CURRENT} -> ${HOPS// / -> }"
 echo "   image ref   : ${PROFILE_CONTAINER_IMAGE_REF}"
 echo "   acquisition : ${SRC}"
+echo "   pg-client   : ${PROFILE_PG_CLIENT_IMAGE}$([[ -n "$_PG_CLIENT_IMAGE_EXPLICIT" ]] && echo ' (pinned)')"
 echo "   database    : ${DB_USER}@${DB_HOST}:${DB_PORT}/${DB_NAME}$([[ "$DB_SCHEMA" != "public" ]] && echo " (schema: ${DB_SCHEMA})")"
 echo "   work dir    : ${ONESHOT_WORK_DIR} $([[ "$ONESHOT_WORK_DIR_OWNED" == "true" ]] && echo '(temp, auto-removed)' || echo '(yours — never deleted)')"
 echo "   free space  : $(df -BG "$ONESHOT_WORK_DIR" 2>/dev/null | tail -1 | awk '{print $4}') (preflight MEASURES what the backups need)"
@@ -529,6 +542,18 @@ if [[ "$ONESHOT_DRY" != "true" && -z "${PROFILE_DB_PASSWORD:-}" ]]; then
 fi
 
 acquire_images
+
+# The sovereign client is the DEFAULT, not a demand: a node that never received it (older bundle,
+# --source pull/preloaded without it) but that does have the upstream fallback should migrate with
+# that rather than trip preflight over an image nobody has. Only when the caller pinned nothing, and
+# never in dry-run (nothing was loaded then). Announced, not silent.
+if [[ -z "$_PG_CLIENT_IMAGE_EXPLICIT" && "$ONESHOT_DRY" != "true" ]] \
+   && ! cr image inspect "$PROFILE_PG_CLIENT_IMAGE" >/dev/null 2>&1 \
+   && cr image inspect postgres:16 >/dev/null 2>&1; then
+    log_warn "pg-client ${PROFILE_PG_CLIENT_IMAGE} is not on this node — falling back to postgres:16"
+    PROFILE_PG_CLIENT_IMAGE="postgres:16"
+    export PROFILE_PG_CLIENT_IMAGE
+fi
 
 # Hand off to the migration tool (non-interactive). PROFILE_CONTAINER_IMAGE_REF +
 # PROFILE_DB_PASSWORD are already exported and survive profile_load (env precedence).

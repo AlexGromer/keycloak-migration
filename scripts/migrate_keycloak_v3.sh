@@ -23,6 +23,13 @@ LIB_DIR="$SCRIPT_DIR/lib"
 # shellcheck disable=SC2034  # PROJECT_ROOT kept for external/sourced use
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
+# Did the CALLER pin a pg-client image? Answer it HERE: container_runtime.sh (sourced two lines
+# down) defaults PROFILE_PG_CLIENT_IMAGE to postgres:16, after which the question is unanswerable.
+# profile_load needs the answer to decide whether a profile's recorded sovereign client may be
+# restored — without it, `verify`/`rollback --profile` on a node with no host psql looks for
+# postgres:16, which an air-gapped node does not have.
+export _KC_PG_CLIENT_PINNED="${PROFILE_PG_CLIENT_IMAGE:+set}"
+
 # Source libraries
 # v3.7: container runtime abstraction (podman/docker) — source FIRST (other libs use `cr`)
 [[ -f "$LIB_DIR/container_runtime.sh" ]] && source "$LIB_DIR/container_runtime.sh"
@@ -2479,7 +2486,13 @@ execute_migration() {
         local max_age_days="${PROFILE_BACKUP_MAX_AGE_DAYS:-30}"
         local max_size_gb="${PROFILE_BACKUP_MAX_SIZE_GB:-100}"
 
-        auto_rotate_backups "$backup_dir" "$rotation_policy" "$keep_count" "$max_age_days" "$max_size_gb"
+        # Advisory only — it must NEVER decide the migration's exit status. auto_rotate_backups ends
+        # with monitor_backup_disk_space, which returns 1 whenever the backup filesystem is below its
+        # 10GB advisory threshold; under `set -e` a bare call therefore ABORTED a fully successful
+        # migration with rc=1 right after "Migration Complete!", skipping the audit record and the
+        # RESUME_SAFE state cleanup below. (Caught on a live run whose work dir had 4GB free.)
+        auto_rotate_backups "$backup_dir" "$rotation_policy" "$keep_count" "$max_age_days" "$max_size_gb" \
+            || log_warn "backup rotation reported an advisory issue (e.g. low disk) — the migration itself succeeded"
         echo ""
     fi
 
