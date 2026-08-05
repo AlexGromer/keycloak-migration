@@ -161,6 +161,29 @@ pg_client() {
 assert_false "db_restore postgresql localhost 5432 kc kcuser pw '$_dbr_tmp/backup.dump' 1 >/dev/null 2>&1" \
     "a REAL error among the noise still fails the restore"
 
+# ============================================================================
+describe "a PARALLEL backup verifies the DIRECTORY it wrote, not a .dump that does not exist"
+# ============================================================================
+# With parallel_jobs > 1 pg_dump writes -Fd (a directory named without the .dump suffix), but the
+# verification was handed the .dump path — which never exists then — so every parallel backup was
+# rejected as unverifiable and the migration refused to run.
+_bk_tmp="$(mktemp -d)"
+_verified_arg=""
+pg_client() {
+    case "$1" in
+        psql)    [[ "$2" == "--version" ]] && { echo "psql (PostgreSQL) 16.1"; return 0; }; return 0 ;;
+        pg_dump) mkdir -p "$_bk_tmp/backup"; : > "$_bk_tmp/backup/toc.dat"; return 0 ;;   # -Fd writes a DIRECTORY
+        *)       return 0 ;;
+    esac
+}
+pg_verify_backup() { _verified_arg="$1"; [[ -f "$1" || -d "$1" ]]; }
+pg_auto_tune_parallel_jobs() { echo 4; }
+db_backup postgresql localhost 5432 kc kcuser pw "$_bk_tmp/backup.dump" 4 >/dev/null 2>&1
+assert_equals "$_bk_tmp/backup" "$_verified_arg" \
+    "the directory archive is what gets verified"
+unset -f pg_client pg_verify_backup pg_auto_tune_parallel_jobs
+rm -rf "$_bk_tmp"
+
 pg_client() {
     case "$1" in
         psql)      [[ "$2" == "--version" ]] && { echo "psql (PostgreSQL) 16.1"; return 0; }; return 0 ;;

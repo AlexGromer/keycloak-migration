@@ -189,6 +189,11 @@ harness_main() {
     export PROFILE_DB_USER="keycloak"
     export PROFILE_DB_PASSWORD="$HARNESS_DB_PASSWORD"
     export PROFILE_KC_RUN_NETWORK="$HARNESS_NET"
+    # The pg-client container needs the SAME bridge: the database is reachable only by container name
+    # on it (no host port is published). Without this the client defaulted to --network=host, where
+    # "kc-harness-pg" does not resolve — so on a host without psql the harness could not back up,
+    # reconcile or verify, which is exactly the autonomous configuration it exists to exercise.
+    export PROFILE_PG_CLIENT_NETWORK="$HARNESS_NET"
 
     # Live runs need real secrets.
     if [[ "$HARNESS_DRY_RUN" != "true" ]]; then

@@ -200,8 +200,10 @@ pg_verify_backup() {
 
     local backup_file="$1"
 
-    if [[ ! -f "$backup_file" ]]; then
-        log_error "Backup file not found: $backup_file"
+    # A parallel dump (-Fd) is a DIRECTORY archive, and pg_restore --list reads it just as happily as
+    # a single file. Requiring -f rejected every parallel backup as "not found".
+    if [[ ! -f "$backup_file" && ! -d "$backup_file" ]]; then
+        log_error "Backup not found: $backup_file"
         return 1
     fi
 

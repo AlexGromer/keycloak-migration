@@ -259,13 +259,20 @@ db_backup() {
                 return 1
             fi
 
+            # Verify the artefact that was ACTUALLY produced. With parallel_jobs > 1 the dump is a
+            # DIRECTORY (${backup_file%.dump}) and handing pg_verify_backup the .dump path — which does
+            # not exist then — turned every parallel backup into a verification failure, i.e. a refused
+            # migration for anyone who enabled parallelism.
+            local backup_artifact="$backup_file"
+            [[ "$dump_format" == "-Fd" ]] && backup_artifact="${backup_file%.dump}"
+
             # Verify backup integrity — a FAILED verification is FATAL, not "skipped".
             if command -v pg_verify_backup &>/dev/null; then
-                if ! pg_verify_backup "$backup_file"; then
+                if ! pg_verify_backup "$backup_artifact"; then
                     if [[ "${ALLOW_UNVERIFIED_BACKUP:-false}" == "true" ]]; then
                         log_warn "ALLOW_UNVERIFIED_BACKUP=true — proceeding despite an unverified backup"
                     else
-                        log_error "Backup verification FAILED: $backup_file"
+                        log_error "Backup verification FAILED: $backup_artifact"
                         log_error "Refusing to migrate (override with ALLOW_UNVERIFIED_BACKUP=true)"
                         return 1
                     fi

@@ -434,6 +434,16 @@ acquire_images() {
                 ref="$(_os_image_ref "$v")"
                 _os_run "cr pull ${ref}" -- cr pull "$ref"
             done
+            # …and the sovereign pg-client, which nothing else pulls. `pull` is the DEFAULT
+            # acquisition, so on a node with no host psql the client the tool had just selected as its
+            # default was never obtained: the run silently degraded to the postgres:16 fallback, or
+            # failed preflight outright. Only when the caller pinned nothing and the host has no psql;
+            # best-effort, because the fallback after acquisition still covers a registry that does not
+            # carry it.
+            if [[ -z "$_PG_CLIENT_IMAGE_EXPLICIT" ]] && ! command -v psql >/dev/null 2>&1; then
+                _os_run "cr pull ${PROFILE_PG_CLIENT_IMAGE}" -- cr pull "$PROFILE_PG_CLIENT_IMAGE" \
+                    || log_warn "could not pull ${PROFILE_PG_CLIENT_IMAGE} — falling back to whatever client this node has"
+            fi
             ;;
         bundle)
             [[ -f "$BUNDLE" ]] || { log_error "bundle not found: $BUNDLE"; exit 1; }

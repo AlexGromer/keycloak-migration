@@ -149,4 +149,20 @@ assert_true "printf '%s' \"\$bundle_branch\" | grep -q 'cr image inspect'" \
 assert_true "printf '%s' \"\$bundle_branch\" | grep -q 'image-ref-template'" \
     "and the failure names the setting that caused the mismatch"
 
+
+describe "F2: --source pull also obtains the sovereign pg-client (nothing else pulls it)"
+# `pull` is the DEFAULT acquisition. It pulled only the hop images, so on a node with no host psql the
+# client the tool had just selected as its default was never obtained: the run silently degraded to
+# postgres:16 or failed preflight.
+pull_branch="$(sed -n '/^        pull)/,/^        bundle)/p' "$ONESHOT")"
+assert_true "printf '%s' \"\$pull_branch\" | grep -q 'PROFILE_PG_CLIENT_IMAGE'" \
+    "the pull branch pulls the pg-client image too"
+assert_true "printf '%s' \"\$pull_branch\" | grep -q '_PG_CLIENT_IMAGE_EXPLICIT'" \
+    "…only when the caller pinned nothing"
+
+describe "F2: the preflight password has a default (set -u would abort a PGPASSWORD-only run)"
+MIGRATE_V3="$PROJECT_ROOT/scripts/migrate_keycloak_v3.sh"
+assert_true "grep -q 'PROFILE_DB_PASSWORD:-\${PGPASSWORD' '$MIGRATE_V3'" \
+    "run_all_preflight_checks gets the same password precedence as every other consumer"
+
 test_report

@@ -81,6 +81,15 @@ profile_load() {
     export PROFILE_DB_PORT=$(parse_yaml_value "port" "$profile_file")
     export PROFILE_DB_NAME=$(parse_yaml_section_value "database" "name" "$profile_file")
     export PROFILE_DB_USER=$(parse_yaml_value "user" "$profile_file")
+    # The Keycloak tables' schema. Without this a `verify` / `rollback --profile` on a database whose
+    # tables live outside `public` queried the wrong schema — the migration resolved --db-schema into
+    # PROFILE_DB_SCHEMA + PGOPTIONS, but nothing carried it into the profile. Env wins, as everywhere.
+    export PROFILE_DB_SCHEMA="${PROFILE_DB_SCHEMA:-$(parse_yaml_section_value "database" "schema" "$profile_file")}"
+    export PROFILE_DB_SCHEMA="${PROFILE_DB_SCHEMA:-public}"
+    # …and re-establish the search_path the tool relies on, exactly as migrate_oneshot.sh does.
+    if [[ "$PROFILE_DB_SCHEMA" != "public" && "${PGOPTIONS:-}" != *"search_path"* ]]; then
+        export PGOPTIONS="${PGOPTIONS:+$PGOPTIONS }-c search_path=${PROFILE_DB_SCHEMA},public"
+    fi
     export PROFILE_DB_CREDENTIALS_SOURCE=$(parse_yaml_value "credentials_source" "$profile_file")
 
     # Keycloak settings
@@ -194,6 +203,7 @@ database:
   port: ${PROFILE_DB_PORT:-5432}
   name: ${PROFILE_DB_NAME:-keycloak}
   user: ${PROFILE_DB_USER:-keycloak}
+  schema: ${PROFILE_DB_SCHEMA:-public}
   credentials_source: ${PROFILE_DB_CREDENTIALS_SOURCE:-env}
 
 keycloak:

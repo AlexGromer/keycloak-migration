@@ -7,6 +7,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed — audit majors (autonomy plumbing)
+
+- **`--source pull` never obtained the sovereign pg-client.** `pull` is the DEFAULT acquisition, and it
+  fetched only the hop images — so on a node with no host `psql` the client the tool had just selected
+  as its default was never pulled: the run degraded to the `postgres:16` fallback or failed preflight.
+  It is now pulled (best-effort) when the caller pinned nothing and the host has no `psql`.
+- **The database schema did not survive into the profile.** `--db-schema` / `?currentSchema=` resolved
+  into `PROFILE_DB_SCHEMA` + `PGOPTIONS` for the migration, but nothing wrote it to the profile, so a
+  later `verify` / `rollback --profile` queried `public` on a database whose Keycloak tables live
+  elsewhere. `profile_save` emits `schema:`, `profile_load` restores it (env wins) and re-establishes
+  the `search_path`.
+- **A parallel backup was always rejected as unverifiable.** With `parallel_jobs > 1` the dump is a
+  `-Fd` DIRECTORY, but the verification was handed the `.dump` path that does not exist then, and
+  `pg_verify_backup` additionally required a regular file. Both now handle the directory archive, so
+  the artefact that was actually written is the one that gets verified.
+- **The migration harness could not reach its own database from the pg-client.** It publishes no host
+  port and addresses the throwaway Postgres by container name on `kc-harness-net`, but exported only
+  `PROFILE_KC_RUN_NETWORK` — the client fell back to `--network=host`, where that name does not
+  resolve. `PROFILE_PG_CLIENT_NETWORK` is now exported alongside it.
+- **A `PGPASSWORD`-only run aborted at preflight** with an unbound-variable error: `execute_migration`
+  passed `$PROFILE_DB_PASSWORD` under `set -u` while every other consumer accepts the documented
+  `PROFILE_DB_PASSWORD` / `PGPASSWORD` / `DB_PASSWORD` precedence. It now uses the same precedence.
+
 ### Fixed — autonomy blockers found by an adversarial audit of every pg-client call site
 
 - **`--profile` / `--wizard` re-runs fell back to `postgres:16`.** That branch hands off before the
