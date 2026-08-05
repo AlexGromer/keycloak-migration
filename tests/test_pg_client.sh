@@ -67,7 +67,10 @@ assert_equals "HOST:hello world" "$(pg_client pgc_faketool hello world)" \
 absent="pgc_absent_$$"
 out="$(PGPASSWORD=secretpw PG_CLIENT_MOUNT=/var/backups pg_client "$absent" -h localhost -d keycloak -Fc)"
 assert_equals "yes" "$(grepq "$out" 'run --rm -i --network=host')"       "container path: cr run --rm -i --network=host"
-assert_equals "yes" "$(grepq "$out" '-e PGPASSWORD=secretpw')"           "container path: forwards inline PGPASSWORD"
+# The password is forwarded BY NAME (-e PGPASSWORD), never as -e PGPASSWORD=<value>: a value here
+# lands in the engine client's argv, i.e. in `ps` output and /proc/<pid>/cmdline for every user.
+assert_equals "yes" "$(grepq "$out" '-e PGPASSWORD')"                    "container path: forwards PGPASSWORD by name"
+assert_equals "no"  "$(grepq "$out" '-e PGPASSWORD=secretpw')"           "container path: the VALUE never reaches the engine argv"
 assert_equals "yes" "$(grepq "$out" '-v /var/backups:/var/backups')"     "container path: bind-mounts PG_CLIENT_MOUNT at same path"
 assert_equals "yes" "$(grepq "$out" "postgres:16 $absent -h localhost -d keycloak -Fc")" "container path: image, tool and args pass through"
 assert_equals "yes" "$(grepq "$out" '--user ')"                          "container path: maps --user on rootful Docker"
@@ -84,7 +87,7 @@ CONTAINER_RUNTIME=docker
 # 4) PROFILE_DB_PASSWORD fallback when no inline PGPASSWORD is set.
 # ---------------------------------------------------------------------------
 out_fb="$(PROFILE_DB_PASSWORD=fallbackpw pg_client "$absent")"
-assert_equals "yes" "$(grepq "$out_fb" '-e PGPASSWORD=fallbackpw')" "falls back to PROFILE_DB_PASSWORD"
+assert_equals "yes" "$(grepq "$out_fb" '-e PGPASSWORD')" "falls back to PROFILE_DB_PASSWORD (by name)"
 
 # ---------------------------------------------------------------------------
 # 5) PROFILE_PG_CLIENT_NETWORK override.

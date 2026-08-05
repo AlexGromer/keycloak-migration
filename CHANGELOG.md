@@ -7,6 +7,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed — audit minors
+
+- **The containerized advisory lock reached the database its own way.** `db_lock.sh` hand-built a
+  `cr run` with a hardcoded `--network=host` and the raw host, so under rootless Docker (where a
+  loopback host is the daemon's namespace, not the machine's) the lock could not connect to a database
+  the rest of the tool reached fine; it also dropped `PGOPTIONS`, losing a non-public `search_path` on
+  the lock connection. The decision now lives in one place (`_cr_db_net_rewrite`) used by both
+  `pg_client` and the lock.
+- **The database password no longer reaches the engine's argv.** Both container launch paths passed
+  `-e PGPASSWORD=<value>`, which puts the cleartext password in `ps` output and
+  `/proc/<pid>/cmdline` for every user on the box. It is passed by NAME now (`-e PGPASSWORD`), with the
+  value exported to the engine's environment. The host fast path was never affected.
+- **A profile's `runtime:` never took effect.** `cr_detect` resolves the engine at source time and is
+  idempotent, so by the time a profile was read the engine was already fixed — a profile written for
+  podman ran on docker, which cannot see the other engine's images. An engine the caller did not pin
+  now follows the profile.
+- **The container networks were not persisted.** `PROFILE_KC_RUN_NETWORK` / `PROFILE_PG_CLIENT_NETWORK`
+  are written to the profile and restored by `profile_load` (env wins), so a later `verify` /
+  `rollback` keeps a container-name database topology instead of landing on the default network.
+- **The banner promised a cleanup that cannot happen.** A live run ends in `exec`, which replaces the
+  process, so EXIT traps never run and an auto-created work dir — the one holding the backups — is
+  kept. It now says so, instead of "temp, auto-removed".
+
 ### Fixed — audit majors (autonomy plumbing)
 
 - **`--source pull` never obtained the sovereign pg-client.** `pull` is the DEFAULT acquisition, and it
