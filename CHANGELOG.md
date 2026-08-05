@@ -7,6 +7,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed — the sovereign pg-client was never actually selected (air-gap blocker)
+
+- **`--source bundle` loaded the sovereign pg-client and then ignored it.** On a node with no host
+  `psql`, preflight failed with `Tool missing: psql (no host binary and no postgres:16 image)` while
+  `astra-pgclient-17` sat loaded from the bundle — the exact stop an air-gapped customer hit.
+  Root cause: `migrate_oneshot.sh` sources `migrate_keycloak_v3.sh`, which sources
+  `container_runtime.sh`, which defaults `PROFILE_PG_CLIENT_IMAGE` to `postgres:16`. The
+  "did the caller pin an image?" probe ran *after* that source, so every run looked pinned and BOTH
+  the sovereign per-OS default (ADR-013) and the bundle repoint (ADR-014) were dead code — the tool
+  always asked for `postgres:16`. The probe now runs before the source; the default is assigned
+  outright (a `:=` default cannot win against a variable that is already set). Nodes that do have
+  `postgres:16` (and no sovereign image) keep working: an announced fallback covers them.
+- **`verify` / `rollback --profile` had the same blind spot.** The resolved client is now persisted
+  beside the profile (`<profile>.pg-client`, the sidecar pattern the `:`-bearing image ref already
+  uses) and restored by `profile_load` unless the caller pinned one — so post-migration commands on
+  a host without `psql` reach the same sovereign client instead of `postgres:16`.
+- **A completed migration could still exit 1.** `auto_rotate_backups` ends with
+  `monitor_backup_disk_space`, which returns 1 whenever the backup filesystem is below its 10GB
+  advisory threshold; under `set -euo pipefail` the bare call aborted a **successful** migration
+  right after `Migration Complete!`, skipping the audit record and the `RESUME_SAFE` cleanup. The
+  advisory can no longer decide the exit status. (Found by the live run that proved the fix above.)
+- `migrate_oneshot.sh` now prints the selected `pg-client` image in its banner (and marks it
+  `(pinned)`), so this class of problem is visible in the first screenshot of any support report.
+
 ## [3.10.0] - 2026-07-22
 
 ### Added — non-root pg-client, DB connection string, non-public schema
