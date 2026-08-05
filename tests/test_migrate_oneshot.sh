@@ -119,6 +119,26 @@ sid_line="$(grep -n 'PROFILE_NAME}.pg-client' "$ONESHOT" | tail -1 | cut -d: -f1
 assert_true "[ -n '$acq_line' ] && [ -n '$sid_line' ] && [ '$sid_line' -gt '$acq_line' ]" \
     "the pg-client sidecar is refreshed AFTER acquisition (records what the run actually resolved)"
 
+describe "F2: --profile does not hand the child the source-time postgres:16 (air-gap re-run)"
+# Sourcing migrate_keycloak_v3.sh EXPORTS PROFILE_PG_CLIENT_IMAGE=postgres:16 (container_runtime.sh).
+# The --profile / --wizard branch execs before the sovereign-default block, so the child used to
+# inherit that value, recompute "the caller pinned an image", and SKIP restoring the profile's
+# .pg-client sidecar — the original air-gap failure, on the documented re-run path.
+# A shim `bash` intercepts the exec and reports what the child was handed.
+SHIM="$TMPD/shim"; mkdir -p "$SHIM"
+# NOTE: no [brackets] in the marker — assert_contains greps as a REGEX, and [..] would be a char class.
+# shellcheck disable=SC2016  # intentional: ${...} must reach the shim UNEXPANDED, it expands there
+printf '#!/bin/sh\necho "CHILD-PGCLIENT=${PROFILE_PG_CLIENT_IMAGE-NONE}"\nexit 0\n' > "$SHIM/bash"
+chmod +x "$SHIM/bash"
+printf 'profile:\n  name: reuse\n' > "$TMPD/reuse.yaml"
+# NOTE: the outer interpreter is called by ABSOLUTE path, so only the script's own `exec bash` is shimmed.
+child_unpinned="$(PATH="$SHIM:$PATH" PROFILE_DIR="$TMPD" timeout 60 /bin/bash "$ONESHOT" --profile reuse --dry-run </dev/null 2>&1 || true)"
+assert_contains "$child_unpinned" "CHILD-PGCLIENT=NONE" \
+    "unpinned: the child is NOT handed postgres:16, so it can restore the profile's sovereign client"
+child_pinned="$(PROFILE_PG_CLIENT_IMAGE=myreg/pg:17 PATH="$SHIM:$PATH" PROFILE_DIR="$TMPD" timeout 60 /bin/bash "$ONESHOT" --profile reuse --dry-run </dev/null 2>&1 || true)"
+assert_contains "$child_pinned" "CHILD-PGCLIENT=myreg/pg:17" \
+    "a genuine caller pin is still handed through untouched"
+
 describe "F2: --source bundle asserts the hop images it loaded are the ones this run will START"
 # A bundle's tars carry the tags they were BUILT with. With a custom --image-ref-template (or an
 # empty KC_IMAGE_NS) every load succeeds and the FIRST HOP then dies on a missing image — after the

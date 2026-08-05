@@ -84,6 +84,20 @@ if [[ -f "$LIB" ]]; then
     # default) stream via stdin/stdout (no mount, no --user — works for a non-root container under
     # rootless docker); the directory format (-Fd) can't stream and keeps the mount path. The live
     # dump/restore round-trip is validated on rootless podman AND rootless docker (see docs/ROOTLESS.md).
+    # pg_client's own logging must never reach STDOUT: callers capture it as DATA
+    # (`n=$(pg_client psql -tAc 'SELECT count(*)…')`). With the notice on stdout, ANSI colours turned
+    # "42" into "034042" — and on a FAILED connection an EMPTY result became non-empty, so the
+    # Layer-3 integrity baseline stored fabricated counts and later "verified" them against
+    # themselves without ever reaching the database.
+    cr() { case "$1" in info) echo 'name=rootless' ;; run) printf 'RUN %s\n' "$*" ;; *) echo "$@" ;; esac; }
+    _KC_ROOTLESS=""; _PG_CLIENT_ROOTFUL=""; _KC_LOOPBACK_REWRITE_LOGGED=""
+    so="$(pg_client __no_such_pg_tool__ -h 127.0.0.1 -U u -d db 2>/dev/null)"
+    assert_true "! printf '%s' \"\$so\" | grep -q 'rootless docker'" "the loopback notice does NOT pollute stdout"
+    assert_true "! printf '%s' \"\$so\" | grep -q 'INFO'"            "no log level leaks into captured stdout"
+    _KC_ROOTLESS=""; _PG_CLIENT_ROOTFUL=""; _KC_LOOPBACK_REWRITE_LOGGED=""
+    se="$(pg_client __no_such_pg_tool__ -h 127.0.0.1 -U u -d db 2>&1 >/dev/null)"
+    assert_contains "$se" "rootless docker" "the notice is still reported, on stderr"
+
     assert_true  "_pg_dump_is_dir -h db -Fd -f /x"          "-Fd is directory format (mount path)"
     assert_true  "_pg_dump_is_dir --format=directory -f /x" "--format=directory is directory"
     assert_true  "_pg_dump_is_dir -F d -f /x"               "-F d is directory"

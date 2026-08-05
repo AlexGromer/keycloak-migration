@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# shellcheck disable=SC2329
+# (the pg_client / pg_verify_backup stubs ARE invoked — indirectly, by db_restore under test)
 # Tests: Database Adapter
 set -euo pipefail
 
@@ -110,6 +112,65 @@ assert_equals "jdbc:postgresql://localhost:5432/mydb" \
 assert_equals "jdbc:mysql://localhost:3306/mydb" \
     "$(db_build_jdbc_url mysql localhost '' mydb)" \
     "MySQL with default port fallback"
+
+# ============================================================================
+describe "db_restore FAILS when pg_restore fails (the rollback path must not lie)"
+# ============================================================================
+# db_restore is always called from an `if` (db_restore_keycloak), which disables errexit inside it.
+# The pg_restore call used to be a bare statement, so its failure was swallowed and the VACUUM block
+# that follows supplied the return value: a restore that never happened was reported as a completed
+# rollback. Stub pg_client so pg_restore fails and nothing else does.
+_dbr_tmp="$(mktemp -d)"
+: > "$_dbr_tmp/backup.dump"
+pg_client() {
+    case "$1" in
+        psql)      [[ "$2" == "--version" ]] && { echo "psql (PostgreSQL) 16.1"; return 0; }; return 0 ;;
+        pg_restore) return 1 ;;   # the restore fails
+        *)         return 0 ;;
+    esac
+}
+pg_verify_backup() { return 0; }
+assert_false "db_restore postgresql localhost 5432 kc kcuser pw '$_dbr_tmp/backup.dump' 1 >/dev/null 2>&1" \
+    "a failed pg_restore makes db_restore return non-zero"
+
+# …but the NOISE a rollback provokes by design must NOT be called a failure. A live 16 -> 24 -> 26
+# rollback emitted 32 such errors (objects the newer schema had already dropped, and a SET a
+# pg_dump 17 emits that a 16 server rejects) while restoring the data perfectly.
+pg_client() {
+    case "$1" in
+        psql)       [[ "$2" == "--version" ]] && { echo "psql (PostgreSQL) 16.1"; return 0; }; return 0 ;;
+        pg_restore) echo 'pg_restore: error: could not execute query: ERROR:  relation "public.client_session" does not exist' >&2
+                    echo 'pg_restore: error: could not execute query: ERROR:  unrecognized configuration parameter "transaction_timeout"' >&2
+                    return 1 ;;
+        *)          return 0 ;;
+    esac
+}
+assert_true "db_restore postgresql localhost 5432 kc kcuser pw '$_dbr_tmp/backup.dump' 1 >/dev/null 2>&1" \
+    "ignorable pg_restore errors (missing objects / newer-client SET) are NOT a failed rollback"
+
+# A hard error mixed in with the noise still fails.
+pg_client() {
+    case "$1" in
+        psql)       [[ "$2" == "--version" ]] && { echo "psql (PostgreSQL) 16.1"; return 0; }; return 0 ;;
+        pg_restore) echo 'pg_restore: error: could not execute query: ERROR:  relation "x" does not exist' >&2
+                    echo 'pg_restore: error: connection to server failed: FATAL: password authentication failed' >&2
+                    return 1 ;;
+        *)          return 0 ;;
+    esac
+}
+assert_false "db_restore postgresql localhost 5432 kc kcuser pw '$_dbr_tmp/backup.dump' 1 >/dev/null 2>&1" \
+    "a REAL error among the noise still fails the restore"
+
+pg_client() {
+    case "$1" in
+        psql)      [[ "$2" == "--version" ]] && { echo "psql (PostgreSQL) 16.1"; return 0; }; return 0 ;;
+        *)         return 0 ;;
+    esac
+}
+assert_true "db_restore postgresql localhost 5432 kc kcuser pw '$_dbr_tmp/backup.dump' 1 >/dev/null 2>&1" \
+    "a successful pg_restore still returns zero"
+unset -f pg_client pg_verify_backup
+rm -rf "$_dbr_tmp"
 
 # ============================================================================
 # Report

@@ -7,6 +7,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed — autonomy blockers found by an adversarial audit of every pg-client call site
+
+- **`--profile` / `--wizard` re-runs fell back to `postgres:16`.** That branch hands off before the
+  sovereign-default block, so the child inherited the `postgres:16` that `container_runtime.sh`
+  exports at source time, recomputed "the caller pinned an image", and `profile_load` then skipped
+  restoring the profile's `.pg-client` sidecar — the original air-gap failure, on the documented
+  re-run path. The value is now unset before the exec when the caller pinned nothing.
+- **`rollback` never loaded its profile.** It was dispatched with no argument and only read the state
+  file, so `PROFILE_DB_*` and the `.image-ref` / `.pg-client` sidecars were never restored: on a host
+  without `psql` the recovery path looked for `postgres:16` instead of the client the migration had
+  used. `cmd_rollback` now loads the profile, like `verify` does.
+- **A failed `pg_restore` was reported as a completed rollback.** `db_restore` ran it as a bare
+  statement and `db_restore_keycloak`'s `if` disabled errexit, so the VACUUM that follows supplied the
+  return value. The status is now checked — and *classified*: `--if-exists` removes the `--clean` DROP
+  noise, the two harmless classes that remain (objects already absent, a SET a newer client emits that
+  an older server rejects — a live 16 to 26 rollback produced 32 of them) are reported as noise, and
+  anything else, including an unexplained non-zero exit, fails the rollback.
+- **`pg_client` logged to stdout**, the stream its callers capture as data. With colours, a
+  `SELECT count(*)` came back as `034042`; on a FAILED connection an empty result became non-empty, so
+  the Layer-3 integrity baseline stored fabricated counts and later "verified" them against
+  themselves without ever reaching the database. Its logs go to stderr, once per process.
+- `database_adapter.sh` no longer aborts a caller that sources it without `LIB_DIR` (`set -u`).
+- `tests/test_preflight_checks.sh`: the backup-sizing assertions check the printed sizing, not the
+  verdict, so they no longer depend on the test machine having more free disk than the simulated
+  requirement.
+
 ### Fixed — the sovereign pg-client was never actually selected (air-gap blocker)
 
 - **`--source bundle` loaded the sovereign pg-client and then ignored it.** On a node with no host

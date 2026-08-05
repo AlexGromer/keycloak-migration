@@ -222,6 +222,9 @@ else
 fi
 
 # ============================================================================
+# `|| true`: these assertions check the SIZING MESSAGE, not the verdict. The simulated requirement
+# is deliberately larger than a small disk, so on a machine with less free space than the scenario
+# demands the substitution failed and `set -e` killed the suite before test_report.
 describe "backup space is MEASURED, not guessed"
 # ============================================================================
 # It was `pg_database_size x 3`. pg_database_size INCLUDES indexes; pg_dump does not dump indexes,
@@ -229,7 +232,7 @@ describe "backup space is MEASURED, not guessed"
 # for a dump that would have been ~30GB — refusing a migration there was room for.
 
 # Sizing comes from the table data (heap) when it could be measured.
-_bs_out="$(PREFLIGHT_DUMP_HEAP_MB=1000 PREFLIGHT_HOP_COUNT=1 check_backup_space "$WORK_DIR" 2>&1)"
+_bs_out="$(PREFLIGHT_DUMP_HEAP_MB=1000 PREFLIGHT_HOP_COUNT=1 check_backup_space "$WORK_DIR" 2>&1 || true)"
 assert_contains "$_bs_out" "table data" \
     "the basis is the heap — what pg_dump actually writes"
 assert_contains "$_bs_out" "1200MB" \
@@ -239,7 +242,7 @@ assert_contains "$_bs_out" "1200MB" \
 # on disk: 16 -> 24 -> 25 -> 26 is THREE dumps. This factor did not exist at all — the check sized
 # for one dump and the migration then wrote three, filling the disk on exactly the large databases
 # where the check mattered.
-_bs_out="$(PREFLIGHT_DUMP_HEAP_MB=1000 PREFLIGHT_HOP_COUNT=3 check_backup_space "$WORK_DIR" 2>&1)"
+_bs_out="$(PREFLIGHT_DUMP_HEAP_MB=1000 PREFLIGHT_HOP_COUNT=3 check_backup_space "$WORK_DIR" 2>&1 || true)"
 assert_contains "$_bs_out" "3600MB" \
     "3 hops -> 3 backups -> 3x the space (1000 x 1.2 x 3)"
 assert_contains "$_bs_out" "Hops in this migration: 3" \
@@ -248,7 +251,7 @@ assert_contains "$_bs_out" "Hops in this migration: 3" \
 # Falls back to total DB size when the heap could not be measured — overestimating beats guessing
 # low when the cost of guessing low is a disk full mid-migration.
 _bs_out="$(PREFLIGHT_DB_SIZE_GB=1 PREFLIGHT_DUMP_HEAP_MB="" PREFLIGHT_HOP_COUNT=1 \
-    check_backup_space "$WORK_DIR" 2>&1)"
+    check_backup_space "$WORK_DIR" 2>&1 || true)"
 assert_contains "$_bs_out" "conservative" \
     "an unmeasurable heap falls back to the total DB size, and says so"
 

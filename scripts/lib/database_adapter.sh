@@ -205,9 +205,10 @@ db_backup() {
 
     case "$db_type" in
         postgresql)
-            # Source optimizations library
-            if [[ -f "$LIB_DIR/db_optimizations.sh" ]]; then
-                source "$LIB_DIR/db_optimizations.sh"
+            # Source optimizations library ( :- so using this lib without the migration script's
+            # LIB_DIR does not abort the caller with "unbound variable" under `set -u` )
+            if [[ -f "${LIB_DIR:-}/db_optimizations.sh" ]]; then
+                source "${LIB_DIR:-}/db_optimizations.sh"
             fi
 
             # Auto-tune parallel jobs if not specified
@@ -273,9 +274,10 @@ db_backup() {
             ;;
 
         mysql)
-            # Source optimizations library
-            if [[ -f "$LIB_DIR/db_optimizations.sh" ]]; then
-                source "$LIB_DIR/db_optimizations.sh"
+            # Source optimizations library ( :- so using this lib without the migration script's
+            # LIB_DIR does not abort the caller with "unbound variable" under `set -u` )
+            if [[ -f "${LIB_DIR:-}/db_optimizations.sh" ]]; then
+                source "${LIB_DIR:-}/db_optimizations.sh"
             fi
 
             # Try Percona XtraBackup first (hot backup, faster)
@@ -308,9 +310,10 @@ db_backup() {
             ;;
 
         mariadb)
-            # Source optimizations library
-            if [[ -f "$LIB_DIR/db_optimizations.sh" ]]; then
-                source "$LIB_DIR/db_optimizations.sh"
+            # Source optimizations library ( :- so using this lib without the migration script's
+            # LIB_DIR does not abort the caller with "unbound variable" under `set -u` )
+            if [[ -f "${LIB_DIR:-}/db_optimizations.sh" ]]; then
+                source "${LIB_DIR:-}/db_optimizations.sh"
             fi
 
             # MariaDB supports mariabackup for hot backup
@@ -350,9 +353,10 @@ db_backup() {
             ;;
 
         cockroachdb)
-            # Source optimizations library
-            if [[ -f "$LIB_DIR/db_optimizations.sh" ]]; then
-                source "$LIB_DIR/db_optimizations.sh"
+            # Source optimizations library ( :- so using this lib without the migration script's
+            # LIB_DIR does not abort the caller with "unbound variable" under `set -u` )
+            if [[ -f "${LIB_DIR:-}/db_optimizations.sh" ]]; then
+                source "${LIB_DIR:-}/db_optimizations.sh"
             fi
 
             # Show cluster info
@@ -401,9 +405,10 @@ db_restore() {
 
     case "$db_type" in
         postgresql)
-            # Source optimizations library
-            if [[ -f "$LIB_DIR/db_optimizations.sh" ]]; then
-                source "$LIB_DIR/db_optimizations.sh"
+            # Source optimizations library ( :- so using this lib without the migration script's
+            # LIB_DIR does not abort the caller with "unbound variable" under `set -u` )
+            if [[ -f "${LIB_DIR:-}/db_optimizations.sh" ]]; then
+                source "${LIB_DIR:-}/db_optimizations.sh"
             fi
 
             # Auto-tune parallel jobs if not specified
@@ -419,14 +424,48 @@ db_restore() {
             # Restore with pg_restore
             local pg_version=$(pg_client psql --version | grep -oP '\d+' | head -1)
             # -w: never prompt for a password (see dump_opts) — this is the rollback path.
-            local restore_opts="-h $host -p $port -U $user -d $db_name -w --clean"
+            # --if-exists: without it, `--clean` DROPs objects the NEWER schema had already removed and
+            # pg_restore reports each one as an error (a 16->26 rollback produced 31 of them), which
+            # makes its exit code useless for telling a real failure from routine noise.
+            local restore_opts="-h $host -p $port -U $user -d $db_name -w --clean --if-exists"
 
             if [[ "$pg_version" -ge 9 && "$parallel_jobs" -gt 1 ]]; then
                 restore_opts="$restore_opts -j $parallel_jobs"
                 log_info "Using parallel restore with $parallel_jobs jobs"
             fi
 
-            PG_CLIENT_MOUNT="$(dirname "$backup_file")" PGPASSWORD="$pass" pg_client pg_restore $restore_opts "$backup_file"
+            # The status MUST be checked — db_restore is always called from an `if`
+            # (db_restore_keycloak), which disables errexit inside it, and the VACUUM block below would
+            # otherwise supply the return value: a restore that never happened was reported as a
+            # completed rollback.
+            #
+            # But the status alone is too blunt: pg_restore exits non-zero for ANY error, including two
+            # classes a rollback provokes BY DESIGN and which leave the data correctly restored —
+            #   * objects the newer schema had already dropped (mitigated above with --if-exists), and
+            #   * a SET a newer pg_dump emits that an older server rejects
+            #     (a 17 client dumping for a 16 server: `unrecognized configuration parameter
+            #     "transaction_timeout"`).
+            # A live 16 -> 24 -> 26 rollback produced 32 such errors while restoring perfectly, so
+            # classify: anything outside those classes is a real failure, the rest is reported as noise.
+            local _restore_out _restore_rc=0
+            _restore_out="$(PG_CLIENT_MOUNT="$(dirname "$backup_file")" PGPASSWORD="$pass" \
+                pg_client pg_restore $restore_opts "$backup_file" 2>&1)" || _restore_rc=$?
+            [[ -n "$_restore_out" ]] && printf '%s\n' "$_restore_out"
+            if (( _restore_rc != 0 )); then
+                local _hard_errors _err_count
+                _err_count="$(printf '%s\n' "$_restore_out" | grep -ac 'pg_restore: error' || true)"
+                _hard_errors="$(printf '%s\n' "$_restore_out" | grep -a 'pg_restore: error' \
+                    | grep -avE 'does not exist|unrecognized configuration parameter' || true)"
+                # An UNEXPLAINED non-zero exit (no recognisable error lines at all — a crash, a signal,
+                # an OOM) is a failure too: only errors we recognise as harmless may be waved through.
+                if [[ -n "$_hard_errors" || "${_err_count:-0}" -eq 0 ]]; then
+                    log_error "pg_restore FAILED — the database was NOT fully restored from $backup_file"
+                    log_error "  Do NOT treat this as a completed rollback. The backup file is still there;"
+                    log_error "  check the errors above (credentials, a client older than the server, disk)."
+                    return 1
+                fi
+                log_warn "pg_restore reported only ignorable errors (objects already absent / a newer-client SET); the restore itself completed"
+            fi
 
             # Run VACUUM ANALYZE after restore
             log_info "Running post-restore optimizations..."

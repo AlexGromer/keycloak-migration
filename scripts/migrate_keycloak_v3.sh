@@ -2906,7 +2906,18 @@ cmd_rollback_auto() {
 }
 
 cmd_rollback() {
+    local profile="${1:-${PROFILE_NAME:-}}"
+
     log_section "Rollback"
+
+    # Rollback ran WITHOUT its profile: it was dispatched with no argument and only read the state
+    # file (LAST_BACKUP/CHECKPOINT_*), so PROFILE_DB_* and the `.image-ref` / `.pg-client` sidecars
+    # were never restored. On a node with no host psql that meant the restore looked for postgres:16
+    # instead of the sovereign client the migration used — the documented recovery path, unusable
+    # exactly when it is needed. Same shape as cmd_verify above.
+    if [[ -n "$profile" ]] && declare -F load_profile_or_discover >/dev/null 2>&1; then
+        load_profile_or_discover "$profile" >/dev/null 2>&1 || true
+    fi
 
     load_state
 
@@ -3106,7 +3117,7 @@ main() {
             cmd_migrate "$PROFILE_NAME"
             ;;
         rollback)
-            cmd_rollback
+            cmd_rollback "$PROFILE_NAME"
             ;;
         verify)
             cmd_verify "$PROFILE_NAME"

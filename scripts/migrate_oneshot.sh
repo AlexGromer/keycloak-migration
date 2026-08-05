@@ -325,6 +325,14 @@ if [[ -n "$USE_PROFILE" ]]; then
     [[ "$KILL_STALE_PASS" == "true" ]]       && PROF_ARGS+=(--kill-stale)
     [[ "$APPLY_INDEXES_PASS" == "true" ]]    && PROF_ARGS+=(--apply-indexes)
 
+    # This branch hands off BEFORE the sovereign-default block below, so the child would inherit the
+    # postgres:16 that container_runtime.sh EXPORTED when we sourced the migration tool. The child
+    # recomputes _KC_PG_CLIENT_PINNED from that value, concludes the caller pinned an image, and
+    # profile_load then SKIPS restoring the profile's <profile>.pg-client sidecar — the air-gap
+    # failure all over again, on the documented re-run path. Unsetting is the only remedy that
+    # works: the child overwrites any inherited _KC_PG_CLIENT_PINNED unconditionally.
+    [[ -z "$_PG_CLIENT_IMAGE_EXPLICIT" ]] && unset PROFILE_PG_CLIENT_IMAGE
+
     log_info "Handing off: migrate_keycloak_v3.sh ${PROF_ARGS[*]}"
     exec bash "$PROJECT_ROOT/scripts/migrate_keycloak_v3.sh" "${PROF_ARGS[@]}"
 fi

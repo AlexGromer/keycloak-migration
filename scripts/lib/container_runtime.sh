@@ -211,8 +211,10 @@ pg_client() {
     fi
     # Autonomous container path.
     if ! cr_available; then
-        log_error "pg_client: '$tool' is not on the host and no container runtime (podman/docker) is available."
-        log_error "  Install postgresql-client, or provide a container engine plus the '$PROFILE_PG_CLIENT_IMAGE' image."
+        # >&2 on EVERY log inside pg_client: callers capture this function's stdout as data
+        # (`v=$(pg_client psql -tAc ...)`), so a log line on stdout becomes part of the value.
+        log_error "pg_client: '$tool' is not on the host and no container runtime (podman/docker) is available." >&2
+        log_error "  Install postgresql-client, or provide a container engine plus the '$PROFILE_PG_CLIENT_IMAGE' image." >&2
         return 127
     fi
 
@@ -232,7 +234,16 @@ pg_client() {
             if [[ "${args[_i]}" == "-h" ]] && _cr_is_loopback "${args[_i+1]:-}"; then
                 args[_i+1]="host.docker.internal"
                 netargs=(--network=bridge --add-host "host.docker.internal:host-gateway")
-                log_info "rootless docker: DB loopback rewritten to host.docker.internal (host-gateway)"
+                # stderr, and once per process: this used to go to STDOUT, where every caller that
+                # captures a value (`n=$(pg_client psql -tAc 'SELECT count(*)...')`) swallowed it as
+                # data. With ANSI colours that turned "42" into "034042" — and on a FAILED connection
+                # it made an EMPTY result non-empty, so the Layer-3 data-integrity baseline recorded
+                # fabricated counts and later "verified" them against each other without ever
+                # reaching the database.
+                if [[ -z "${_KC_LOOPBACK_REWRITE_LOGGED:-}" ]]; then
+                    log_info "rootless docker: DB loopback rewritten to host.docker.internal (host-gateway)" >&2
+                    _KC_LOOPBACK_REWRITE_LOGGED=1
+                fi
             fi
         done
     fi
