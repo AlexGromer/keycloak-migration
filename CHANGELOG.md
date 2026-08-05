@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [3.10.1] - 2026-08-05
+
 ### Documentation — corrected against the code the audit examined
 
 - **README (RU + EN)** no longer says the pg-client defaults to `postgres:16`: the default is the
