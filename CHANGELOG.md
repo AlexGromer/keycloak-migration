@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [3.10.4] - 2026-08-06
+
 ### Documentation — an audit of every documented claim against the code (54 defects)
 
 59 claims were checked against the code at v3.10.3; 54 were wrong, missing or stale, 5 held up. The
