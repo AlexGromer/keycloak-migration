@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [3.10.2] - 2026-08-06
+
 ### Fixed — the audit's last 19 candidates (verified after the fact)
 
 The first verification pass covered only 20 of 39 candidates. Going through the rest turned up code
