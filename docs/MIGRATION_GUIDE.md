@@ -101,8 +101,9 @@ export WORK_DIR=/var/lib/kcwork
 export MIN_DISK_FREE_MB=256   #  ... либо  --skip-preflight
 ```
 
-> По умолчанию `migrate_oneshot.sh` создаёт временный `WORK_DIR` в `$TMPDIR` — если там мало
-> места, preflight упадёт с `Disk space: NGB < 15GB required on <путь> (WORK_DIR)`.
+> По умолчанию `migrate_oneshot.sh` создаёт временный `WORK_DIR` в `$TMPDIR`. Жёсткого порога в 15 ГБ
+> больше нет: preflight держит пол в 512 МБ под служебные файлы и ОТДЕЛЬНО измеряет объём под резервные
+> копии (данные таблиц x 1,2 x число переходов) — и сообщает обе величины до начала работы.
 
 ### 0.2. Безопасность: работаем на клоне
 
@@ -140,8 +141,10 @@ docker pull ghcr.io/alexgromer/keycloak-migration:astra-25.0.6
 
 #### Способ 2 — Air-gap: загрузка из бандлов в `dist/`
 
-В репозитории уже лежат бандлы (≈1.8 ГБ каждый). **Важно:** бандл — это `tar.xz` **с четырьмя
-image-тарболлами внутри**, а не один `docker save`. Поэтому `docker load -i <bundle>.tar.xz`
+Бандлы в репозиторий НЕ входят (`dist/` в `.gitignore`): их собирают `build_matrix.sh --build --pgclient`
+и `build_bundle.sh --os <ос> --go`, либо получают отдельной поставкой. **Важно:** бандл — это `tar.xz`
+**с несколькими image-тарболлами внутри** (четыре перехода плюс `kc-<ос>-pgclient-<мажор>.tar`),
+а не один `docker save`. Поэтому `docker load -i <bundle>.tar.xz`
 напрямую **не сработает** — сначала распаковываем, потом грузим каждый образ.
 
 ```bash
@@ -155,6 +158,7 @@ mkdir -p /var/tmp/kc-images
 tar -xJf kc-astra-bundle.tar.xz -C /var/tmp/kc-images
 ls /var/tmp/kc-images
 #   kc-astra-16.1.1.tar  kc-astra-24.0.5.tar  kc-astra-25.0.6.tar  kc-astra-26.6.3.tar
+#   kc-astra-pgclient-17.tar   <- суверенный клиент PostgreSQL (если бандл собран с --pgclient)
 
 # 3) Загрузить нужные образы (каждый восстановит свой тег ghcr.io/...:astra-<version>)
 docker load -i /var/tmp/kc-images/kc-astra-24.0.5.tar
@@ -175,8 +179,11 @@ cp config/images.conf.example config/images.conf   # config/images.conf в .giti
 #   GHCR_IMAGE  — куда публиковать (по умолчанию ghcr.io/AlexGromer/keycloak-migration)
 #   ASTRA_JDK=17  (Astra ubi18 несёт openjdk-17, НЕ 21!), REDOS_JDK=21, JDK_KC16=11
 
+#   PG_CLIENT_MAJOR=17  — мажор суверенного клиента pg-client (на стороне запуска тот же выбор
+#                         читается из KC_PG_CLIENT_MAJOR; держите их согласованными)
+
 scripts/build_matrix.sh                # dry-run: печатает план 8 ячеек, не собирает
-scripts/build_matrix.sh --build        # сборка -> dist/kc-<os>-<version>.tar (+ .sha256)
+scripts/build_matrix.sh --build --pgclient   # сборка -> dist/kc-<os>-<version>.tar (+ .sha256)
 scripts/build_matrix.sh --build --publish   # + push в приватный GHCR
 ```
 
@@ -305,6 +312,8 @@ scripts/migrate_oneshot.sh --target 26 --os astra --db-host <pg-host> --gen-prof
 
 Флаги: `--target 25|26`, `--os astra|redos`, `--source pull|bundle|preloaded`, `--image-ns <ref>`
 (дефолт `ghcr.io/alexgromer/keycloak-migration`), `--bundle <file>`, `--db-host/-port/-name/-user`,
+`--db-url <dsn>`, `--db-schema <s>`, `--env-file <file>`, `--wizard`, `--profile <имя>`,
+`--profile-name <имя>`, `--gen-profile-only`, `--pg-client-network <сеть>`, `--skip-preflight`, `--yes`,
 `--network`, `--pg-client-network`, `--profile-name`, `--gen-profile-only`, `--dry-run` (дефолт) / `--go`.
 
 Разделы **2.1–2.5** ниже — тот же процесс **вручную, по шагам**, если нужен контроль/кастомизация.
@@ -407,7 +416,7 @@ scripts/migrate_keycloak_v3.sh migrate --profile kc-prod-26 --dry-run
 В dry-run вы увидите строку запуска контейнера-мигратора (пароль замаскирован):
 
 ```
-DRY-RUN: cr run -d --name kc-migrate-24.0.5 --network=host -e KC_DB=postgres \
+DRY-RUN: cr run -d --name kc-migrate-24.0.5-<db-token> --network=host -e KC_DB=postgres \
   -e KC_DB_URL=jdbc:postgresql://<host>:5432/keycloak -e KC_DB_USERNAME=keycloak \
   -e KC_DB_PASSWORD=*** ghcr.io/alexgromer/keycloak-migration:astra-24.0.5 start --optimized
 ```
@@ -457,9 +466,16 @@ Target major берётся из `target_version` профиля (`26.6.3` → m
 | `--airgap` | режим без сети (`AIRGAP_MODE=true`) |
 | `--auto-rollback` | авто-откат при сбое хопа |
 | `--monitor` | живой монитор миграции (если доступен) |
+| `--kill-stale` | завершить конкурирующие/зависшие процессы миграции вместо отказа запускаться |
+| `--no-resume` | игнорировать сохранённые checkpoint'ы и начать заново |
+| `--force-unlock` | снять зависший Liquibase-лок (`databasechangeloglock`) после аварии |
+| `--apply-indexes` | создать индексы, пропущенные Keycloak на больших таблицах |
+| `--security-scan` | выполнить security-проверки перед миграцией |
+| `--yes` | неинтерактивно: подтверждения принимаются по умолчанию |
 | `--yes`, `-y` | неинтерактивно подтвердить миграцию (или `ASSUME_DEFAULTS=true`) — v3.9 |
 
-Команды: `plan` | `migrate` | `rollback` (у `rollback` есть `--force`).
+Команды: `plan` | `migrate` | `rollback` | `verify` (у `rollback` есть `--force`; `verify` — приёмка
+после миграции, см. раздел 3). Всем командам, кроме `plan`, нужен `--profile <имя>`.
 `--target-major` и `--profile-name` — **не существуют** (target — через `target_version` / env `TARGET_MAJOR`).
 
 ---
@@ -473,7 +489,9 @@ Target major берётся из `target_version` профиля (`26.6.3` → m
 
 ```bash
 # В логах контейнера-мигратора
-docker logs kc-migrate-<version> 2>&1 | grep -iE "update.*executed successfully"
+docker logs kc-migrate-<version>-<db-token> 2>&1 | grep -iE "update.*executed successfully"
+# имя транзитного контейнера содержит токен базы данных (ADR-011), чтобы прогоны против РАЗНЫХ баз
+# не конфликтовали; точное имя видно в выводе прогона
 
 # Либо рост числа применённых changeset'ов
 PGPASSWORD="$PROFILE_DB_PASSWORD" psql -h <pg-host> -U keycloak -d keycloak \
@@ -527,10 +545,12 @@ PGPASSWORD="$PROFILE_DB_PASSWORD" psql -h <pg-host> -U keycloak -d keycloak -tAc
 ## 5. Rollback / безопасность
 
 - **Бэкап перед каждым хопом:** `backup_before_step: true` в профиле → инструмент снимает дамп БД
-  (`backup_before_<version>_<timestamp>.dump` в `migration_workspace/`) перед мутацией.
+  (`backup_before_<version>_<timestamp>.dump` в подкаталоге `backups/` рабочего каталога) перед мутацией.
 - **Авто-откат:** запускайте с `--auto-rollback` — при сбое хопа инструмент попытается откатиться к
   последнему бэкапу.
-- **Ручной откат:** `scripts/migrate_keycloak_v3.sh rollback` (при необходимости `--force`).
+- **Ручной откат:** `scripts/migrate_keycloak_v3.sh rollback --profile <имя>` (при необходимости `--force`).
+  Профиль обязателен: из него берутся параметры БД, ссылка на образ и клиент pg-client. Без него откат
+  уходит в авто-обнаружение и на автономном узле не найдёт ни того, ни другого.
 - **Работайте на клоне** (раздел 0.2) — самый надёжный «откат» для прода: исходная БД не тронута.
 - **Возобновление:** инструмент пишет checkpoint'ы; повторный `migrate --profile <name>` продолжит с
   последнего успешного шага.

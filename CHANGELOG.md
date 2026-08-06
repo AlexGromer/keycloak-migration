@@ -7,6 +7,44 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Documentation — an audit of every documented claim against the code (54 defects)
+
+59 claims were checked against the code at v3.10.3; 54 were wrong, missing or stale, 5 held up. The
+documentation was not merely behind — it instructed operators to run things that do not exist.
+
+**Commands and flags that never existed** (both READMEs): `--enable-monitoring` (the flag is
+`--monitor`, and an unknown flag is silently ignored, so the documented command ran with monitoring
+OFF); `--profile=<file>.yaml` (the parser accepts only the space form, and the `.yaml` suffix resolves
+to `name.yaml.yaml` — verified live: the run falls through to auto-discovery); a `profile
+list`/`validate` subcommand; `kc_discovery.sh --output <profile>` (that script writes no profile); a
+docker example running the migration tool from `…:<os>-<version>`, which is a Keycloak HOP image.
+
+**Instructions that cannot work**: `--force-unlock` was documented as releasing the ADR-011 advisory
+lock — it releases the Liquibase changelog lock; the advisory lock frees itself on connection drop and
+a stuck lock container is removed by hand. `rollback` was shown without a profile, which since v3.10.1
+is exactly how it fails on an autonomous node. `MIN_DISK_FREE_MB` was presented as tunable in both the
+guide and the handover documents; it is `readonly`.
+
+**Stale**: README.en.md was still titled v3.9.7 and still pinned `PROFILE_PG_CLIENT_IMAGE` in its
+flagship "fully autonomous" example — the pin that switches the sovereign default off; the ADR range
+stopped at ADR-013; the container path was described as bind-mounting backups (the default streams);
+the 15GB preflight gate and the `kc-migrate-<version>` container name no longer exist; MIGRATION_GUIDE
+claimed the air-gap bundles ship inside the repository (`dist/` is git-ignored).
+
+**Missing**: `--db-url` and `--db-schema` were documented NOWHERE in the repo docs; the flag tables
+omitted `--kill-stale`, `--no-resume`, `--security-scan`, `--yes`, `--monitor`, `--network`,
+`--pg-client-network`, `--env-file`, `--wizard`, `--profile-name`, `--gen-profile-only`; the `verify`
+command was absent from the command list; `build_matrix.sh --build` was given as the whole build
+recipe, without `--pgclient` an air-gapped node gets no client at all; `KC_DB_SCHEMA` was missing from
+the env template.
+
+**The four handover documents** carried four of their own: three integrity rules instead of four, two
+Containerfiles instead of three, `skipped_indexes_<version>.sql` described as applying without a table
+lock (the file holds plain `CREATE INDEX`; only `--apply-indexes` runs them CONCURRENTLY), and a
+"complete" parameter table missing six parameters. All four rebuilt, QA gate clean.
+
+ADR-012/013/015 corrected in place with the reason recorded rather than silently edited.
+
 ## [3.10.3] - 2026-08-06
 
 ### Fixed — the "unreproducible" suite failure had a root cause: `grep -q` + `pipefail`
@@ -217,8 +255,8 @@ into their own registry.
   the container's std streams — `pg_dump` → stdout → the caller's shell writes the file; `pg_restore`
   / `psql -f` read from stdin — so a **non-root** container produces **caller-owned** backups with **no
   bind mount** on any engine. This is what makes the default autonomous migration back up correctly
-  under **rootless Docker** (where a bind-mount write lands as an unwritable subuid). The opt-in
-  parallel directory format (`-Fd`) still uses the mount (Podman `--userns=keep-id`, or a writable
+  under **rootless Docker** (where a bind-mount write lands as an unwritable subuid). The
+  parallel directory format (`-Fd`), selected whenever `parallel_jobs > 1`, still uses the mount (Podman `--userns=keep-id`, or a writable
   work-dir). Live-validated on rootless **Podman** and rootless **Docker** (dump `rc=0` caller-owned,
   restore round-trip); detection + the stream/mount split covered by hermetic tests.
 

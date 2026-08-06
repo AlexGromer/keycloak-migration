@@ -150,6 +150,8 @@ scripts/migrate_oneshot.sh --profile <name> --go
 | `--db-host` | `KC_DB_HOST` | `localhost` |
 | `--db-port` | `KC_DB_PORT` | `5432` |
 | `--db-name` | `KC_DB_NAME` | `keycloak` |
+| `--db-schema` | `KC_DB_SCHEMA` | `public` | The schema holding the Keycloak tables. A non-public schema also sets `search_path`. |
+| `--db-url` | — | — | A whole DSN instead of the four flags above: `postgres://user@host:port/db[?currentSchema=S]` (`postgresql://` accepted). The discrete flags override it. A password in the URL warns — it leaks via `ps`. |
 | `--db-user` | `KC_DB_USER` | `keycloak` |
 | — | `PROFILE_DB_PASSWORD` | *(required for `--go`)* |
 
@@ -248,7 +250,8 @@ Nothing is fetched. The tool asserts each image is present and fails loudly if o
 The bundle is a `tar.xz` of one `docker save` tarball per hop. Build one with:
 
 ```bash
-# KC_PG_CLIENT_MAJOR selects the client major (17 by default). It must be >= your DB server major:
+# PG_CLIENT_MAJOR selects the client major AT BUILD TIME (17 by default); the RUN side reads the same
+# choice from KC_PG_CLIENT_MAJOR. Keep the two in step. It must be >= your DB server major:
 # pg_dump refuses a server newer than itself.
 scripts/build_matrix.sh --build --pgclient   # per-hop images AND the sovereign pg-client
                                              # (without --pgclient an air-gapped node with no host
@@ -338,7 +341,6 @@ health enabled, and:
 
 - confirms `MIGRATION_MODEL` is at the target version,
 - confirms the data invariants still hold,
-- waits for `/health/ready`,
 - runs the Admin API smoke tests — realms, clients, users, token issuance,
 - removes the container.
 
