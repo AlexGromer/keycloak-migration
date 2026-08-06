@@ -55,6 +55,14 @@ gen="$(PROFILE_DIR="$TMPD" timeout 60 bash "$ONESHOT" --target 26 --os astra --p
 f="$TMPD/genp.yaml"
 assert_file_exists "$f" "gen-profile-only wrote a profile"
 content="$(<"$f")"
+# DIAGNOSTIC: this assertion failed ONCE inside a full-suite run and never reproduced (standalone 3/3
+# correct, clean re-run green). If it ever fails again, leave evidence instead of a mystery.
+if ! printf '%s' "$content" | grep -q 'deployment_mode: run'; then
+    echo "    --- generated profile (flake evidence) ---" >&2
+    sed -n '1,25p' "$f" | sed 's/^/    /' >&2
+    echo "    --- oneshot output ---" >&2
+    printf '%s\n' "$gen" | tail -15 | sed 's/^/    /' >&2
+fi
 assert_contains "$content" "deployment_mode: run"   "generated profile is run mode"
 assert_contains "$content" "target_version: 26.6.3" "generated profile target 26.6.3"
 assert_contains "$gen"     "Profile generated"      "gen-profile-only prints next steps"
@@ -164,5 +172,46 @@ describe "F2: the preflight password has a default (set -u would abort a PGPASSW
 MIGRATE_V3="$PROJECT_ROOT/scripts/migrate_keycloak_v3.sh"
 assert_true "grep -q 'PROFILE_DB_PASSWORD:-\${PGPASSWORD' '$MIGRATE_V3'" \
     "run_all_preflight_checks gets the same password precedence as every other consumer"
+
+
+describe "F2: guardrails the audit's last batch added"
+# 1) An image reference with no registry/namespace resolves as docker.io/library/<name>. Only the
+#    presence of {version} used to be validated, so a tag-shaped template passed and the run died at
+#    the first hop on a missing image — the failure a customer node was heading for.
+noreg="$(PROFILE_DIR="$TMPD" timeout 60 bash "$ONESHOT" --target 26 --os astra --db-host db \
+    --image-ref-template 'astra-{version}' --dry-run </dev/null 2>&1 || true)"
+assert_contains "$noreg" "carries no registry/namespace" "a tag-shaped image ref is called out"
+assert_contains "$noreg" "Docker Hub"                    "…and the consequence is named"
+full="$(PROFILE_DIR="$TMPD" timeout 60 bash "$ONESHOT" --target 26 --os astra --db-host db \
+    --image-ref-template 'registry.corp/keycloak:{version}' --dry-run </dev/null 2>&1 || true)"
+assert_true "! printf '%s' \"\$full\" | grep -q 'carries no registry'" "a full reference passes quietly"
+
+# 2) A bundle path with the DEFAULT source silently went to a registry instead.
+: > "$TMPD/ignored.tar.xz"
+ignb="$(PROFILE_DIR="$TMPD" timeout 60 bash "$ONESHOT" --target 26 --os astra --db-host db \
+    --bundle "$TMPD/ignored.tar.xz" --dry-run </dev/null 2>&1 || true)"
+assert_contains "$ignb" "the bundle is NOT used" "a bundle that will not be used is announced"
+
+# 3) --network wired ONLY the Keycloak container; the pg-client (which talks to the database) had no
+#    flag at all, so a DB reachable only by container name was unreachable for every psql call.
+PROFILE_DIR="$TMPD" timeout 60 bash "$ONESHOT" --target 26 --os astra --db-host kc-db \
+    --network kc-net --profile-name nettest2 --gen-profile-only </dev/null >/dev/null 2>&1 || true
+netprof="$(<"$TMPD/nettest2.yaml")"
+assert_contains "$netprof" "run_network: kc-net"       "--network reaches the Keycloak container"
+assert_contains "$netprof" "pg_client_network: kc-net" "…and the pg-client container too"
+
+# 4) A trailing flag with no value used to abort SILENTLY: `shift 2` returns 1 with one arg left and
+#    set -e killed the script before any message could be printed.
+trail="$(timeout 30 bash "$ONESHOT" --target </dev/null 2>&1 || true)"
+# NOTE: the needle must not start with '--' — assert_contains greps, and grep reads it as options.
+assert_contains "$trail" "target is required" "a trailing flag reports the real problem, not silence"
+
+# 5) The bundle repoint must use the tag the archive ACTUALLY carries, not one rebuilt from IMAGE_NS
+#    (a bundle built into the operator's own registry carries a different namespace).
+bundle_branch2="$(sed -n '/^        bundle)/,/^        preloaded)/p' "$ONESHOT")"
+assert_true "printf '%s' \"\$bundle_branch2\" | grep -q 'Loaded image'" \
+    "the loaded tag is parsed from the engine output"
+assert_true "printf '%s' \"\$bundle_branch2\" | grep -q 'carries images for OS'" \
+    "a bundle for the other OS is named as such, not left as a raw engine error"
 
 test_report

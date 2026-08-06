@@ -36,7 +36,9 @@ OUT_DIR="dist"
 # (from PGDG, since the sovereign OS repo caps at client-15). MUST be >= the DB server major —
 # pg_dump refuses a newer server. Built by `build_matrix.sh --pgclient`; migrate_oneshot defaults
 # PROFILE_PG_CLIENT_IMAGE to <image-ns>:<os>-pgclient-<major>.
-# PG_CLIENT_MAJOR="17"
+# PG_CLIENT_MAJOR="17"     # build side. The RUN side reads the same choice from KC_PG_CLIENT_MAJOR
+                           # (config/kc-migration.env) — keep the two in step, or the migration will
+                           # look for a client major the bundle does not carry.
 # JDK_KC16="11"
 
 # Optionally restrict the matrix (defaults shown). Comma-separated.

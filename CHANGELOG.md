@@ -7,6 +7,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed — the audit's last 19 candidates (verified after the fact)
+
+The first verification pass covered only 20 of 39 candidates. Going through the rest turned up code
+defects that had never been looked at, including one that would have hit any operator building images
+into their own registry.
+
+- **The pg-client reference was rebuilt from `IMAGE_NS`, never read from the archive.** A bundle built
+  into the operator's own registry (`GHCR_IMAGE` in `config/images.conf`), or a run using
+  `--image-ref-template` instead of `--image-ns`, carries a different namespace — and the tool then
+  looked for an image nobody had loaded. The bundle path now uses the tag the engine reports
+  (`Loaded image: …`), falling back to the naming convention only if that is unparseable.
+- **`--network` wired only the Keycloak container.** Its pg-client twin had no flag and no `KC_*`
+  variable, so a database reachable only by container name — the rootless-Docker topology this
+  project documents — was unreachable for every `psql`/`pg_dump`/`pg_restore` call. New
+  `--pg-client-network` / `KC_PG_CLIENT_NETWORK`, defaulting to `--network`.
+- **A trailing flag exited silently.** `shift 2` with one argument left returns 1, and `set -e` killed
+  the script before any message: `migrate_oneshot.sh --target` printed *nothing*. Now the normal
+  validation reports the real problem.
+- **An image reference with no registry was accepted.** Only the presence of `{version}` was checked,
+  so a tag-shaped template (`astra-{version}`) passed and the engine resolved it as
+  `docker.io/library/astra`. It is called out now, with the consequence named.
+- **A bundle for the other OS** produced a raw "no such file" from the engine; it now says which OS the
+  bundle carries and which was asked for.
+- **A `--bundle` that will never be used** (source left at the default `pull`) is announced instead of
+  silently ignored.
+- Docs: ADR-012's "streaming was rejected" is marked superseded in part by ADR-015; ADR-013 records
+  that its default did not take effect until v3.10.1 (ADR-016); the `--env-file` template gains the
+  pg-client knobs (`KC_PG_CLIENT_NETWORK`, `KC_PG_CLIENT_MAJOR`, and what pinning
+  `PROFILE_PG_CLIENT_IMAGE` switches off); `images.conf.example` names its run-side twin.
+- `tests/test_migrate_oneshot.sh` leaves evidence (the generated profile and the run output) if the
+  one non-reproducing full-suite failure ever recurs.
+
 ## [3.10.1] - 2026-08-05
 
 ### Documentation — corrected against the code the audit examined
