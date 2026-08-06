@@ -166,6 +166,7 @@ the box can read it.
 | `--image-ref-template` | `KC_IMAGE_REF_TEMPLATE` | — | Your own naming. `{version}` is replaced per hop. Overrides `--image-ns`. |
 | `--bundle` | `KC_BUNDLE` | — | Path to the offline `.tar.xz` (with `--source bundle`). |
 | `--network` | `KC_NETWORK` | `host` | Container network. `host` reaches a database on the host; use a bridge if the database is in one. |
+| `--pg-client-network` | `KC_PG_CLIENT_NETWORK` | same as `--network` | Network for the **pg-client** container — the one that talks to the database. Set it when the database is reachable only by container name (a rootless-Docker bridge). |
 
 ### Safety
 

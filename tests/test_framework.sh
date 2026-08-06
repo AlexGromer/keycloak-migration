@@ -99,7 +99,13 @@ assert_true() {
     TESTS_RUN=$((TESTS_RUN + 1))
 
     local _rc=0
+    # The condition is often a pipeline ending in `grep -q`, whose early exit SIGPIPEs the writer.
+    # Under `set -o pipefail` that turns a satisfied condition into a failed assertion, dependent on
+    # timing. The assertion cares about the LAST command's status, so evaluate without pipefail.
+    local _had_pipefail=""; [[ -o pipefail ]] && _had_pipefail=1
+    set +o pipefail
     eval "$condition" || _rc=$?
+    [[ -n "$_had_pipefail" ]] && set -o pipefail
 
     if [[ $_rc -eq 0 ]]; then
         TESTS_PASSED=$((TESTS_PASSED + 1))
@@ -119,7 +125,13 @@ assert_false() {
     TESTS_RUN=$((TESTS_RUN + 1))
 
     local _rc=0
+    # The condition is often a pipeline ending in `grep -q`, whose early exit SIGPIPEs the writer.
+    # Under `set -o pipefail` that turns a satisfied condition into a failed assertion, dependent on
+    # timing. The assertion cares about the LAST command's status, so evaluate without pipefail.
+    local _had_pipefail=""; [[ -o pipefail ]] && _had_pipefail=1
+    set +o pipefail
     eval "$condition" || _rc=$?
+    [[ -n "$_had_pipefail" ]] && set -o pipefail
 
     if [[ $_rc -ne 0 ]]; then
         TESTS_PASSED=$((TESTS_PASSED + 1))
@@ -156,7 +168,14 @@ assert_contains() {
 
     TESTS_RUN=$((TESTS_RUN + 1))
 
-    if echo "$haystack" | grep -q "$needle"; then
+    # NO PIPELINE HERE. `echo ... | grep -q` looks harmless and is not: grep -q exits at the FIRST
+    # match, the writer then takes SIGPIPE, and under `set -o pipefail` (which every suite sets) the
+    # pipeline reports failure for a needle that IS present. Reproduced 100/100 with a needle near the
+    # start of a large haystack and 0/100 with one at the end — which is precisely the shape of the
+    # rare, arbitrary-looking suite failures this framework produced under load.
+    # A here-string has no writer to kill. `--` keeps a needle that starts with '-' from being read
+    # as grep's own options.
+    if grep -q -- "$needle" <<<"$haystack"; then
         TESTS_PASSED=$((TESTS_PASSED + 1))
         echo -e "  ${GREEN}✓${NC} $msg"
     else
