@@ -1,6 +1,6 @@
 > LANGUAGE: [🇷🇺 Русский](README.md) | 🇬🇧 English
 
-# Keycloak Migration Tool v3.9.7
+# Keycloak Migration Tool v3.10.3
 
 **A "single-command" Keycloak migration utility** with environment auto-detection, support for multi-tenant and clustered deployments, real-time monitoring, production hardening, **security hardening** (SAST, secret scanning, input validation, audit logging), **containerized step-by-step migration** (container-hop — at every step a real Keycloak container is brought up and the advancement of the MIGRATION_MODEL level is verified, Layer-2), **sovereign OS images** (Astra Linux SE / RED OS) with **air-gap** offline distribution and support for all databases officially supported by Keycloak.
 
@@ -8,7 +8,7 @@
 [![Tests](https://img.shields.io/badge/tests-31%20suites-success)](tests/)
 [![Bash](https://img.shields.io/badge/bash-5.0%2B-green.svg)](scripts/)
 [![Databases](https://img.shields.io/badge/databases-6-blue.svg)](scripts/lib/database_adapter.sh)
-[![Version](https://img.shields.io/badge/version-v3.9.7-blue.svg)](CHANGELOG.md)
+[![Version](https://img.shields.io/badge/version-v3.10.3-blue.svg)](CHANGELOG.md)
 [![Images](https://img.shields.io/badge/sovereign%20images-Astra%20SE%20%7C%20RED%20OS-blue.svg)](docs/AIRGAP.md)
 
 ---
@@ -38,7 +38,7 @@ The wizard:
 ### 3. Or call directly with a ready-made profile
 
 ```bash
-./scripts/migrate_keycloak_v3.sh migrate --profile=my-profile.yaml
+./scripts/migrate_keycloak_v3.sh migrate --profile my-profile
 ```
 
 ### 4. Container-hop in one command (sovereign images, v3.9)
@@ -96,7 +96,8 @@ installed):
 
 ```bash
 export PROFILE_DB_PASSWORD='...'
-export PROFILE_PG_CLIENT_IMAGE=postgres:17   # major ≥ DB server major
+# Do NOT pin PROFILE_PG_CLIENT_IMAGE here: pinning is exactly what switches OFF the sovereign
+# per-OS default and the substitution of the client the bundle carries.
 scripts/migrate_oneshot.sh --target 26 --os astra --source preloaded \
   --image-ns ghcr.io/<you>/keycloak-migration \
   --db-host <db-host> --db-port 5432 --db-name keycloak --db-user keycloak --go
@@ -533,7 +534,7 @@ Manual invocation (`source scripts/lib/backup_rotation.sh`): `rotate_keep_last_n
 ### Monitoring integration (v3.1)
 
 ```bash
-./scripts/migrate_keycloak_v3.sh migrate --profile=prod.yaml --enable-monitoring
+./scripts/migrate_keycloak_v3.sh migrate --profile prod --monitor
 # Bring up the stack:
 cd examples/monitoring && docker-compose up -d
 ```
@@ -551,7 +552,7 @@ Labels for multi-instance: `tenant="…"`, `node="…"`.
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
-│                  KEYCLOAK MIGRATION v3.9.7                      │
+│                  KEYCLOAK MIGRATION v3.10.3                     │
 ├─────────────────────────────────────────────────────────────────┤
 │                                                                 │
 │  ┌──────────────┐      ┌──────────────┐      ┌──────────────┐  │
@@ -791,7 +792,8 @@ All operations are written to `migration_audit.jsonl`:
 ./scripts/migrate_keycloak_v3.sh migrate  --profile <name>
 ./scripts/migrate_keycloak_v3.sh plan     --profile <name>
 ./scripts/migrate_keycloak_v3.sh verify   --profile <name>    # post-migration acceptance (ADR-010)
-./scripts/migrate_keycloak_v3.sh rollback [--force]
+./scripts/migrate_keycloak_v3.sh rollback --profile <name> [--force]
+#   the profile is required: it carries the DB settings and the pg-client image
 #   Offline image acquisition (air-gap) is NOT a migrate_keycloak_v3.sh subcommand;
 #   see `migrate_oneshot.sh --source bundle|preloaded` below and docs/AIRGAP.md.
 
@@ -802,7 +804,13 @@ All operations are written to `migration_audit.jsonl`:
 --dry-run                # show the plan without executing
 --apply-indexes          # create skipped indexes via CONCURRENTLY (v3.9.4/3.9.6)
 --no-resume              # ignore existing checkpoints, start over
---force-unlock           # release a "stuck" advisory lock (ADR-011)
+--kill-stale             # terminate competing/hung migration processes instead of refusing to run
+--yes                    # non-interactive: confirmations take their default
+--monitor                # start the Prometheus exporter for the run
+--security-scan          # run the security checks before migrating
+--force-unlock           # release a stale Liquibase changelog lock left by a crashed migration
+#   (it does NOT touch the ADR-011 advisory lock: that one frees itself when the connection drops;
+#    a stuck lock container is removed with: docker ps --filter name=kc-dblock- ; docker rm -f <name>)
 --security-scan          # run security scanning (ShellCheck / gitleaks)
 
 # One-shot container-hop (migrate_oneshot.sh flags — NOT migrate_keycloak_v3.sh)
@@ -813,11 +821,13 @@ scripts/migrate_oneshot.sh --target <25|26> --os <astra|redos> --db-host <host> 
 #   --image-ref-template <t> # image-reference template for container-hop
 
 # Profile management
-./scripts/migrate_keycloak_v3.sh profile list
-./scripts/migrate_keycloak_v3.sh profile validate <name>
+# There is no `profile` subcommand: only plan, migrate, rollback, verify.
+# Profiles are files under profiles/*.yaml — list them with the shell:
+ls profiles/*.yaml
 
 # Auto-discovery
-./scripts/kc_discovery.sh [--output <profile-name>]
+./scripts/kc_discovery.sh          # prints what it found; it does NOT write a profile
+# profiles are generated by config_wizard.sh or migrate_oneshot.sh --gen-profile-only
 ```
 
 ---

@@ -46,7 +46,9 @@ an air-gapped node that has no host `psql` cannot back up, reconcile or verify �
 `dist/kc-<os>-bundle.tar.xz` bundle produced by the CI workflow (§5), onto offline media.
 **Verify on the air-gapped side before loading:**
 ```bash
-sha256sum -c kc-astra-26.6.3.tar.sha256
+cd "$(dirname kc-astra-26.6.3.tar)" && sha256sum -c kc-astra-26.6.3.tar.sha256
+# the .sha256 records the path build_matrix was given (usually dist/kc-...), so verify from the
+# directory that reproduces it, or re-hash: sha256sum kc-astra-26.6.3.tar
 ```
 
 ## 4. Consume — maps to existing acquisition modes (no new runtime code)
@@ -95,8 +97,8 @@ runs steps 2–3, then packs a **per-OS air-gap bundle** and (with `publish`) at
   on a truly isolated node without them the migration stops at preflight with
   `Tool missing: psql`. Check the `pg-client` line in the run banner to see which client was selected.
   The node
-  falls back to host psql.
-- **Per-OS prereleases:** `astra → alsebased-images-<run_id>`, `redos → redosbased-images-<run_id>`,
+  then REQUIRES host psql: without it the run stops at preflight with `Tool missing: psql`.
+- **Per-OS prereleases:** `astra → alsebased-images-<run_id>-<run_attempt>`, `redos → redosbased-images-<run_id>`,
   each carrying only its own bundle + `.sha256`.
 - **Size guard:** a bundle over GitHub's **2 GiB** asset cap is still built and uploaded as a CI
   artifact but is **not** attached to a prerelease — deliver it **out-of-band** from the runner's

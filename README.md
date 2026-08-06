@@ -38,7 +38,7 @@ cd keycloak-migration
 ### 3. Либо прямой вызов с готовым профилем
 
 ```bash
-./scripts/migrate_keycloak_v3.sh migrate --profile=my-profile.yaml
+./scripts/migrate_keycloak_v3.sh migrate --profile my-profile
 ```
 
 ### 4. Container-hop одной командой (суверенные образы, v3.9)
@@ -71,13 +71,15 @@ scripts/migrate_oneshot.sh --target 26 --os astra --db-host <pg-host> --source p
 - если бинарник есть на хосте — он запускается на хосте (прежний быстрый путь, сохраняет `-Fd`/`-j`);
 - если бинарника нет — вызов исполняется **внутри контейнерного образа** (переменная
   `PROFILE_PG_CLIENT_IMAGE`) поверх host-сети `--network=host`, с проброшенным паролем БД
-  (`PGPASSWORD` передаётся по имени, значение не попадает в argv движка) и bind-монтированием файлов
+  (`PGPASSWORD` передаётся по имени, значение не попадает в argv движка). Резервные копии в формате по
+  умолчанию (`-Fc`) передаются ПОТОКОМ, без монтирования; каталог монтируется только для параллельного
+  формата `-Fd` — bind-монтирование файлов
   бэкапа тем же путём (`PG_CLIENT_MOUNT`, relabel `:z` для SELinux). Флаг `--user` добавляется только
   на явно rootful-движке.
 
   **По умолчанию это суверенный per-OS образ** `<namespace>:<ос>-pgclient-<мажор>` (ADR-013), мажор
   задаётся `KC_PG_CLIENT_MAJOR` (по умолчанию 17). Он же едет внутри офлайн-бандла, поэтому
-  изолированный узел получает клиента из самой поставки. Апстримный `postgres:<мажор>` остаётся
+  изолированный узел получает клиента из самой поставки. Апстримный `postgres:16` остаётся
   переопределением и запасным вариантом: он подставляется, если суверенного образа на узле нет.
 
 **Advisory-lock по БД тоже стал автономным.** Межхостовая блокировка «одна миграция на одну
@@ -134,7 +136,8 @@ docker load -i kc-redos-26.6.3.tar.xz
 ```
 
 **Собрать матрицу самостоятельно** (на своих лицензионных базах): отредактируйте `config/images.conf`
-→ `scripts/build_matrix.sh --build [--publish]`. Полный runbook сборка → экспорт → перенос →
+→ `scripts/build_matrix.sh --build --pgclient [--publish]` (без `--pgclient` не соберётся суверенный
+клиент pg-client, который нужен изолированному узлу). Полный runbook сборка → экспорт → перенос →
 потребление: **[docs/AIRGAP.md](docs/AIRGAP.md)**.
 
 ---
@@ -210,6 +213,8 @@ restore-into-scratch, `CREATE INDEX CONCURRENTLY`; advisory-lock — захва�
 - ✅ **Advisory-lock по БД** — одна миграция на одну базу, межхостово (ADR-011)
 - ✅ **`--apply-indexes`** — создание индексов, пропущенных Keycloak, через `CONCURRENTLY` (v3.9.4/3.9.6)
 - ✅ **Автономность pg-client** — `psql`/`pg_dump`/`pg_restore` на хосте не обязательны (v3.9.7, ADR-012/013)
+- ✅ **Работа без прав суперпользователя** — все образы `USER 1000`, поддержаны rootless docker и podman,
+  потоковые бэкапы без монтирования (v3.10, ADR-015/016) — см. [docs/ROOTLESS.md](docs/ROOTLESS.md)
 - ✅ **Покрытие тестами** — 31 test suite (`tests/run_all_tests.sh`)
 
 ### Стратегии миграции
@@ -541,7 +546,7 @@ backup:
 ### Интеграция мониторинга (v3.1)
 
 ```bash
-./scripts/migrate_keycloak_v3.sh migrate --profile=prod.yaml --enable-monitoring
+./scripts/migrate_keycloak_v3.sh migrate --profile prod --monitor
 # Поднять стек:
 cd examples/monitoring && docker-compose up -d
 ```
@@ -559,7 +564,7 @@ cd examples/monitoring && docker-compose up -d
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
-│                  KEYCLOAK MIGRATION v3.9.7                      │
+│                  KEYCLOAK MIGRATION v3.10.3                     │
 ├─────────────────────────────────────────────────────────────────┤
 │                                                                 │
 │  ┌──────────────┐      ┌──────────────┐      ┌──────────────┐  │
@@ -591,7 +596,7 @@ cd examples/monitoring && docker-compose up -d
 **Distribution Handler** (`scripts/lib/distribution_handler.sh`): `dist_download`,
 `dist_validate_airgap`, `dist_check_network`.
 
-Решения зафиксированы в `ARCHITECTURE.md` (ADR-001 … ADR-013).
+Решения зафиксированы в `ARCHITECTURE.md` (ADR-001 … ADR-016).
 
 ---
 
@@ -627,7 +632,8 @@ migration:
 ### Air-gap миграция
 ```bash
 # 1. На СВЯЗАННОМ хосте: собрать бандл суверенных образов
-scripts/build_matrix.sh --build           # -> dist/kc-<os>-<ver>.tar (+ .sha256)
+scripts/build_matrix.sh --build --pgclient   # -> dist/kc-<os>-<ver>.tar + kc-<os>-pgclient-<мажор>.tar
+#   без --pgclient суверенный клиент НЕ собирается, и изолированный узел без host psql работать не сможет
 #    (или взять готовый комбинированный бандл dist/kc-<os>-bundle.tar.xz)
 # 2. Перенести dist/*.tar(.xz) + .sha256 на изолированный контур и проверить контрольную сумму
 sha256sum -c kc-astra-bundle.tar.xz.sha256
@@ -799,7 +805,8 @@ check»:
 ./scripts/migrate_keycloak_v3.sh migrate  --profile <name>
 ./scripts/migrate_keycloak_v3.sh plan     --profile <name>
 ./scripts/migrate_keycloak_v3.sh verify   --profile <name>    # приёмка после миграции (ADR-010)
-./scripts/migrate_keycloak_v3.sh rollback [--force]
+./scripts/migrate_keycloak_v3.sh rollback --profile <name> [--force]
+#   профиль обязателен: из него берутся параметры БД и образ pg-client
 #   Офлайн-получение образов (air-gap) — НЕ подкоманда migrate_keycloak_v3.sh;
 #   см. `migrate_oneshot.sh --source bundle|preloaded` ниже и docs/AIRGAP.md.
 
@@ -810,7 +817,13 @@ check»:
 --dry-run                # показать план без выполнения
 --apply-indexes          # создать пропущенные индексы через CONCURRENTLY (v3.9.4/3.9.6)
 --no-resume              # игнорировать существующие checkpoint'ы, начать заново
---force-unlock           # снять «застрявший» advisory-lock (ADR-011)
+--kill-stale             # завершить конкурирующие/зависшие процессы миграции вместо отказа
+--yes                    # неинтерактивно: подтверждения принимаются по умолчанию
+--monitor                # включить экспортёр метрик Prometheus на время прогона
+--security-scan          # выполнить security-проверки перед миграцией
+--force-unlock           # снять зависший Liquibase-лок (databasechangeloglock) после аварийной миграции
+#   (advisory-lock ADR-011 этим флагом НЕ снимается: он сам освобождается при обрыве соединения,
+#    а зависший контейнер блокировки убирается так: docker ps --filter name=kc-dblock- ; docker rm -f <name>)
 --security-scan          # запустить security-сканирование (ShellCheck / gitleaks)
 
 # One-shot container-hop (migrate_oneshot.sh — свои флаги, НЕ migrate_keycloak_v3.sh)
@@ -818,14 +831,20 @@ scripts/migrate_oneshot.sh --target <25|26> --os <astra|redos> --db-host <host> 
   --source <pull|bundle|preloaded> [--bundle <file>] [--dry-run | --go]
 #   --env-file <path>        # загрузить переменные окружения из файла
 #   --wizard                 # запустить интерактивный мастер
-#   --image-ref-template <t> # шаблон ссылки на образы для container-hop
+#   --image-ref-template <t> # шаблон ссылки на образы (ПОЛНЫЙ, с реестром: registry/img:{version})
+#   --db-url <dsn>           # postgres://user@host:port/db[?currentSchema=S] вместо --db-*
+#   --db-schema <s>          # схема таблиц Keycloak, если она не public
+#   --network <net>          # сеть движка для контейнеров Keycloak И pg-client
+#   --pg-client-network <n>  # сеть отдельно для pg-client (по умолчанию = --network)
 
 # Управление профилями
-./scripts/migrate_keycloak_v3.sh profile list
-./scripts/migrate_keycloak_v3.sh profile validate <name>
+# Подкоманд `profile list` / `profile validate` нет: доступны только plan, migrate, rollback, verify.
+# Профили — это файлы в profiles/*.yaml, просмотр обычными средствами:
+ls profiles/*.yaml
 
 # Авто-обнаружение
-./scripts/kc_discovery.sh [--output <profile-name>]
+./scripts/kc_discovery.sh          # печатает найденное окружение; профиль НЕ создаёт
+# профиль генерируют config_wizard.sh или migrate_oneshot.sh --gen-profile-only
 ```
 
 ---
@@ -891,11 +910,11 @@ scripts/migrate_oneshot.sh --target 26 --os astra --source bundle --bundle dist/
 
 ### Docker (CI/CD и изоляция)
 ```bash
-docker run --rm \
-  -v $(pwd)/profiles:/data \
-  -v ~/.kube:/root/.kube \
-  ghcr.io/<owner>/keycloak-migration:redos-26.6.3 \
-  --profile=/data/production.yaml
+# ВНИМАНИЕ: ghcr.io/<owner>/keycloak-migration:<ос>-<версия> — это образ САМОГО Keycloak (звено
+# цепочки переходов), а не образ инструмента миграции. Инструмент — это bash-скрипты из поставки,
+# запускайте их на узле; образ инструмента не собирается и не публикуется.
+scripts/migrate_oneshot.sh --target 26 --os redos --source pull \
+  --db-host <host> --db-name keycloak --db-user keycloak --go
 ```
 
 ### Helm (K8s-native Job с RBAC)
@@ -943,7 +962,7 @@ MIT License.
   происходит на каждом шаге и что делать при сбое;
 - [docs/MIGRATION_GUIDE.md](docs/MIGRATION_GUIDE.md) — полный runbook;
 - [docs/AIRGAP.md](docs/AIRGAP.md) — офлайн / суверенная поставка;
-- [ARCHITECTURE.md](ARCHITECTURE.md) — принятые решения (ADR-001 … ADR-013);
+- [ARCHITECTURE.md](ARCHITECTURE.md) — принятые решения (ADR-001 … ADR-016);
 - [CHANGELOG.md](CHANGELOG.md) — что менялось и что ломалось до исправления.
 
 ## 🏆 Авторы

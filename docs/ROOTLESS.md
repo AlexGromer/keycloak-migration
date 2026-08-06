@@ -72,7 +72,9 @@ backup format (`-Fc`), so the standard autonomous migration backs up fine under 
 2. **Parallel directory dumps (`-Fd`, opt-in) can't stream.** With `parallel_jobs > 1` the backup
    switches to the directory format, which writes many files and needs the bind mount — and a
    non-root container can't write it under rootless Docker (uid 1000 maps to an unwritable subuid;
-   Docker has no `--userns=keep-id`). The **default single-file backup is unaffected** (it streams).
+   Docker has no `--userns=keep-id`). The **single-file backup streams** — and it is what the `migrate_oneshot.sh` path always uses, because
+   that path pins `parallel_jobs` to 1. A profile that sets `parallel_jobs > 1` (or the `auto` tuning in
+   `migrate_keycloak_v3.sh`) switches to `-Fd` and hits this caveat.
    For parallel dumps under rootless Docker, make the work-dir writable by the mapped subuid, or use
    rootless Podman (which handles `-Fd` via `--userns=keep-id`).
 
