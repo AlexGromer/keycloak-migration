@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [3.10.3] - 2026-08-06
+
 ### Fixed — the "unreproducible" suite failure had a root cause: `grep -q` + `pipefail`
 
 - **`assert_contains` reported failures for content that was present.** It ran
