@@ -29,7 +29,7 @@
 #                      [--db-url postgres://[user[:pass]@]host[:port]/db[?currentSchema=S]]
 #                      [--source pull|bundle|preloaded] [--image-ns REF]
 #                      [--image-ref-template 'registry/img:{version}']
-#                      [--bundle FILE] [--network NET] [--current VER]
+#                      [--bundle FILE] [--network NET] [--pg-client-network NET] [--current VER]
 #                      [--work-dir DIR] [--skip-preflight] [--apply-indexes]
 #                      [--env-file FILE] [--wizard] [--profile NAME]
 #                      [--profile-name NAME] [--gen-profile-only] [--yes] [-h]
@@ -161,6 +161,11 @@ IMAGE_NS="${KC_IMAGE_NS:-ghcr.io/alexgromer/keycloak-migration}"
 IMAGE_REF_TEMPLATE="${KC_IMAGE_REF_TEMPLATE:-}"
 BUNDLE="${KC_BUNDLE:-}"
 NETWORK="${KC_NETWORK:-}"
+# The pg-client container needs its own network knob. --network wired ONLY the Keycloak container, so
+# a database reachable only by container name (the rootless-docker topology this tool documents) was
+# unreachable for every psql/pg_dump/pg_restore call unless the operator knew to export the raw
+# PROFILE_PG_CLIENT_NETWORK. Defaults to --network, which is what a single-bridge setup wants.
+PG_CLIENT_NETWORK="${KC_PG_CLIENT_NETWORK:-}"
 DB_HOST="${KC_DB_HOST:-localhost}"
 DB_PORT="${KC_DB_PORT:-5432}"
 DB_NAME="${KC_DB_NAME:-keycloak}"
@@ -235,22 +240,23 @@ done
 # ----------------------------------------------------------------------------
 while [[ $# -gt 0 ]]; do
     case "$1" in
-        --target)           TARGET="${2:-}"; shift 2 ;;
-        --os)               OS="${2:-}"; shift 2 ;;
-        --current)          CURRENT="${2:-}"; shift 2 ;;
-        --source)           SRC="${2:-}"; shift 2 ;;
-        --image-ns)         IMAGE_NS="${2:-}"; shift 2 ;;
-        --image-ref-template) IMAGE_REF_TEMPLATE="${2:-}"; shift 2 ;;
-        --bundle)           BUNDLE="${2:-}"; shift 2 ;;
-        --network)          NETWORK="${2:-}"; shift 2 ;;
-        --db-host)          DB_HOST="${2:-}"; shift 2 ;;
-        --db-port)          DB_PORT="${2:-}"; shift 2 ;;
-        --db-name)          DB_NAME="${2:-}"; shift 2 ;;
-        --db-user)          DB_USER="${2:-}"; shift 2 ;;
+        --target)           TARGET="${2:-}"; shift 2 || shift ;;
+        --os)               OS="${2:-}"; shift 2 || shift ;;
+        --current)          CURRENT="${2:-}"; shift 2 || shift ;;
+        --source)           SRC="${2:-}"; shift 2 || shift ;;
+        --image-ns)         IMAGE_NS="${2:-}"; shift 2 || shift ;;
+        --image-ref-template) IMAGE_REF_TEMPLATE="${2:-}"; shift 2 || shift ;;
+        --bundle)           BUNDLE="${2:-}"; shift 2 || shift ;;
+        --network)          NETWORK="${2:-}"; shift 2 || shift ;;
+        --pg-client-network) PG_CLIENT_NETWORK="${2:-}"; shift 2 || shift ;;
+        --db-host)          DB_HOST="${2:-}"; shift 2 || shift ;;
+        --db-port)          DB_PORT="${2:-}"; shift 2 || shift ;;
+        --db-name)          DB_NAME="${2:-}"; shift 2 || shift ;;
+        --db-user)          DB_USER="${2:-}"; shift 2 || shift ;;
         --db-url)           shift 2 ;;   # already parsed by the pre-scan above
-        --db-schema)        DB_SCHEMA="${2:-}"; shift 2 ;;
-        --profile-name)     PROFILE_NAME_OPT="${2:-}"; shift 2 ;;
-        --profile)          USE_PROFILE="${2:-}"; shift 2 ;;
+        --db-schema)        DB_SCHEMA="${2:-}"; shift 2 || shift ;;
+        --profile-name)     PROFILE_NAME_OPT="${2:-}"; shift 2 || shift ;;
+        --profile)          USE_PROFILE="${2:-}"; shift 2 || shift ;;
         --wizard)           RUN_WIZARD="true"; shift ;;
         --work-dir)         shift 2 ;;   # already consumed by the pre-scan above
         --env-file)         shift 2 ;;   # already consumed by the pre-scan above
@@ -351,6 +357,12 @@ fi
 if [[ "$SRC" == "bundle" && -z "$BUNDLE" ]]; then
     log_error "--source bundle requires --bundle <path-to-kc-${OS}-bundle.tar.xz>"; exit 2
 fi
+# The other direction was silent: a bundle path with the DEFAULT source (pull) meant the operator
+# thought they were running air-gapped while the tool went to a registry.
+if [[ -n "$BUNDLE" && "$SRC" != "bundle" ]]; then
+    log_warn "--bundle/KC_BUNDLE is set but --source is '${SRC}' — the bundle is NOT used"
+    log_warn "  add --source bundle (or KC_SOURCE=bundle) to load from it"
+fi
 
 # Build the hop chain via the tool's own resolver (single source of truth).
 HOPS="$(kc_build_migration_path "$CURRENT" "$TARGET")"
@@ -376,6 +388,16 @@ if [[ -n "$IMAGE_REF_TEMPLATE" ]]; then
 else
     export PROFILE_CONTAINER_IMAGE_REF="${IMAGE_NS}:${OS}-{version}"
 fi
+
+# {version} was the ONLY thing validated. A tag-shaped value ("astra-{version}") passed, and the engine
+# then resolved it as docker.io/library/astra — the failure a customer hit, visible only as a missing
+# image at the first hop. A bare local name is legitimate for --source preloaded, so warn, not refuse.
+case "${PROFILE_CONTAINER_IMAGE_REF%%:*}" in
+    */*) ;;
+    *)  log_warn "image ref '${PROFILE_CONTAINER_IMAGE_REF}' carries no registry/namespace"
+        log_warn "  the engine will look for it on Docker Hub (docker.io/library/...)"
+        log_warn "  with --source pull/bundle pass the FULL reference, e.g. registry.corp/keycloak:{version}" ;;
+esac
 
 # pg-client image (v3.9.7 autonomy, ADR-013): default to the SOVEREIGN per-OS client image so a node
 # with no host psql uses the shipped ALSE/RED OS client (astra-pgclient-<major> / redos-pgclient-<major>).
@@ -453,6 +475,18 @@ acquire_images() {
             local xdir="${ONESHOT_WORK_DIR}/bundle"
             mkdir -p "$xdir"
             _os_run "tar -xJf ${BUNDLE} -C ${xdir}" -- tar -xJf "$BUNDLE" -C "$xdir"
+            # A bundle for the other OS shows up as a raw "no such file" from the engine. Name the
+            # actual problem instead.
+            if [[ "$ONESHOT_DRY" != "true" && ! -f "${xdir}/kc-${OS}-${HOP_ARR[0]}.tar" ]]; then
+                shopt -s nullglob; local _other=("${xdir}"/kc-*-*.tar); shopt -u nullglob
+                if (( ${#_other[@]} > 0 )); then
+                    local _bn0="${_other[0]##*/}" _bos
+                    _bos="${_bn0#kc-}"; _bos="${_bos%%-*}"
+                    log_error "this bundle carries images for OS '${_bos}', but the run asked for --os ${OS}"
+                    log_error "  use kc-${OS}-bundle.tar.xz, or re-run with --os ${_bos}"
+                    exit 2
+                fi
+            fi
             for v in "${HOP_ARR[@]}"; do
                 local tar="${xdir}/kc-${OS}-${v}.tar"
                 _os_run "cr load -i ${tar}" -- cr load -i "$tar"
@@ -470,14 +504,27 @@ acquire_images() {
                 local pgtars=("${xdir}"/kc-"${OS}"-pgclient-*.tar)
                 shopt -u nullglob
                 if (( ${#pgtars[@]} > 0 )); then
-                    local pgtar="${pgtars[0]}"
-                    if _os_run "cr load -i ${pgtar}" -- cr load -i "$pgtar"; then
+                    local pgtar="${pgtars[0]}" _load_out=""
+                    log_info "RUN: cr load -i ${pgtar}"
+                    if _load_out="$(cr load -i "$pgtar" 2>&1)"; then
+                        printf '%s\n' "$_load_out"
                         if [[ -z "$_PG_CLIENT_IMAGE_EXPLICIT" ]]; then
-                            # Derive <major> from kc-<os>-pgclient-<major>.tar and reference exactly it
-                            # (build tag == ${IMAGE_NS}:<os>-pgclient-<major>).
-                            local _prefix="kc-${OS}-pgclient-" _bn _major
-                            _bn="${pgtar##*/}"; _major="${_bn#"$_prefix"}"; _major="${_major%.tar}"
-                            PROFILE_PG_CLIENT_IMAGE="${IMAGE_NS}:${OS}-pgclient-${_major}"
+                            # Use the tag the archive ACTUALLY carries ("Loaded image: <ref>"), not a
+                            # name rebuilt from IMAGE_NS: a bundle built into the operator's own
+                            # registry (config/images.conf GHCR_IMAGE), or a run using
+                            # --image-ref-template instead of --image-ns, carries a different
+                            # namespace — and the tool would then look for an image nobody loaded.
+                            local _loaded
+                            _loaded="$(printf '%s\n' "$_load_out" | sed -n 's/^Loaded image: //p' | tail -1)"
+                            [[ -z "$_loaded" ]] && _loaded="$(printf '%s\n' "$_load_out" | sed -n 's/^Loaded image(s): //p' | tail -1)"
+                            if [[ -n "$_loaded" ]]; then
+                                PROFILE_PG_CLIENT_IMAGE="$_loaded"
+                            else
+                                # The engine said nothing parseable — fall back to the naming convention.
+                                local _prefix="kc-${OS}-pgclient-" _bn _major
+                                _bn="${pgtar##*/}"; _major="${_bn#"$_prefix"}"; _major="${_major%.tar}"
+                                PROFILE_PG_CLIENT_IMAGE="${IMAGE_NS}:${OS}-pgclient-${_major}"
+                            fi
                             export PROFILE_PG_CLIENT_IMAGE
                             log_info "pg-client from bundle -> PROFILE_PG_CLIENT_IMAGE=${PROFILE_PG_CLIENT_IMAGE}"
                         fi
@@ -553,6 +600,10 @@ generate_profile() {
     export PROFILE_MIGRATION_RUN_TESTS="false"
     export PROFILE_MIGRATION_BACKUP="true"
     [[ -n "$NETWORK" ]] && export PROFILE_KC_RUN_NETWORK="$NETWORK"
+    # Same bridge as the Keycloak container unless told otherwise: the DB the hops reach by name is
+    # the DB the client must reach by name.
+    [[ -z "$PG_CLIENT_NETWORK" && -n "$NETWORK" ]] && PG_CLIENT_NETWORK="$NETWORK"
+    [[ -n "$PG_CLIENT_NETWORK" ]] && export PROFILE_PG_CLIENT_NETWORK="$PG_CLIENT_NETWORK"
 
     profile_save "$PROFILE_NAME" >/dev/null
     log_success "Profile written: ${PROFILE_DIR}/${PROFILE_NAME}.yaml"
