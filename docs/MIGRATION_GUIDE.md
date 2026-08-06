@@ -305,7 +305,7 @@ scripts/migrate_oneshot.sh --target 26 --os astra --db-host <pg-host> --gen-prof
 
 Флаги: `--target 25|26`, `--os astra|redos`, `--source pull|bundle|preloaded`, `--image-ns <ref>`
 (дефолт `ghcr.io/alexgromer/keycloak-migration`), `--bundle <file>`, `--db-host/-port/-name/-user`,
-`--network`, `--profile-name`, `--gen-profile-only`, `--dry-run` (дефолт) / `--go`.
+`--network`, `--pg-client-network`, `--profile-name`, `--gen-profile-only`, `--dry-run` (дефолт) / `--go`.
 
 Разделы **2.1–2.5** ниже — тот же процесс **вручную, по шагам**, если нужен контроль/кастомизация.
 

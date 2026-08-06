@@ -63,7 +63,8 @@ backup format (`-Fc`), so the standard autonomous migration backs up fine under 
    (the default) in its own network namespace, so a database at `127.0.0.1`/`localhost` *on the
    machine* is unreachable — even via `host.docker.internal`. Give the tool a DB it can reach from
    the rootless network: a **routable address** (a different host), or a **container on the same
-   rootless network** (`--db-host <container-name>` with `PROFILE_PG_CLIENT_NETWORK=<that-network>` /
+   rootless network** (`--db-host <container-name>` with `--network <that-network>`, which now also puts
+   the pg-client there — or `--pg-client-network` / `PROFILE_PG_CLIENT_NETWORK` to set it alone /
    `PROFILE_KC_RUN_NETWORK=<that-network>`). The tool still rewrites a loopback host to
    `host.docker.internal` on the bridge — a best-effort that only helps if the daemon was started
    *with* host-loopback enabled.

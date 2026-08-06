@@ -7,6 +7,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed — the "unreproducible" suite failure had a root cause: `grep -q` + `pipefail`
+
+- **`assert_contains` reported failures for content that was present.** It ran
+  `echo "$haystack" | grep -q "$needle"`, and `grep -q` exits at the FIRST match — the writer then
+  takes SIGPIPE, and under `set -o pipefail` (which every suite sets) the pipeline reports failure.
+  Reproduced **100/100** with a needle near the start of a large haystack and **0/100** with one at
+  the end, which is exactly the shape of the rare failure seen in full-suite runs: an assertion on
+  `deployment_mode: run` (line 15 of the profile) failed while `target_version` (line 20) passed.
+  The comparison now uses a here-string — no writer to kill — and `--`, so a needle starting with `-`
+  is not read as grep's own options.
+- **`assert_true` / `assert_false` evaluate the condition without `pipefail`**, for the same reason:
+  conditions are usually pipelines ending in `grep -q`, and their early exit turned satisfied
+  conditions into failed assertions depending on timing.
+- `tests/test_migrate_oneshot.sh`: every invocation goes through one helper with a generous timeout
+  that **says so when it fires**, instead of letting assertions run on partial output; the structural
+  checks grep the file directly rather than interpolating a multi-line blob into an eval string.
+
+Verified the way the defect was found: 20 full runs of the suite file under CPU load produced **three**
+false failures before the fix and **zero** after.
+
+### Documentation
+
+- `--pg-client-network` / `KC_PG_CLIENT_NETWORK` (added in 3.10.2) is now documented: QUICKSTART's flag
+  table, the MIGRATION_GUIDE flag list, ROOTLESS's container-name topology, and all four handover
+  documents (rebuilt, QA gate clean).
+
 ## [3.10.2] - 2026-08-06
 
 ### Fixed — the audit's last 19 candidates (verified after the fact)
