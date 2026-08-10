@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [3.10.6] - 2026-08-10
+
 ### Fixed — sourcing `preflight_checks.sh` twice killed the caller outright
 
 The library runs under `set -euo pipefail` (its own line 5), and a dozen of its constants were plain
