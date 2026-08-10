@@ -7,6 +7,44 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed — the connectivity gate aborted a migration whose own output proved the connection worked
+
+Reported from a live air-gapped migration (Astra, `16.1.1 → 24.0.5 → 26.6.3`, remote PG 14). Preflight
+check #4 reported `PostgreSQL: Connection failed` and stopped the run — while checks #5, #6 and #7,
+against the same database with the same credentials seconds later, returned the server version, the
+database size and the primary/standby role. The advisory lock had been taken and state reconciliation
+had already read `MIGRATION_MODEL` over the same client. Two runs were burned before the cause could
+be named, because the check discarded the evidence that named it.
+
+- **A bound that fired looked exactly like a refused login.** Check #4 was the only database check
+  wrapped in `timeout 10` **and** the only one sending its client's output to `/dev/null`. On the
+  autonomous path the probe must start a *container* first, and check #4 is the first `cr run` after
+  `cr load` of a 1.5 GB bundle — the engine is still writing layers. Instrumented on the reporting
+  host, the check returned `rc=124` with `SELECT 1` → `1` **already captured**: the database had
+  answered and the wrapper was killed anyway. The same command measured 0.57 s against an idle daemon.
+- **The check now decides on the database's answer**, a token it looks for in the probe's output,
+  rather than on the wrapper's exit code alone. A probe killed *after* the answer arrived passes, with
+  a warning that names the slow client. A probe killed with nothing to show is **retried once** (the
+  first container start is cold, the second is warm) before being called a failure.
+- **Failures now carry the evidence**: exit code and what the client actually said, with `rc=124`
+  spelled out as "killed by the bound, not refused by the database" and the variable to raise. The
+  password is redacted from that output, which is new output and must not become a new leak.
+- **The bounds are the operator's**: `DB_HEALTH_TIMEOUT` (host client, 10 s) and
+  `DB_HEALTH_TIMEOUT_CONTAINER` (container client, 90 s), both settable from the environment,
+  documented in QUICKSTART and MIGRATION_GUIDE.
+- The probe writes to a file rather than a pipe: `timeout` kills its direct child, and a container
+  client can leave a grandchild holding the write end — a command substitution would then block past
+  the very bound being enforced.
+- **`MIN_DISK_FREE_MB` was a documented knob wired to nothing.** `--help`, MIGRATION_GUIDE and
+  `migrate_keycloak_v3.sh:950` all treat it as the operator's to set; `preflight_checks.sh` redeclared
+  it `readonly 512`, overwriting the operator's value on the preflight path. Same defect class as the
+  bound above, found next door. It now honours the environment and still defaults to 512.
+
+13 new assertions in `test_preflight_checks.sh` cover the reported case (answer captured, wrapper
+killed), the cold-then-warm retry, a refused login still failing *with* its reason, the password never
+reaching the log, and the bounds being overridable. Live-validated against a real PostgreSQL on both
+paths — host client and container client with `psql` removed from `PATH`.
+
 ## [3.10.4] - 2026-08-06
 
 ### Documentation — an audit of every documented claim against the code (54 defects)

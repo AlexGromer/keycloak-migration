@@ -271,6 +271,98 @@ assert_true "declare -F check_large_tables" "check_large_tables exists"
 assert_equals "120" "$BACKUP_HEAP_MULTIPLIER_PCT" "the heap cushion is 1.2x, and it is named"
 
 # ============================================================================
+describe "connectivity is decided by the database's answer, not by the wrapper's exit code"
+# ============================================================================
+# From a live air-gapped migration (2026-08-10): the probe ran, the database answered, and the check
+# still aborted the run with "Connection failed". The 10s bound fired while the CONTAINER client was
+# starting — the run had just `cr load`ed a 1.5GB bundle — so `timeout` returned 124, and the check
+# read that exit code alone. stderr went to /dev/null, so the captured answer died with it. Two runs
+# were burned before the exit code could be told apart from a refused login.
+
+assert_equals "kc_preflight_probe_ok" "$DB_PROBE_TOKEN" \
+    "the token these stubs echo is the one the check looks for"
+assert_equals "90" "$DB_HEALTH_TIMEOUT_CONTAINER" \
+    "the container client gets a bound sized for a cold container start"
+
+# The probe runs in a child bash (timeout cannot exec a function), so a stub MUST be exported —
+# which is also a regression guard on that mechanism.
+# shellcheck disable=SC2317  # invoked from the child bash, not from this file
+pg_client() { echo "kc_preflight_probe_ok"; sleep 3; }
+export -f pg_client
+
+# THE REPORTED DEFECT: the client answers, then outlives the bound.
+_c4_rc=0
+_c4_out="$(DB_HEALTH_TIMEOUT=1 DB_HEALTH_TIMEOUT_CONTAINER=1 \
+    check_database_connectivity postgresql h 5432 u p db 2>&1)" || _c4_rc=$?
+assert_equals "0" "$_c4_rc" "answered, then killed by the bound -> the check PASSES"
+assert_contains "$_c4_out" "Connected" "and reports Connected"
+assert_contains "$_c4_out" "exceeded" "while still naming the slow client, so it is not hidden"
+
+# A cold first attempt with nothing to show is retried; the warm one succeeds. This is the physics
+# of the reported case: >10s for the first container start, 0.57s for the next.
+export KC_TEST_PROBE_MARK="$WORK_DIR/probe_attempt"
+rm -f "$KC_TEST_PROBE_MARK"
+# shellcheck disable=SC2317  # invoked from the child bash, not from this file
+pg_client() {
+    if [[ -e "$KC_TEST_PROBE_MARK" ]]; then echo "kc_preflight_probe_ok"
+    else : > "$KC_TEST_PROBE_MARK"; sleep 3; fi
+}
+export -f pg_client
+_c4_rc=0
+_c4_out="$(DB_HEALTH_TIMEOUT=1 DB_HEALTH_TIMEOUT_CONTAINER=1 \
+    check_database_connectivity postgresql h 5432 u p db 2>&1)" || _c4_rc=$?
+assert_equals "0" "$_c4_rc" "a timed-out cold attempt is retried, and the warm one passes"
+assert_contains "$_c4_out" "second attempt" "and the retry is stated, not silent"
+
+# A refused login must still FAIL — and must now say why.
+# shellcheck disable=SC2317  # invoked from the child bash, not from this file
+pg_client() { echo 'FATAL:  password authentication failed for user "kc"' >&2; return 2; }
+export -f pg_client
+_c4_rc=0
+_c4_out="$(check_database_connectivity postgresql h 5432 u hunter2 db 2>&1)" || _c4_rc=$?
+assert_true "[[ $_c4_rc -ne 0 ]]" "a refused login still fails the check"
+assert_contains "$_c4_out" "rc=2" "the exit code is reported instead of swallowed"
+assert_contains "$_c4_out" "password authentication failed" "and so is what the client actually said"
+
+# Printing the client's output must never print the password with it.
+# shellcheck disable=SC2317  # invoked from the child bash, not from this file
+pg_client() { echo "could not connect: bad secret hunter2 supplied" >&2; return 2; }
+export -f pg_client
+_c4_out="$(check_database_connectivity postgresql h 5432 u hunter2 db 2>&1)" || true
+if [[ "$_c4_out" == *hunter2* ]]; then
+    assert_true "false" "the password leaked into the check's output"
+else
+    assert_true "true" "the password never reaches the log, even though client output now is printed"
+fi
+
+unset -f pg_client
+unset KC_TEST_PROBE_MARK
+
+# The bounds are the operator's to set. DB_HEALTH_TIMEOUT used to be `readonly 10`, so a host that
+# needed longer could not say so without editing the library.
+_ovr="$(DB_HEALTH_TIMEOUT=7 bash -c "source '$LIB_DIR/preflight_checks.sh' >/dev/null 2>&1; echo \$DB_HEALTH_TIMEOUT")"
+assert_equals "7" "$_ovr" "DB_HEALTH_TIMEOUT is overridable from the environment"
+_ovr="$(DB_HEALTH_TIMEOUT_CONTAINER=123 bash -c "source '$LIB_DIR/preflight_checks.sh' >/dev/null 2>&1; echo \$DB_HEALTH_TIMEOUT_CONTAINER")"
+assert_equals "123" "$_ovr" "DB_HEALTH_TIMEOUT_CONTAINER is overridable from the environment"
+
+# Same defect class, found next door: `--help`, MIGRATION_GUIDE and migrate_keycloak_v3.sh:950 all
+# treat MIN_DISK_FREE_MB as the operator's to set, while this library redeclared it `readonly 512`
+# and silently overwrote them on the preflight path.
+_ovr="$(MIN_DISK_FREE_MB=256 bash -c "source '$LIB_DIR/preflight_checks.sh' >/dev/null 2>&1; echo \$MIN_DISK_FREE_MB")"
+assert_equals "256" "$_ovr" "MIN_DISK_FREE_MB is overridable, as --help and the guide both promise"
+_ovr="$(bash -c "source '$LIB_DIR/preflight_checks.sh' >/dev/null 2>&1; echo \$MIN_DISK_FREE_MB")"
+assert_equals "512" "$_ovr" "and still defaults to 512 when nobody sets it"
+
+# DB_PROBE_TOKEN is declared readonly, so it is guarded like the exit codes: an already-set value
+# must not abort the source. (The file as a whole is NOT re-source safe — a dozen other constants
+# are unguarded readonly. Pre-existing, tracked separately; this only guards what was added here.)
+# `env`, not a prefix assignment: this test file has already sourced the library, so DB_PROBE_TOKEN
+# is readonly in THIS shell and a prefix assignment would fail here rather than test the child.
+_tok_rc=0
+env DB_PROBE_TOKEN=preset bash -c "source '$LIB_DIR/preflight_checks.sh'" >/dev/null 2>&1 || _tok_rc=$?
+assert_equals "0" "$_tok_rc" "a pre-set DB_PROBE_TOKEN does not abort the source"
+
+# ============================================================================
 # Cleanup
 # ============================================================================
 
