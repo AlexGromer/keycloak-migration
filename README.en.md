@@ -1,6 +1,6 @@
 > LANGUAGE: [🇷🇺 Русский](README.md) | 🇬🇧 English
 
-# Keycloak Migration Tool v3.10.4
+# Keycloak Migration Tool v3.10.5
 
 **A "single-command" Keycloak migration utility** with environment auto-detection, support for multi-tenant and clustered deployments, real-time monitoring, production hardening, **security hardening** (SAST, secret scanning, input validation, audit logging), **containerized step-by-step migration** (container-hop — at every step a real Keycloak container is brought up and the advancement of the MIGRATION_MODEL level is verified, Layer-2), **sovereign OS images** (Astra Linux SE / RED OS) with **air-gap** offline distribution and support for all databases officially supported by Keycloak.
 
@@ -8,7 +8,7 @@
 [![Tests](https://img.shields.io/badge/tests-31%20suites-success)](tests/)
 [![Bash](https://img.shields.io/badge/bash-5.0%2B-green.svg)](scripts/)
 [![Databases](https://img.shields.io/badge/databases-6-blue.svg)](scripts/lib/database_adapter.sh)
-[![Version](https://img.shields.io/badge/version-v3.10.4-blue.svg)](CHANGELOG.md)
+[![Version](https://img.shields.io/badge/version-v3.10.5-blue.svg)](CHANGELOG.md)
 [![Images](https://img.shields.io/badge/sovereign%20images-Astra%20SE%20%7C%20RED%20OS-blue.svg)](docs/AIRGAP.md)
 
 ---
@@ -552,7 +552,7 @@ Labels for multi-instance: `tenant="…"`, `node="…"`.
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
-│                  KEYCLOAK MIGRATION v3.10.4                     │
+│                  KEYCLOAK MIGRATION v3.10.5                     │
 ├─────────────────────────────────────────────────────────────────┤
 │                                                                 │
 │  ┌──────────────┐      ┌──────────────┐      ┌──────────────┐  │

@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [3.10.5] - 2026-08-10
+
 ### Fixed — the connectivity gate aborted a migration whose own output proved the connection worked
 
 Reported from a live air-gapped migration (Astra, `16.1.1 → 24.0.5 → 26.6.3`, remote PG 14). Preflight
