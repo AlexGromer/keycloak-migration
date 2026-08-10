@@ -24,6 +24,46 @@ fi
 # ============================================================================
 # CONSTANTS
 # ============================================================================
+#
+# Two kinds, and the difference is deliberate:
+#
+#   * BOUNDS AND THRESHOLDS are properties of the OPERATOR'S HOST, so the environment wins —
+#     through `_pf_bound`, which also rejects a value that is not a number. A slow disk, a busy
+#     container engine or a 1.5 GB box is not something this file can know. Freezing them here is
+#     how `MIN_DISK_FREE_MB` became a knob that `--help` and MIGRATION_GUIDE documented and nothing
+#     honoured (v3.10.5).
+#
+#   * VALUES THIS FILE OWNS — exit codes, the probe token, the backup cushion — are constants, and
+#     `_pf_const` freezes them AGAINST the environment: a stray `EXIT_DB_HEALTH=0` in the caller's
+#     environment must not be able to turn a failed database check into a success.
+#
+# Both must survive a SECOND `source` of this file: a bare `readonly` re-assignment aborts under the
+# `set -e` on line 5, which is why sourcing this library twice used to kill the caller outright.
+_pf_const() {
+    local name="$1" value="$2" decl
+    decl="$(declare -p "$name" 2>/dev/null)" || decl=""
+    # Already frozen by an earlier source of this file (or by a lib that owns the name) — leave it.
+    [[ "$decl" =~ ^declare\ -[a-zA-Z]*r ]] && return 0
+    printf -v "$name" '%s' "$value"   # overwrite whatever the environment tried to plant
+    readonly "$name"
+}
+
+# A bound is the operator's to set — but "notanumber" is not a bound, and each check consumes these
+# differently, so a typo fails in a DIFFERENT way in each: `MIN_DISK_FREE_MB=x` aborts check_disk_space
+# on `set -u` bash arithmetic, while `MIN_MEMORY_GB=x` reaches `bc`, which treats an unknown word as 0,
+# so the comparison quietly resolves to "not low" and the operator gets a green tick for a check that
+# never ran. Validate once, here, and SAY so — the log helpers are defined further down, hence echo.
+_pf_bound() {
+    local name="$1" default="$2" unit="${3:-}"
+    # Separate statement: inside ONE `local`, bash expands `${!name}` before `name` is assigned and
+    # dies with "invalid indirect expansion" (reproduced on bash 5.3).
+    local value="${!name:-}"
+    if [[ -n "$value" && ! "$value" =~ ^[0-9]+$ ]]; then
+        echo "[⚠ PREFLIGHT WARNING] $name='$value' is not a whole number${unit:+ of $unit} — using the default ($default)" >&2
+        value=""
+    fi
+    printf -v "$name" '%s' "${value:-$default}"
+}
 
 # A floor, not a budget. The real backup requirement is COMPUTED from the database (see
 # check_backup_space); this only reserves room for logs, the state file and psql temp files.
@@ -36,8 +76,8 @@ fi
 # and migrate_keycloak_v3.sh:950 which honours `${MIN_DISK_FREE_MB:-512}` on its own path. Declaring
 # it `readonly 512` here overwrote the operator's value and made all three statements false on the
 # preflight path — the same defect class as the health bound below: a documented knob wired to nothing.
-MIN_DISK_FREE_MB="${MIN_DISK_FREE_MB:-512}"   # Floor: logs, state, temp (NOT the backup — computed)
-readonly MIN_MEMORY_GB=2             # Minimum free memory (GB)
+_pf_bound MIN_DISK_FREE_MB 512 megabytes   # Floor: logs, state, temp (NOT the backup — computed)
+_pf_bound MIN_MEMORY_GB 2 gigabytes        # Free-memory WARNING threshold (check_memory never gates)
 
 # What actually lands in a pg_dump, per GB of heap.
 #
@@ -46,9 +86,9 @@ readonly MIN_MEMORY_GB=2             # Minimum free memory (GB)
 # gzips it. For a 200 GB database with 80 GB of indexes that demanded 600 GB for a dump that would
 # have been ~30 GB — refusing a migration there was room for. We now size from the heap alone and
 # keep a modest cushion for the incompressible worst case.
-readonly BACKUP_HEAP_MULTIPLIER_PCT=120   # required = heap × 1.2 (uncompressed worst case + slack)
+_pf_const BACKUP_HEAP_MULTIPLIER_PCT 120  # required = heap × 1.2 (uncompressed worst case + slack)
 
-readonly NETWORK_TIMEOUT=5           # Network connectivity timeout (seconds)
+_pf_bound NETWORK_TIMEOUT 5 seconds       # Reachability probe bound — a property of the host
 
 # The bound belongs to the CLIENT, not to the database. A host psql answers in milliseconds; a
 # CONTAINER psql (autonomous node with no host client) must first start a container, and the first
@@ -57,25 +97,43 @@ readonly NETWORK_TIMEOUT=5           # Network connectivity timeout (seconds)
 # idle daemon and >10s in the run that followed a bundle load — where the check then reported
 # "Connection failed" for a query whose answer it had ALREADY captured (rc=124, `SELECT 1` → `1`).
 # Two bounds, both overridable: this is a property of the operator's host, not a law of the tool.
-DB_HEALTH_TIMEOUT="${DB_HEALTH_TIMEOUT:-10}"                       # host client
-DB_HEALTH_TIMEOUT_CONTAINER="${DB_HEALTH_TIMEOUT_CONTAINER:-90}"   # container client (cold start)
+_pf_bound DB_HEALTH_TIMEOUT 10 seconds            # host client
+_pf_bound DB_HEALTH_TIMEOUT_CONTAINER 90 seconds  # container client (cold start)
 
 # A token WE choose, so "the database answered" is a testable fact. psql's own "(1 row)" is
-# translated under a non-English locale; this is not. Guarded like the exit codes below: a bare
-# `readonly` re-assignment aborts a re-source under this file's own `set -e`.
-[[ -v DB_PROBE_TOKEN ]] || readonly DB_PROBE_TOKEN="kc_preflight_probe_ok"
+# translated under a non-English locale; this is not. Ours, so the environment does not get a vote:
+# a caller who could redefine it could make any output look like a successful connection.
+_pf_const DB_PROBE_TOKEN "kc_preflight_probe_ok"
 
-# Exit codes (guarded to prevent collision when multiple libs are sourced)
+# EXIT_SUCCESS is SHARED — audit_logger_v2, input_validator, security_checks and three more declare
+# it too, all with this first-wins guard. Keep their convention: whoever gets there first owns it,
+# and every one of them says 0.
 [[ -v EXIT_SUCCESS ]] || readonly EXIT_SUCCESS=0
-readonly EXIT_DISK_SPACE=10
-# shellcheck disable=SC2034  # exit-code constant, part of public set (may be used by sourcing scripts)
-readonly EXIT_MEMORY=11
-readonly EXIT_NETWORK=12
-readonly EXIT_DB_HEALTH=13
-# shellcheck disable=SC2034  # exit-code constant, part of public set (may be used by sourcing scripts)
-readonly EXIT_KEYCLOAK_HEALTH=14
-readonly EXIT_DEPENDENCIES=15
-readonly EXIT_CONFIG=16
+
+# These seven are declared HERE and nowhere else (verified across scripts/lib), so this file owns
+# them outright, and they are frozen against the environment: an inherited `EXIT_DB_HEALTH=0` must
+# not turn a refused database into a pass.
+#
+# Honest scope, checked rather than assumed: NO sourcing script reads them today. `migrate_keycloak_v3`
+# uses `run_all_preflight_checks` as a boolean and that function collapses the per-check codes into a
+# `failure_reasons` list, so the numbers never leave this file. Two of them — EXIT_MEMORY and
+# EXIT_KEYCLOAK_HEALTH — are not even returned internally, because `check_memory` and
+# `check_keycloak_status` are advisory and always `return 0`. They are kept as a stable set for
+# callers that want to branch on WHICH check failed; that is an offer, not a description of use.
+# shellcheck disable=SC2034  # exit-code constants: a public set, not read inside this file alone
+_pf_const EXIT_DISK_SPACE       10
+# shellcheck disable=SC2034
+_pf_const EXIT_MEMORY           11
+# shellcheck disable=SC2034
+_pf_const EXIT_NETWORK          12
+# shellcheck disable=SC2034
+_pf_const EXIT_DB_HEALTH        13
+# shellcheck disable=SC2034
+_pf_const EXIT_KEYCLOAK_HEALTH  14
+# shellcheck disable=SC2034
+_pf_const EXIT_DEPENDENCIES     15
+# shellcheck disable=SC2034
+_pf_const EXIT_CONFIG           16
 
 # ============================================================================
 # LOGGING

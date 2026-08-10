@@ -165,6 +165,15 @@ the box can read it.
 | `DB_HEALTH_TIMEOUT` | `10` | Seconds the connectivity probe may take when a **host** `psql` is used. |
 | `DB_HEALTH_TIMEOUT_CONTAINER` | `90` | Seconds it may take when the probe runs the **container** client — an autonomous node with no host `psql`. A container must start first, and the first start right after loading an air-gap bundle competes with the engine still writing layers. A bound that fires is retried once and, if the database answered anyway, accepted. |
 | `MIN_DISK_FREE_MB` | `512` | Floor of free working space on `WORK_DIR`'s filesystem (logs/state/temp). The backup requirement is measured separately from the database. |
+| `MIN_MEMORY_GB` | `2` | Free memory below this raises a **warning**. It does not block the migration — unlike every other row here, this check is advisory. |
+| `NETWORK_TIMEOUT` | `5` | Seconds the reachability probe (host:port) may take before the network is called unreachable. |
+
+These are bounds on *your host*, so the environment wins — but a value that is not a whole number is
+refused with a warning and the default is used, because a mistyped bound used to fail differently in
+each check (one aborted the run, another printed a green tick for a comparison that never happened).
+
+The values the tool owns — exit codes, the probe token, the backup cushion — are **not** settable: an
+inherited `EXIT_DB_HEALTH=0` would otherwise turn a refused database into a passed check.
 
 ### Images
 
