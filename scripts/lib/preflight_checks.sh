@@ -31,7 +31,12 @@ fi
 # It used to be `MIN_DISK_SPACE_GB=10`, checked BEFORE the database size was even known — so a host
 # with 8 GB free refused to migrate a 50 MB database. An arbitrary number cannot know what your
 # migration needs; measuring it can.
-readonly MIN_DISK_FREE_MB=512        # Floor: logs, state, temp (NOT the backup — that is computed)
+# Overridable, because three places already TELL the operator to override it: `--help`
+# (migrate_keycloak_v3.sh: "MIN_DISK_FREE_MB … (default: 512)"), MIGRATION_GUIDE §"Как изменить",
+# and migrate_keycloak_v3.sh:950 which honours `${MIN_DISK_FREE_MB:-512}` on its own path. Declaring
+# it `readonly 512` here overwrote the operator's value and made all three statements false on the
+# preflight path — the same defect class as the health bound below: a documented knob wired to nothing.
+MIN_DISK_FREE_MB="${MIN_DISK_FREE_MB:-512}"   # Floor: logs, state, temp (NOT the backup — computed)
 readonly MIN_MEMORY_GB=2             # Minimum free memory (GB)
 
 # What actually lands in a pg_dump, per GB of heap.
@@ -44,7 +49,21 @@ readonly MIN_MEMORY_GB=2             # Minimum free memory (GB)
 readonly BACKUP_HEAP_MULTIPLIER_PCT=120   # required = heap × 1.2 (uncompressed worst case + slack)
 
 readonly NETWORK_TIMEOUT=5           # Network connectivity timeout (seconds)
-readonly DB_HEALTH_TIMEOUT=10        # Database health check timeout (seconds)
+
+# The bound belongs to the CLIENT, not to the database. A host psql answers in milliseconds; a
+# CONTAINER psql (autonomous node with no host client) must first start a container, and the first
+# start right after `cr load` of a multi-GB air-gap bundle competes with the engine still writing
+# layers. A flat 10s was a cap that path could not meet: the same command measured 0.57s against an
+# idle daemon and >10s in the run that followed a bundle load — where the check then reported
+# "Connection failed" for a query whose answer it had ALREADY captured (rc=124, `SELECT 1` → `1`).
+# Two bounds, both overridable: this is a property of the operator's host, not a law of the tool.
+DB_HEALTH_TIMEOUT="${DB_HEALTH_TIMEOUT:-10}"                       # host client
+DB_HEALTH_TIMEOUT_CONTAINER="${DB_HEALTH_TIMEOUT_CONTAINER:-90}"   # container client (cold start)
+
+# A token WE choose, so "the database answered" is a testable fact. psql's own "(1 row)" is
+# translated under a non-English locale; this is not. Guarded like the exit codes below: a bare
+# `readonly` re-assignment aborts a re-source under this file's own `set -e`.
+[[ -v DB_PROBE_TOKEN ]] || readonly DB_PROBE_TOKEN="kc_preflight_probe_ok"
 
 # Exit codes (guarded to prevent collision when multiple libs are sourced)
 [[ -v EXIT_SUCCESS ]] || readonly EXIT_SUCCESS=0
@@ -193,6 +212,92 @@ check_network_connectivity() {
 # 2. DATABASE HEALTH CHECKS
 # ============================================================================
 
+# Never let a printed client message carry the password. psql and mysql do not echo it, but this
+# check now PRINTS what the client said, and "probably does not" is not a property to rely on.
+# Over-redaction (a password containing glob metacharacters) is the safe direction.
+_db_redact() {
+    local text="$1" secret="${2:-}"
+    [[ -n "$secret" ]] && text="${text//"$secret"/<redacted>}"
+    printf '%s' "$text" | tr '\n' ' ' | cut -c1-300
+}
+
+# One probe run, under a wall-clock bound. The client's combined output goes to a FILE, not up a
+# pipe: `timeout` kills its direct child, and a container client can leave a grandchild holding the
+# write end — a command substitution would then block past the very bound we are enforcing.
+# Returns the probe's exit code (124 = the bound fired).
+_db_probe_pg() {
+    local host="$1" port="$2" user="$3" db_name="$4" pass="$5" limit="$6" outfile="$7"
+    # shellcheck disable=SC2016  # $1-$5 are the inner bash -c positional args (timeout cannot exec a bash function, so pg_client is invoked from a child bash)
+    PGPASSWORD="$pass" timeout "$limit" bash -c \
+        'pg_client psql -h "$1" -p "$2" -U "$3" -d "$4" -tAc "$5"' \
+        _ "$host" "$port" "$user" "$db_name" "SELECT '$DB_PROBE_TOKEN';" >"$outfile" 2>&1
+}
+
+# Read what the probe managed to write, whether or not it was killed.
+_db_probe_read() {
+    [[ -r "$1" ]] || return 0
+    cat "$1" 2>/dev/null || true
+}
+
+# Shared by the two pg-protocol engines. Decides on EVIDENCE (did the database answer?) rather than
+# on the wrapper's exit code alone, and says why when it refuses.
+_db_check_pg_like() {
+    local label="$1" host="$2" port="$3" user="$4" db_name="$5" pass="$6"
+    local limit="$DB_HEALTH_TIMEOUT" out rc probe_out retried=0
+
+    # Mirror pg_client's own decision: it takes the host binary when there is one, a container
+    # otherwise. Charging a container start against a host-sized bound is what broke this check.
+    command -v psql >/dev/null 2>&1 || limit="$DB_HEALTH_TIMEOUT_CONTAINER"
+
+    # No RETURN trap for the cleanup: a RETURN trap set inside a function is not function-local,
+    # it stays armed for the rest of the shell. One explicit cleanup point below, before any return.
+    # A file, not /dev/null, on the fallback path too: reading the answer back IS the check.
+    probe_out="$(mktemp "${TMPDIR:-/tmp}/kc_db_probe.XXXXXX" 2>/dev/null)" || probe_out=""
+    [[ -n "$probe_out" ]] || probe_out="${WORK_DIR:-/tmp}/kc_db_probe.$$"
+
+    _db_probe_pg "$host" "$port" "$user" "$db_name" "$pass" "$limit" "$probe_out" && rc=0 || rc=$?
+    out="$(_db_probe_read "$probe_out")"
+
+    # Killed with nothing to show. The first container start after loading an air-gap bundle is
+    # slow; the second is warm (measured: >10s, then 0.57s). Retry once before calling it a failure.
+    if [[ "$out" != *"$DB_PROBE_TOKEN"* && $rc -eq 124 ]]; then
+        preflight_log_warn "$label: no answer within ${limit}s — retrying once (a cold client start is slow)"
+        retried=1
+        _db_probe_pg "$host" "$port" "$user" "$db_name" "$pass" "$limit" "$probe_out" && rc=0 || rc=$?
+        out="$(_db_probe_read "$probe_out")"
+    fi
+
+    rm -f "$probe_out"
+
+    # The database answered. That IS the check — whatever the wrapper's exit code says. A probe
+    # killed by the bound AFTER the answer came back used to be reported as "Connection failed",
+    # blocking a migration whose own captured output proved the connection worked.
+    if [[ "$out" == *"$DB_PROBE_TOKEN"* ]]; then
+        if [[ $rc -ne 0 ]]; then
+            preflight_log_warn \
+                "$label: answered, but the client exceeded ${limit}s (slow client start — not a database problem)"
+        fi
+        if [[ $retried -eq 1 ]]; then
+            preflight_log_success "$label: Connected (second attempt)"
+        else
+            preflight_log_success "$label: Connected"
+        fi
+        return 0
+    fi
+
+    # Never swallow the evidence again. This check sent stderr to /dev/null, so "Connection failed"
+    # named neither the cause nor the exit code — and a bound that fired looked exactly like a
+    # refused login. It cost a live migration two aborted runs before anyone could tell them apart.
+    preflight_log_error "$label: Connection failed (rc=$rc, bound ${limit}s)"
+    if [[ $rc -eq 124 ]]; then
+        preflight_log_error "  The probe was KILLED by the ${limit}s bound — the database did not refuse it."
+        preflight_log_error "  Raise it: export DB_HEALTH_TIMEOUT_CONTAINER=<seconds> (container client)"
+        preflight_log_error "            export DB_HEALTH_TIMEOUT=<seconds>           (host client)"
+    fi
+    [[ -n "$out" ]] && preflight_log_error "  client said: $(_db_redact "$out" "$pass")"
+    return $EXIT_DB_HEALTH
+}
+
 check_database_connectivity() {
     preflight_log_section "4. DATABASE CONNECTIVITY CHECK"
 
@@ -208,33 +313,26 @@ check_database_connectivity() {
 
     case "$db_type" in
         postgresql)
-            # shellcheck disable=SC2016  # $1-$4 are the inner bash -c positional args (timeout cannot exec a bash function, so pg_client is invoked from a child bash)
-            if PGPASSWORD="$pass" timeout "$DB_HEALTH_TIMEOUT" bash -c 'pg_client psql -h "$1" -p "$2" -U "$3" -d "$4" -c "SELECT 1;"' _ "$host" "$port" "$user" "$db_name" >/dev/null 2>&1; then
-                preflight_log_success "PostgreSQL: Connected"
-                return 0
-            else
-                preflight_log_error "PostgreSQL: Connection failed"
-                return $EXIT_DB_HEALTH
-            fi
+            _db_check_pg_like "PostgreSQL" "$host" "$port" "$user" "$db_name" "$pass"
+            return $?
             ;;
         mysql|mariadb)
-            if timeout "$DB_HEALTH_TIMEOUT" mysql -h "$host" -P "$port" -u "$user" -p"$pass" "$db_name" -e "SELECT 1;" >/dev/null 2>&1; then
+            local my_out my_rc
+            my_out="$(timeout "$DB_HEALTH_TIMEOUT" mysql -h "$host" -P "$port" -u "$user" -p"$pass" \
+                "$db_name" -e "SELECT 1;" 2>&1)" && my_rc=0 || my_rc=$?
+            if [[ $my_rc -eq 0 ]]; then
                 preflight_log_success "MySQL/MariaDB: Connected"
                 return 0
-            else
-                preflight_log_error "MySQL/MariaDB: Connection failed"
-                return $EXIT_DB_HEALTH
             fi
+            preflight_log_error "MySQL/MariaDB: Connection failed (rc=$my_rc, bound ${DB_HEALTH_TIMEOUT}s)"
+            [[ $my_rc -eq 124 ]] && preflight_log_error \
+                "  The probe was KILLED by the bound — raise it: export DB_HEALTH_TIMEOUT=<seconds>"
+            [[ -n "$my_out" ]] && preflight_log_error "  client said: $(_db_redact "$my_out" "$pass")"
+            return $EXIT_DB_HEALTH
             ;;
         cockroachdb)
-            # shellcheck disable=SC2016  # $1-$4 are the inner bash -c positional args (timeout cannot exec a bash function, so pg_client is invoked from a child bash)
-            if PGPASSWORD="$pass" timeout "$DB_HEALTH_TIMEOUT" bash -c 'pg_client psql -h "$1" -p "$2" -U "$3" -d "$4" -c "SELECT 1;"' _ "$host" "$port" "$user" "$db_name" >/dev/null 2>&1; then
-                preflight_log_success "CockroachDB: Connected"
-                return 0
-            else
-                preflight_log_error "CockroachDB: Connection failed"
-                return $EXIT_DB_HEALTH
-            fi
+            _db_check_pg_like "CockroachDB" "$host" "$port" "$user" "$db_name" "$pass"
+            return $?
             ;;
         *)
             preflight_log_warn "Database type '$db_type' not supported for health check"

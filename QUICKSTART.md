@@ -158,6 +158,14 @@ scripts/migrate_oneshot.sh --profile <name> --go
 The password is env-only, never a flag — a flag would put it in the process table where any user on
 the box can read it.
 
+**Preflight bounds** (env only — the defaults suit a normal host; raise them on a slow or busy one):
+
+| Env | Default | Meaning |
+|---|---|---|
+| `DB_HEALTH_TIMEOUT` | `10` | Seconds the connectivity probe may take when a **host** `psql` is used. |
+| `DB_HEALTH_TIMEOUT_CONTAINER` | `90` | Seconds it may take when the probe runs the **container** client — an autonomous node with no host `psql`. A container must start first, and the first start right after loading an air-gap bundle competes with the engine still writing layers. A bound that fires is retried once and, if the database answered anyway, accepted. |
+| `MIN_DISK_FREE_MB` | `512` | Floor of free working space on `WORK_DIR`'s filesystem (logs/state/temp). The backup requirement is measured separately from the database. |
+
 ### Images
 
 | Flag | Env | Default | Meaning |
