@@ -7,6 +7,49 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed — sourcing `preflight_checks.sh` twice killed the caller outright
+
+The library runs under `set -euo pipefail` (its own line 5), and a dozen of its constants were plain
+`readonly`. A second `source` therefore did not warn — it **aborted the sourcing script**. Nothing in
+the tool sources it twice today, so this was a loaded gun rather than a bleeding wound: the first
+library that legitimately pulled it in alongside `migrate_keycloak_v3.sh` would have stopped a
+migration with no message anyone could act on. Found while fixing the connectivity gate in 3.10.5 —
+a test asserted the property, failed, and was narrowed rather than silently dropped.
+
+Each constant was given a deliberate mode, because the two kinds are not the same thing:
+
+- **Bounds and thresholds are properties of the operator's host, so the environment wins.**
+  `NETWORK_TIMEOUT` (5 s) and `MIN_MEMORY_GB` (2) join `MIN_DISK_FREE_MB`, `DB_HEALTH_TIMEOUT` and
+  `DB_HEALTH_TIMEOUT_CONTAINER`, and are now documented in QUICKSTART. Freezing this kind is exactly
+  how `MIN_DISK_FREE_MB` became a knob that `--help` and MIGRATION_GUIDE described and nothing read.
+- **Values the file owns are frozen AGAINST the environment.** The seven exit codes declared here and
+  nowhere else, the probe token and the backup cushion go through a new `_pf_const`, which overwrites
+  whatever the caller's environment tried to plant and then marks it readonly — skipping only when an
+  earlier source already froze it. An inherited `EXIT_DB_HEALTH=0` must not be able to report a
+  refused database as a passed check, and a redefined probe token must not make any output look like
+  a successful connection.
+- **`EXIT_SUCCESS` is shared** with six other libraries that all use the same first-wins guard. Their
+  convention is kept: whoever declares it first owns it, and every one of them says 0.
+
+**And a bound that is not a number is now refused, loudly.** Opening these knobs to the environment
+made a typo reachable, and each check consumed it differently: `MIN_DISK_FREE_MB=x` aborted
+`check_disk_space` on `set -u` bash arithmetic, while `MIN_MEMORY_GB=x` reached `bc`, which reads an
+unknown word as 0 — so the comparison resolved to "not low" and the operator got
+`[✓ PREFLIGHT] Memory: 3GB (OK)` for a check that never ran. All five bounds now go through
+`_pf_bound`, which names the offending variable and falls back to the default.
+
+Two documentation corrections in the same file, both self-inflicted and both caught before shipping:
+QUICKSTART called `MIN_MEMORY_GB` a threshold preflight "insists on" — `check_memory` warns and
+always returns 0, so it is advisory and now says so; and the exit-code comment was strengthened from
+"may be used by sourcing scripts" to "used by", which is false — nothing outside this library reads
+them today, and two of the seven are never returned at all because their checks are advisory.
+
+15 new assertions, and they were **mutation-tested**: `EXIT_SUCCESS` changed to 7 reddens 1,
+disabling the bound validation reddens 5, and restoring a bare `readonly` to one constant fails the
+double-source assertion with rc=1. The first version of the `EXIT_SUCCESS` assertion passed under
+every mutation — it froze the name at 0 before sourcing, so the library's own value could never
+reach it — and was replaced with a clean-shell probe.
+
 ## [3.10.5] - 2026-08-10
 
 ### Fixed — the connectivity gate aborted a migration whose own output proved the connection worked

@@ -353,14 +353,63 @@ assert_equals "256" "$_ovr" "MIN_DISK_FREE_MB is overridable, as --help and the 
 _ovr="$(bash -c "source '$LIB_DIR/preflight_checks.sh' >/dev/null 2>&1; echo \$MIN_DISK_FREE_MB")"
 assert_equals "512" "$_ovr" "and still defaults to 512 when nobody sets it"
 
-# DB_PROBE_TOKEN is declared readonly, so it is guarded like the exit codes: an already-set value
-# must not abort the source. (The file as a whole is NOT re-source safe — a dozen other constants
-# are unguarded readonly. Pre-existing, tracked separately; this only guards what was added here.)
-# `env`, not a prefix assignment: this test file has already sourced the library, so DB_PROBE_TOKEN
-# is readonly in THIS shell and a prefix assignment would fail here rather than test the child.
-_tok_rc=0
-env DB_PROBE_TOKEN=preset bash -c "source '$LIB_DIR/preflight_checks.sh'" >/dev/null 2>&1 || _tok_rc=$?
-assert_equals "0" "$_tok_rc" "a pre-set DB_PROBE_TOKEN does not abort the source"
+# ============================================================================
+describe "the library survives a second source, and owns its own constants"
+# ============================================================================
+# It runs under `set -euo pipefail` (line 5), so a bare `readonly` re-assignment does not warn — it
+# ABORTS the caller. Sourcing this library twice used to kill the migration outright. Restored in
+# full here: PR #39 wrote this assertion, watched it fail, and narrowed it rather than fix it then.
+
+_resrc_rc=0
+bash -c "source '$LIB_DIR/preflight_checks.sh'; source '$LIB_DIR/preflight_checks.sh'" >/dev/null 2>&1 || _resrc_rc=$?
+assert_equals "0" "$_resrc_rc" "preflight_checks.sh can be sourced twice without aborting"
+
+_dbl="$(bash -c "source '$LIB_DIR/preflight_checks.sh'; source '$LIB_DIR/preflight_checks.sh'; echo \"\$EXIT_DB_HEALTH \$DB_PROBE_TOKEN \$BACKUP_HEAP_MULTIPLIER_PCT\"" 2>/dev/null)"
+assert_equals "13 kc_preflight_probe_ok 120" "$_dbl" "and the second source leaves every constant at its own value"
+
+# The environment gets a vote on BOUNDS (they are properties of the host) but never on the values
+# this file owns. An inherited EXIT_DB_HEALTH=0 would otherwise report a refused database as a pass,
+# and a redefined probe token would make any output look like a successful connection.
+_forged="$(env EXIT_DB_HEALTH=0 EXIT_DISK_SPACE=0 DB_PROBE_TOKEN=anything BACKUP_HEAP_MULTIPLIER_PCT=1 \
+    bash -c "source '$LIB_DIR/preflight_checks.sh'; echo \"\$EXIT_DB_HEALTH \$EXIT_DISK_SPACE \$DB_PROBE_TOKEN \$BACKUP_HEAP_MULTIPLIER_PCT\"" 2>/dev/null)"
+assert_equals "13 10 kc_preflight_probe_ok 120" "$_forged" \
+    "the environment cannot forge an exit code, the probe token or the backup cushion"
+
+# The other two thresholds are the operator's, for the same reason MIN_DISK_FREE_MB is.
+_thr="$(env NETWORK_TIMEOUT=42 MIN_MEMORY_GB=1 bash -c "source '$LIB_DIR/preflight_checks.sh'; echo \"\$NETWORK_TIMEOUT \$MIN_MEMORY_GB\"" 2>/dev/null)"
+assert_equals "42 1" "$_thr" "NETWORK_TIMEOUT and MIN_MEMORY_GB are overridable from the environment"
+_thr="$(bash -c "source '$LIB_DIR/preflight_checks.sh'; echo \"\$NETWORK_TIMEOUT \$MIN_MEMORY_GB\"" 2>/dev/null)"
+assert_equals "5 2" "$_thr" "and keep their defaults when nobody sets them"
+
+# EXIT_SUCCESS is shared with six other libraries, all using the same first-wins guard. Two probes,
+# because one is not enough: pre-freezing it at 0 (the value we would set anyway) proved nothing —
+# mutation testing showed that assertion stayed green with the declaration DELETED or set to 7.
+_clean="$(bash -c "source '$LIB_DIR/preflight_checks.sh'; echo \"\$EXIT_SUCCESS\"" 2>/dev/null)"
+assert_equals "0" "$_clean" "in a clean shell this file's own EXIT_SUCCESS is 0"
+_shared="$(bash -c "readonly EXIT_SUCCESS=7; source '$LIB_DIR/preflight_checks.sh'; echo \"ok \$EXIT_SUCCESS\"" 2>/dev/null)"
+assert_equals "ok 7" "$_shared" "a lib that declared EXIT_SUCCESS first keeps its value, and we do not abort"
+
+# ============================================================================
+describe "a bound that is not a number is refused, loudly"
+# ============================================================================
+# Opening these to the environment (v3.10.5 and this change) made a typo reachable, and each check
+# consumed it differently: MIN_DISK_FREE_MB aborted check_disk_space on `set -u`, while MIN_MEMORY_GB
+# reached `bc`, which reads an unknown word as 0 — so the comparison resolved to "not low" and the
+# operator got `[✓ PREFLIGHT] Memory: 3GB (OK)` for a check that never ran.
+
+_bad="$(env MIN_MEMORY_GB=notanumber bash -c "source '$LIB_DIR/preflight_checks.sh'; echo \"\$MIN_MEMORY_GB\"" 2>/dev/null)"
+assert_equals "2" "$_bad" "a non-numeric MIN_MEMORY_GB falls back to the default"
+_bad_msg="$(env MIN_MEMORY_GB=notanumber bash -c "source '$LIB_DIR/preflight_checks.sh'" 2>&1)"
+assert_contains "$_bad_msg" "not a whole number" "and the operator is told, rather than silently ticked"
+assert_contains "$_bad_msg" "MIN_MEMORY_GB" "with the offending variable named"
+
+_bad="$(env MIN_DISK_FREE_MB='512 MB' bash -c "source '$LIB_DIR/preflight_checks.sh'; echo \"\$MIN_DISK_FREE_MB\"" 2>/dev/null)"
+assert_equals "512" "$_bad" "a MIN_DISK_FREE_MB with units attached falls back instead of aborting the run"
+_bad="$(env DB_HEALTH_TIMEOUT=abc bash -c "source '$LIB_DIR/preflight_checks.sh'; echo \"\$DB_HEALTH_TIMEOUT\"" 2>/dev/null)"
+assert_equals "10" "$_bad" "a non-numeric DB_HEALTH_TIMEOUT falls back to the default"
+
+_good="$(env MIN_MEMORY_GB=8 NETWORK_TIMEOUT=30 bash -c "source '$LIB_DIR/preflight_checks.sh'; echo \"\$MIN_MEMORY_GB \$NETWORK_TIMEOUT\"" 2>/dev/null)"
+assert_equals "8 30" "$_good" "well-formed values are still honoured"
 
 # ============================================================================
 # Cleanup
