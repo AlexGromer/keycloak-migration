@@ -184,7 +184,11 @@ cd /opt/kk_migration
 cp config/images.conf.example config/images.conf   # config/images.conf в .gitignore
 # отредактируйте config/images.conf:
 #   ASTRA_BASE / ASTRA_BASE_KC16 / REDOS_BASE / REDOS_BASE_KC16  — базовые образы
-#   GHCR_IMAGE  — куда публиковать (по умолчанию ghcr.io/AlexGromer/keycloak-migration)
+#   GHCR_IMAGE  — куда публиковать (по умолчанию ghcr.io/AlexGromer/keycloak-migration).
+#     ВАЖНО: этим же именем помечаются образы в бандле, поэтому изменённое значение надо
+#     повторить на стороне запуска: --image-ns <ваш-ns> либо --image-ref-template '<ref>:{version}'.
+#     Иначе загрузка бандла пройдёт, а прогон остановится: "the bundle loaded, but the image
+#     this run would start is absent". Имя приводится к нижнему регистру при сборке.
 #   ASTRA_JDK=17  (Astra ubi18 несёт openjdk-17, НЕ 21!), REDOS_JDK=21, JDK_KC16=11
 
 #   PG_CLIENT_MAJOR=17  — мажор суверенного клиента pg-client (на стороне запуска тот же выбор
@@ -241,10 +245,12 @@ TARGET_MAJOR=25 scripts/harness/run_migration_harness.sh --dry-run
 
 ### 1.3. Живой прогон harness (`--go`)
 
-> ⚠️ Honest note: harness в режиме `--go` **всегда собирает** хоп-образы из суверенной базы
-> (`acquisition=build`) — он **не** использует готовые pull/load образы. Поэтому для `--go` нужна
-> **лицензионная база** через `--os-base-image`. Если лицензионной базы нет — ограничьтесь dry-run
-> (раздел 1.1/1.2), а живую миграцию делайте на готовых образах через раздел 2.
+> ⚠️ Honest note: harness в режиме `--go` требует в окружении `HARNESS_DB_PASSWORD` и
+> `HARNESS_KC_ADMIN_PASSWORD` — без них он завершается до того, как что-либо поднимет.
+> Хоп-образы он собирает из суверенной базы (`acquisition=build`) только если их ещё нет:
+> `IMG_SKIP_IF_PRESENT` по умолчанию `true`, и уже загруженный образ переиспользуется. То есть
+> лицензионная база через `--os-base-image` нужна лишь тогда, когда образов на узле нет;
+> принудительная пересборка — `IMG_SKIP_IF_PRESENT=false`.
 
 Живой прогон поднимает свежую тестовую PG и требует два секрета в окружении:
 
@@ -321,8 +327,11 @@ scripts/migrate_oneshot.sh --target 26 --os astra --db-host <pg-host> --gen-prof
 Флаги: `--target 25|26`, `--os astra|redos`, `--source pull|bundle|preloaded`, `--image-ns <ref>`
 (дефолт `ghcr.io/alexgromer/keycloak-migration`), `--bundle <file>`, `--db-host/-port/-name/-user`,
 `--db-url <dsn>`, `--db-schema <s>`, `--env-file <file>`, `--wizard`, `--profile <имя>`,
-`--profile-name <имя>`, `--gen-profile-only`, `--pg-client-network <сеть>`, `--skip-preflight`, `--yes`,
-`--network`, `--pg-client-network`, `--profile-name`, `--gen-profile-only`, `--dry-run` (дефолт) / `--go`.
+`--profile-name <имя>`, `--gen-profile-only`, `--current <версия>`, `--work-dir <каталог>`,
+`--image-ref-template '<ref>:{version}'` (единственный способ указать образы с чужой схемой имён;
+литерал `{version}` обязателен), `--network <сеть>`, `--pg-client-network <сеть>`, `--apply-indexes`,
+`--no-resume`, `--force-unlock`, `--kill-stale`, `--skip-preflight`, `--yes`,
+`--dry-run` (дефолт) / `--go`.
 
 Разделы **2.1–2.5** ниже — тот же процесс **вручную, по шагам**, если нужен контроль/кастомизация.
 
@@ -376,7 +385,6 @@ keycloak:
 
   current_version: 16.1.1
   target_version: 26.6.3       # <-- Path B. Для Path A поставьте 25.0.6
-  run_container_name: kc-migrate
 
   registry: ghcr.io/alexgromer       # запасной вариант, если PROFILE_CONTAINER_IMAGE_REF не задан
   image: keycloak-migration
@@ -404,8 +412,11 @@ export PROFILE_DB_PASSWORD='<пароль-вашей-PostgreSQL>'   # единс
 
 # Если PostgreSQL запущена В КОНТЕЙНЕРЕ на bridge-сети:
 #   - в профиле host: = ИМЯ контейнера PG
-#   - и укажите сеть (по умолчанию контейнер-мигратор стартует с --network=host):
-# export PROFILE_KC_RUN_NETWORK=<docker-network>
+#   - и укажите сеть ОБЕИМ группам контейнеров (по умолчанию обе стартуют с --network=host):
+# export PROFILE_KC_RUN_NETWORK=<docker-network>      # контейнер Keycloak на каждом хопе
+# export PROFILE_PG_CLIENT_NETWORK=<docker-network>   # psql/pg_dump/pg_restore: preflight,
+#   advisory-lock, бэкап перед каждым хопом, verify. Без него имя контейнера PG не резолвится
+#   и preflight падает ещё до первого хопа. То же задаётся аргументом --pg-client-network.
 ```
 
 > При `--network=host` (по умолчанию) контейнер делит сеть с хостом, поэтому `host: localhost` в

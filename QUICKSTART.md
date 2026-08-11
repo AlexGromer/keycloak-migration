@@ -46,7 +46,9 @@ Keycloak **26.6.0** and **26.6.1** are refused outright: they carry migration-br
 
 **What the tool checks after every hop**, before it lets the next one start:
 
-- **L1** — Liquibase reported the changesets applied.
+- **L1** — the hop is applied: the wait ends as soon as the database says so (the Liquibase log
+  marker is only a fallback for setups without database access). L1 ends the wait; the two checks
+  below are what can actually fail a hop.
 - **L2** — `MIGRATION_MODEL` in the database now says the new version. This is the authority. Not the
   container's exit code, not an HTTP probe — the database.
 - **L3** — your data is still there: realm and user counts unchanged, client and role counts not
@@ -122,7 +124,8 @@ scripts/migrate_oneshot.sh --wizard
 ```
 
 Eight questions, with auto-discovery of what it can find. It writes `profiles/<name>.yaml` and then
-migrates with it.
+runs with it — as everywhere else, nothing is written until you add `--go`; without it you get a
+plan and the saved profile.
 
 ### Reusing a configuration
 
@@ -276,6 +279,11 @@ scripts/build_matrix.sh --build --pgclient   # per-hop images AND the sovereign 
 scripts/build_bundle.sh --os astra --go  # packs them, with a checksum
 ```
 
+> **Built into your own registry?** The bundle's tars carry the tags they were *built* with
+> (`$GHCR_IMAGE:<os>-<version>`, lowercased). Pass the same value as `--image-ns` at run time — or a
+> matching `--image-ref-template`. Otherwise every `cr load` succeeds and the run then stops with
+> *"the bundle loaded, but the image this run would start is absent"*.
+
 > The sovereign images are built **from your own licensed Astra/RED OS base**. The recipes
 > (`containerfiles/`) ship with this tool; the base images never do. See `docs/AIRGAP.md`.
 
@@ -297,6 +305,8 @@ would run. It touches nothing.
 **The harness** — a full migration against a *synthetic* database, on a throwaway PostgreSQL:
 
 ```bash
+export HARNESS_DB_PASSWORD='...'          # both are required for --go:
+export HARNESS_KC_ADMIN_PASSWORD='...'    # without them it exits before standing anything up
 scripts/harness/run_migration_harness.sh --go
 ```
 
@@ -353,8 +363,8 @@ cannot hold the Liquibase lock. To check the result:
 scripts/migrate_keycloak_v3.sh verify --profile <name>
 ```
 
-This boots **the same image that performed the migration** against the migrated database, with
-health enabled, and:
+This boots **the same image that performed the migration** against the migrated database, takes
+readiness from the container's startup log, and:
 
 - confirms `MIGRATION_MODEL` is at the target version,
 - confirms the data invariants still hold,

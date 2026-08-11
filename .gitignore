@@ -63,6 +63,9 @@ api_key.txt
 migration_workspace/
 work/
 dist/
+dist-rebuild/
+dist-rebuild-build.sh
+push_redos_hops.sh
 tmp/
 temp/
 scratch/
@@ -140,3 +143,5 @@ venv/
 
 # DOCX-документы поставки (на ревью, не коммитим)
 handover_docx/
+handover_docx_redos/
+proposal_docx/

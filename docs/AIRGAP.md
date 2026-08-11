@@ -64,7 +64,10 @@ export PROFILE_CONTAINER_IMAGE_REF="ghcr.io/<owner>/<repo>:astra-{version}"
 ```
 `dist_container` runs `cr load -i $PROFILE_CONTAINER_IMAGE_TAR` then verifies
 `cr image inspect`. **The `PROFILE_CONTAINER_IMAGE_REF` here MUST match the tag baked at
-build** (`ghcr.io/<owner>/<repo>:<os>-<version>`), or the post-load inspect fails.
+build** (`ghcr.io/<owner>/<repo>:<os>-<version>`), or the post-load inspect fails. The baked tag is
+the **lowercased** `GHCR_IMAGE` (OCI repository names must be lowercase, and the shipped example has
+a capitalised owner) — so write it lowercase on the run side too, not copied verbatim from
+`config/images.conf`.
 
 ### b) Pull from private GHCR (`acquisition=pull`)
 ```bash
@@ -91,19 +94,25 @@ runs steps 2–3, then packs a **per-OS air-gap bundle** and (with `publish`) at
 - **`build_matrix.sh --build --pgclient`** — the KC hop images **and** the sovereign pg-client
   image (`<os>-pgclient-<major>`, v3.9.7 autonomy, ADR-013).
 - **`build_bundle.sh --os <os> --go`** — packs `dist/kc-<os>-bundle.tar.xz`, carrying the four hop
-  tarballs **plus** `kc-<os>-pgclient-<major>.tar`. `migrate_oneshot.sh --source bundle` loads them
-  all, so an air-gapped node with **no host psql** still runs pg_dump/pg_restore/psql from the
-  bundled client (`PROFILE_PG_CLIENT_IMAGE`). A bundle without pg-client stays valid ONLY for a node that HAS host `psql`/`pg_dump`/`pg_restore`;
-  on a truly isolated node without them the migration stops at preflight with
-  `Tool missing: psql`. Check the `pg-client` line in the run banner to see which client was selected.
-  The node
-  then REQUIRES host psql: without it the run stops at preflight with `Tool missing: psql`.
-- **Per-OS prereleases:** `astra → alsebased-images-<run_id>-<run_attempt>`, `redos → redosbased-images-<run_id>`,
+  tarballs **plus** `kc-<os>-pgclient-<major>.tar`. `migrate_oneshot.sh --source bundle` loads the
+  hop images **this run** will boot plus the client — for `--current 16.1.1 --target 26` that is
+  24.0.5 and 26.6.3 (with `--target 25`, only 25.0.6). The 16.1.1 image ships as a reference point
+  and is never started. An air-gapped node with **no host psql** still runs pg_dump/pg_restore/psql
+  from the bundled client (`PROFILE_PG_CLIENT_IMAGE`). A bundle without pg-client is still usable:
+  preflight stops only when the node has neither a host binary **nor** any pg-client image (the
+  sovereign one, an explicit `PROFILE_PG_CLIENT_IMAGE`, or the announced `postgres:16` fallback).
+  Check the `pg-client` line in the run banner to see which client was selected.
+- **Per-OS prereleases:** `astra → alsebased-images-<run_id>-<run_attempt>`,
+  `redos → redosbased-images-<run_id>-<run_attempt>` (both use the same run tag),
   each carrying only its own bundle + `.sha256`.
 - **Size guard:** a bundle over GitHub's **2 GiB** asset cap is still built and uploaded as a CI
   artifact but is **not** attached to a prerelease — deliver it **out-of-band** from the runner's
   `dist/`. (The RED OS bundle with pg-client can exceed 2 GiB.)
 
 Register a self-hosted runner labelled `sovereign` in your contour; set GHCR package visibility to
-private in org settings. Inputs: `oses`, `versions`, `pg_client_major` (default `17`, must be ≥ DB
-server major), `build_pgclient` (default `true`), `publish` (default `false`).
+private in org settings. Inputs: `oses`, `versions`, `astra_base`, `astra_base_kc16`, `redos_base`,
+`ghcr_image`, `pg_client_major` (default `17`, must be ≥ DB server major), `build_pgclient`
+(default `true`), `publish` (default `false`). The three `*_base` inputs are how the licensed
+sovereign bases reach the CI build, and `ghcr_image` sets the namespace the bundle's tags are baked
+with — the value the run side must repeat via `--image-ns`. Note there is no `redos_base_kc16`
+input: the workflow reuses `redos_base` for the KC16 cell.

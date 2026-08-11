@@ -7,6 +7,62 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Documentation — 15 claims in the three documents the release archive ships did not match the code
+
+`release.yml` puts exactly three prose documents in the customer's tarball — QUICKSTART.md,
+docs/MIGRATION_GUIDE.md, docs/AIRGAP.md. An audit of every claim in them against the code confirmed
+15 defects (18 raised, 3 refuted on inspection). Three of them make a documented command fail.
+
+**Commands that cannot work as printed**
+
+- The harness quickstart shows `run_migration_harness.sh --go` with no mention of the two secrets it
+  refuses to start without: `HARNESS_DB_PASSWORD` and `HARNESS_KC_ADMIN_PASSWORD`. It exits before
+  standing anything up, while the prose promises a full seeded hop chain.
+- MIGRATION_GUIDE's sample profile pins `run_container_name: kc-migrate`. That name is used
+  verbatim, so every hop reuses it: the `docker logs kc-migrate-<version>-<db-token>` command two
+  sections later finds nothing, the leftover scan (`--filter name=kc-migrate-`) does not match it,
+  and the next run collides on "name already in use". `migrate_oneshot` deliberately leaves the key
+  empty; the sample now does too.
+- MIGRATION_GUIDE's container-database recipe exports only `PROFILE_KC_RUN_NETWORK`. That is the
+  Keycloak container alone. Every psql/pg_dump/pg_restore — preflight, the advisory lock, the backup
+  before each hop, verify — runs with `PROFILE_PG_CLIENT_NETWORK` (default `host`), where the
+  database container's name does not resolve, so preflight fails before the first hop.
+
+**Claims that were simply untrue**
+
+- "verify boots the image with health enabled" (QUICKSTART, plus the tool's own `--help` and two
+  comments). `KC_HEALTH_ENABLED` is a BUILD-time option and forcing it makes an optimized image
+  refuse to start — which is what broke the first verify attempt, and why the code deliberately does
+  not set it. Readiness comes from the startup log; the health probe is opportunistic and never
+  gates. Fixed in the documents **and** in `--help`, so the operator cannot read the old claim out
+  of the tool itself.
+- "L1 — Liquibase reported the changesets applied" as one of three post-hop gates. The wait ends on
+  the DATABASE; the Liquibase marker is a fallback for setups without database access, so on the
+  normal path no changeset confirmation happens at all. The gates that can fail a hop are L2 and L3.
+- "`--wizard` ... writes the profile and then migrates with it". `ONESHOT_DRY` defaults to true and
+  the hand-off appends `--dry-run`, so it plans — contradicting the document's own rule that nothing
+  is written without `--go`.
+- The bundle "loads them all" (AIRGAP). A run loads only the hops it will boot: 24.0.5 and 26.6.3 for
+  target 26, or 25.0.6 for target 25. The 16.1.1 image ships as a reference point and never starts.
+- "A bundle without pg-client REQUIRES host psql" (AIRGAP) — a duplicated sentence that also
+  contradicted the correct one above it: any resolvable pg-client image satisfies preflight.
+- The redos prerelease was documented as `redosbased-images-<run_id>`; both operating systems use the
+  same run tag, so the name an operator would search for did not exist.
+
+**Gaps that cost an operator a failed run**
+
+- The build-then-run flow never said that images built into your own registry carry those tags in the
+  bundle, and that the same value must be repeated as `--image-ns` at run time — otherwise every
+  `cr load` succeeds and the run stops with "the bundle loaded, but the image this run would start is
+  absent". Added to all three documents, including the lowercasing that build applies to the
+  namespace but a copied `GHCR_IMAGE` does not.
+- MIGRATION_GUIDE's oneshot flag list omitted seven real flags (`--image-ref-template`, `--current`,
+  `--work-dir`, `--apply-indexes`, `--no-resume`, `--force-unlock`, `--kill-stale`) and listed three
+  twice. AIRGAP's workflow-input list omitted four (`astra_base`, `astra_base_kc16`, `redos_base`,
+  `ghcr_image`) — the ones that carry the licensed bases and set the namespace.
+- The harness "always builds" note was stale: `IMG_SKIP_IF_PRESENT` defaults to true and an already
+  loaded image is reused, so a licensed base is needed only when the images are absent.
+
 ## [3.10.6] - 2026-08-10
 
 ### Fixed — sourcing `preflight_checks.sh` twice killed the caller outright

@@ -1450,7 +1450,7 @@ kc_health_endpoint() {
 # health_check [version] [endpoint]
 #   Returns HEALTH_OK / HEALTH_UNCONFIRMED / HEALTH_NOT_SERVED. NEVER gates a hop — see the
 #   Step 7 comment in migrate_to_version. For a real post-migration acceptance test (boots the
-#   target image with health enabled and exercises the Admin API), use the `verify` subcommand.
+#   target image and exercises the Admin API), use the `verify` subcommand.
 # shellcheck disable=SC2120 # optional args: callers may rely on the profile defaults
 health_check() {
     local version="${1:-${PROFILE_KC_TARGET_VERSION:-}}"
@@ -2713,7 +2713,9 @@ find_latest_backup() {
 #   good" had no answer — you were left with a database and no way to exercise it.
 #
 #   This boots the SAME sovereign image that performed the migration against the migrated database,
-#   with health enabled, exercises it, and removes the container again. Verifying against a stock
+#   takes readiness from its startup log (health is a BUILD-time option the sovereign image is not
+#   built with, and forcing it makes an optimized image refuse to start), exercises it, and removes
+#   the container again. Verifying against a stock
 #   Keycloak of the same version would test a different artifact than the one you are about to run.
 cmd_verify() {
     local profile="${1:-${PROFILE_NAME:-}}"
@@ -2956,7 +2958,7 @@ COMMANDS:
     plan                    Show migration plan without executing
     migrate                 Execute migration
     verify                  Acceptance-test the migrated database: boots the TARGET image against
-                            it with health enabled, checks L2 + data integrity + readiness, runs the
+                            it, checks L2 + data integrity + readiness, runs the
                             Admin API smoke tests (needs PROFILE_KC_ADMIN_USER/PASSWORD), removes
                             the container. This is what to run after a migration completes.
     rollback                Rollback to last backup
