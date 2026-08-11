@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [3.10.7] - 2026-08-11
+
 ### Documentation — 15 claims in the three documents the release archive ships did not match the code
 
 `release.yml` puts exactly three prose documents in the customer's tarball — QUICKSTART.md,
